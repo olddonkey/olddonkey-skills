@@ -1,0 +1,21 @@
+{
+  "name": "donkey-skills",
+  "owner": {
+    "name": "olddonkey"
+  },
+  "metadata": {
+    "description": "Agent skills distilled from real-world usage. First up: codex-implementation-loop — delegate implementation to Codex while keeping review, test-gating, and shipping judgment in Claude's hands.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "codex-implementation-loop",
+      "description": "A review-gated implementation loop: dispatch coding units to Codex (codex-companion runtime), review the diff, iterate on the same thread, gate on the full test suite, then ship as a PR. Encodes hard-won environment constraints (read-only git, no full-suite runs, stuck-job handling) and six user-configurable dials.",
+      "source": "./skills/codex-implementation-loop",
+      "strict": false,
+      "skills": [
+        "./"
+      ]
+    }
+  ]
+}
