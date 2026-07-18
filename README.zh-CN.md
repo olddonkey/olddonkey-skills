@@ -2,101 +2,135 @@
 
 # Olddonkey Skills
 
-**从真实使用中提炼的开源 [Agent Skills](https://support.claude.com/en/articles/12512176-what-are-skills) 集合，面向 Claude Code 及一切支持 `SKILL.md` 格式的 AI 编程代理。**
+**把实现交给 Codex，但不把判断交出去。**
+
+从真实跑过、摔过、修好过的工作流中提炼出的开源 [Agent Skills](https://agentskills.io)。
 
 [![License: MIT](https://img.shields.io/github/license/olddonkey/olddonkey-skills?style=flat-square&color=blue)](./LICENSE)
-[![Skills count](https://img.shields.io/badge/skills-1-orange?style=flat-square)](#skills)
 [![Spec](https://img.shields.io/badge/spec-SKILL.md-black?style=flat-square)](https://agentskills.io)
 
-[English](./README.md) · [中文文档](./README.zh-CN.md)
+[English](./README.md) · [简体中文](./README.zh-CN.md)
 
 </div>
 
 ---
 
-这里的每个 skill 都来自一条真实跑过、摔过、修好过的工作流——里面那些约束是用真实的调试时间换来的，不是拍脑袋想的。如果某条规则听起来格外具体（比如"绝不让 Codex 跑全套测试"），那是因为它曾经真的耗掉过一个下午。
+当前主打的 [`codex-implementation-loop`](./skills/codex-implementation-loop)，让 Claude Code 把实现交给 Codex，同时把 diff review、全量测试门禁和发布决策牢牢留在 Claude 手里。
 
-## Skills
+**Codex 负责实现并跑聚焦测试；Claude 亲自审查真实 diff、跑全量门禁，只发布自己敢签名的改动。**
 
-### [`codex-implementation-loop`](./skills/codex-implementation-loop)
+## 快速开始
 
-**类别：** 委派实现 / 编排
-**适合：** 按 plan / spec / TODO 逐单元推进的工程——Codex 写代码，Claude 负责 review、测试门禁与发布。
+### 1. 安装
 
-核心分工：**Codex 写代码，Claude 掌判断。** 循环为 *拆单元 → 派发 → review → 迭代 → 测试门禁 → 发布 → 下一个*：Claude 亲自读 diff（Codex 的自我汇报是主张，不是证据）、亲自跑全套测试，只发布自己敢签名的改动。
-
-亮点：
-
-- **六个用户可配置的"旋钮"**，每个仓库定一次并记录：停点（`worktree`/`commit`/`pr`/`merge`）、派发模式（`implement`/`read-only`）、门禁策略（`baseline`/`strict`/`skip`）、红灯处理（`stop`/`iterate`）、review 深度（`light`/`standard`/`deep`）、节奏（`confirm`/`continuous`）
-- **model / effort 默认继承用户自己的 Codex 配置**——flag 只做单次覆盖，并且 skill 知道哪些 effort 只能从 config 继承、哪些能走 flag
-- **专为"委派产出的 diff"设计的 review 清单**，专猎常规 code review 会漏的东西：默认值变更导致的静默回归、被改弱以求通过的测试、永远发不出去的 gitignore 文件、悄悄加的依赖、被软化的强制边界
-- **一批重新发现代价很高的环境约束**：Codex 跑在真实环境且 git 实际只读；绝不让它跑全套测试；卡死判据、取消命令、孤儿测试进程清理
-- **两个实战脚本**：`codex-dispatch.sh`（自动定位最新 companion 运行时、校验参数、打印 workspace 防派错目录）和 `run-gate.sh`（如实上报套件**真实** exit code——永不被管道吞掉，并支持 flaky 套件的基线对比）
-
-链接：[SKILL.md](./skills/codex-implementation-loop/SKILL.md) · [scripts](./skills/codex-implementation-loop/scripts)
-
-**依赖：** [Claude Code](https://claude.com/claude-code) + 官方 OpenAI Codex 插件（提供 `codex-companion` 运行时）+ 已登录的 `codex` CLI —— 安装步骤见下。
-
----
-
-## 前置 —— 装好 Codex
-
-本 skill 通过官方 [OpenAI Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) 驱动 Codex。装一次、登录一次，之后都由 skill 接管。
-
-在 Claude Code 里执行：
+在 Claude Code 里依次执行：
 
 ```text
 /plugin marketplace add openai/codex-plugin-cc
 /plugin install codex@openai-codex
+/plugin marketplace add olddonkey/olddonkey-skills
+/plugin install codex-implementation-loop@olddonkey-skills
 /reload-plugins
 /codex:setup
 ```
 
-`/codex:setup` 会检查 `codex` CLI 是否就绪——如果没装且机器上有 npm，它会主动提出帮你装。想手动装的话：
+`/codex:setup` 来自官方 [OpenAI Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc)，用于检查 Codex CLI 是否已安装并登录。该插件要求 Node.js 18.18 或更高版本；若本机有 npm，它可以主动提出帮你安装 CLI。也可以手动完成：
 
 ```bash
-npm install -g @openai/codex   # 需要 Node.js ≥ 18.18
-codex login                    # ChatGPT 账号（含免费版）或 OpenAI API key
+npm install -g @openai/codex
+codex login
 ```
 
-已经装过?用 CLI 自带的更新器保持最新：
+你可以使用 ChatGPT 账号（包括免费版）或 OpenAI API key 登录。已经装过？先用 `codex --version` 检查版本；若刚发布的新模型不可用，CLI 过旧是常见原因：
 
 ```bash
 codex update
 ```
 
-CLI 版本旧是"新模型看起来不存在"的头号原因——并且请用 `codex update` 而不是换渠道重装：一台机器上出现两份版本错开的 `codex`，是真实发生过的坑。
+### 2. 启动第一个循环
 
-> Codex 的用量计入你的 ChatGPT / API 使用额度——详见 [Codex 定价](https://developers.openai.com/codex/pricing)。
+在目标仓库中打开 Claude Code，然后直接说：
 
-## 安装
+> 使用 codex-implementation-loop 实现 PLAN.md 的第 1 项。停在 PR；门禁使用 baseline；review 深度为 standard；进入下一单元前先确认；model 和 effort 继承我的 Codex 配置。
 
-### 方式 A —— Claude Code 插件市场
+自然语言触发同时适用于插件市场和手动安装。第一次运行时，Claude 会在派发前说明最终采用的控制项，让成本、自动化程度和发布边界都清清楚楚。
 
-```text
-/plugin marketplace add olddonkey/olddonkey-skills
-/plugin install codex-implementation-loop@olddonkey-skills
-```
+## 循环如何工作
 
-### 方式 B —— 拷贝进个人 skills 目录
+**拆单元 → 派发 → review → 迭代 → 测试门禁 → 发布 → 下一个**
+
+1. Claude 把 plan、spec 或 TODO 拆成一个完整、可 review 的工程单元。
+2. Codex 在工作树中实现，并且只运行派发时指定的聚焦测试。
+3. Claude 阅读真实 diff、检查整个工作树，再把具体问题送回同一个 Codex thread 迭代。
+4. Claude 亲自跑全套测试，并按照选定的门禁策略判定结果。
+5. Claude 停在配置好的边界：工作树、commit、PR，或者经过明确授权的 merge。
+
+Codex 的总结只是检查地图，不是改动正确的证据；diff 和测试门禁才是证据。
+
+## 为什么使用它
+
+- **证据优先的 review。** 清单专门检查委派改动中常被普通 review 漏掉的问题：被改弱的测试、默认值导致的静默回归、无法发布的 gitignore 文件、悄悄新增的依赖，以及被软化的强制边界。
+- **有边界的自动化。** 六个控制项决定循环可以走多远、review 多深，以及门禁变红时怎么办。每个仓库只确定一次，不必每个单元重新争论。
+- **把昂贵的经验编码一次。** 工作流明确区分聚焦测试和全量门禁，按事件流识别卡死任务，并覆盖取消任务与清理孤儿进程。
+- **两个附带工具。** [`codex-dispatch.sh`](./skills/codex-implementation-loop/scripts/codex-dispatch.sh) 自动定位当前 companion 运行时并展示派发设置；[`run-gate.sh`](./skills/codex-implementation-loop/scripts/run-gate.sh) 保留测试套件的真实 exit code，并支持与基线失败项对比。
+
+完整工作流见 [`SKILL.md`](./skills/codex-implementation-loop/SKILL.md)。
+
+## 控制项
+
+Skill 为首次运行准备了保守选择；只需要指定你想改变的部分：
+
+| 控制项 | 常见首次选择 | 用途 |
+| --- | --- | --- |
+| 停点 | `pr` | 把改动留在工作树、提交 commit、创建 PR，或在明确授权后 merge |
+| 派发模式 | `implement` | 选择实际实现或只读调查 |
+| 门禁策略 | `baseline` | 要求不新增非 flaky 失败、要求零失败，或对无运行时影响的改动明确跳过门禁 |
+| 门禁变红 | `stop` | 停下来交给用户，或把失败送回 Codex 做有限次数的迭代 |
+| Review 深度 | `standard` | 选择 light、standard 或带独立复核的 deep review |
+| 节奏 | `confirm` | 在单元之间确认，或在发布策略安全时自动继续 |
+
+除非为某次任务明确覆盖，否则 model 和 effort 会继承用户自己的 Codex 配置。
+
+## 手动安装
+
+以下方式只替代“快速开始”中两条 `olddonkey-skills` 插件市场命令；仍然需要官方 Codex 插件和已登录的 Codex CLI。
+
+### 拷贝进个人 skills 目录
 
 ```bash
 git clone https://github.com/olddonkey/olddonkey-skills /tmp/olddonkey-skills
+mkdir -p ~/.claude/skills
 cp -R /tmp/olddonkey-skills/skills/codex-implementation-loop ~/.claude/skills/
 ```
 
-### 方式 C —— 直接 clone，pull 即升级
+### 用软链接连接 clone，pull 即升级
 
 ```bash
 git clone https://github.com/olddonkey/olddonkey-skills ~/Documents/olddonkey-skills
+mkdir -p ~/.claude/skills
 ln -s ~/Documents/olddonkey-skills/skills/codex-implementation-loop ~/.claude/skills/codex-implementation-loop
 ```
 
-> 若你的 agent 不跟随 skills 目录里的软链接，请用方式 B，`git pull` 后重新拷贝一次。
+如果你在 Claude Code 会话运行期间第一次创建 `~/.claude/skills` 顶层目录，请重启会话，让新目录被发现。若你的 agent 不跟随 skills 目录里的软链接，请使用拷贝方式，并在 `git pull` 后重新拷贝。
 
-## 兼容性
+## 兼容性与限制
 
-Skill 遵循标准 `SKILL.md` 格式（YAML frontmatter + Markdown 指令 + 附带 `scripts/`）。在 Claude Code 上构建与测试；任何读同一格式的代理理论上都能用，但附带的 shell 脚本假定 POSIX 环境（在 macOS 上开发）。
+- 指令采用开放的 `SKILL.md` 格式，但当前运行时和附带的派发脚本只针对 **Claude Code + 官方 [OpenAI Codex 插件](https://github.com/openai/codex-plugin-cc)** 构建与测试。
+- 其他 agent 可以复用这套工作流，但需要为自己的派发运行时编写适配层；`codex-dispatch.sh` 目前会在 Claude Code 的插件目录中寻找 `codex-companion`。
+- 脚本需要 Bash、Node.js 和常见 Unix 命令行工具；开发环境为 macOS。
+- Codex 与 Claude Code 使用同一份 checkout 和本机环境，其用量计入你的 ChatGPT 或 API 限额；详见 [Codex 定价](https://developers.openai.com/codex/pricing)。
+
+## 更新
+
+通过插件市场安装时，在 Claude Code 里执行：
+
+```text
+/plugin marketplace update olddonkey-skills
+/plugin update codex-implementation-loop@olddonkey-skills
+/reload-plugins
+```
+
+通过 clone 安装时执行 `git pull`；若使用拷贝方式，还需要重新拷贝 skill。
 
 ## 许可证
 

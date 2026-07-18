@@ -2,101 +2,135 @@
 
 # Olddonkey Skills
 
-**Open-source [Agent Skills](https://support.claude.com/en/articles/12512176-what-are-skills) distilled from real-world usage — for Claude Code and any agent that speaks the `SKILL.md` format.**
+**Delegate implementation to Codex without delegating judgment.**
+
+Open-source [Agent Skills](https://agentskills.io) distilled from workflows that ran, broke, and got fixed.
 
 [![License: MIT](https://img.shields.io/github/license/olddonkey/olddonkey-skills?style=flat-square&color=blue)](./LICENSE)
-[![Skills count](https://img.shields.io/badge/skills-1-orange?style=flat-square)](#skills)
 [![Spec](https://img.shields.io/badge/spec-SKILL.md-black?style=flat-square)](https://agentskills.io)
 
-[English](./README.md) · [中文文档](./README.zh-CN.md)
+[English](./README.md) · [简体中文](./README.zh-CN.md)
 
 </div>
 
 ---
 
-Every skill here was extracted from a workflow that actually ran, broke, and got fixed — the constraints encoded in them were paid for in real debugging hours, not imagined. Where a rule sounds oddly specific ("never let Codex run the full test suite"), that's because it once cost an afternoon.
+The featured skill, [`codex-implementation-loop`](./skills/codex-implementation-loop), lets Claude Code hand implementation to Codex while keeping diff review, full-suite gating, and release decisions in Claude's hands.
 
-## Skills
+**Codex implements and runs focused tests. Claude reviews the real diff, runs the full gate, and ships only what it would sign its name to.**
 
-### [`codex-implementation-loop`](./skills/codex-implementation-loop)
+## Quick start
 
-**Category:** Delegated implementation / orchestration
-**Good for:** working through a plan, spec, or TODO list where Codex writes the code and Claude owns review, test-gating, and shipping.
+### 1. Install
 
-A division of labor: **Codex writes the code, Claude keeps the judgment.** The loop runs *decompose → dispatch → review → iterate → gate → publish → next*, with Claude reading the actual diff (Codex's self-report is a claim, not evidence), running the full test suite itself, and shipping only what it would sign its name to.
-
-Highlights:
-
-- **Six user-configurable dials**, settled once per repo and recorded: stop point (`worktree`/`commit`/`pr`/`merge`), dispatch mode (`implement`/`read-only`), gate policy (`baseline`/`strict`/`skip`), on-gate-red (`stop`/`iterate`), review depth (`light`/`standard`/`deep`), cadence (`confirm`/`continuous`)
-- **Model/effort respect the user's own Codex config** by default — flags only override per-task, and the skill knows which effort levels are flag-reachable vs config-only
-- **A delegated-diff review checklist** that hunts what generic code review misses: silent regressions from changed defaults, tests weakened to pass, gitignored files that will never ship, quietly added dependencies, softened enforcement points
-- **Environment constraints that are expensive to rediscover**: Codex runs in the real environment with effectively read-only git; never ask it to run a full test suite; stuck-job heuristics, cancel commands, and orphaned-test-process cleanup
-- **Two battle-tested scripts**: `codex-dispatch.sh` (locates the newest companion runtime, validates flags, prints the workspace so wrong-directory dispatches are visible) and `run-gate.sh` (reports the *real* suite exit code — never masked by a pipe — with baseline comparison for flaky suites)
-
-Links: [SKILL.md](./skills/codex-implementation-loop/SKILL.md) · [scripts](./skills/codex-implementation-loop/scripts)
-
-**Requires:** [Claude Code](https://claude.com/claude-code) + the official OpenAI Codex plugin (provides the `codex-companion` runtime) + a logged-in `codex` CLI — setup steps below.
-
----
-
-## Prerequisite — set up Codex
-
-This skill drives Codex through the official [OpenAI Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc). Install and log in once; the skill handles everything after that.
-
-Inside Claude Code:
+Run these commands inside Claude Code:
 
 ```text
 /plugin marketplace add openai/codex-plugin-cc
 /plugin install codex@openai-codex
+/plugin marketplace add olddonkey/olddonkey-skills
+/plugin install codex-implementation-loop@olddonkey-skills
 /reload-plugins
 /codex:setup
 ```
 
-`/codex:setup` checks whether the `codex` CLI is ready — if it's missing and npm is available, it offers to install it for you. To do it manually instead:
+`/codex:setup` comes from the official [OpenAI Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc). It checks whether the Codex CLI is installed and authenticated. The plugin requires Node.js 18.18 or later and can offer to install the CLI when npm is available. To set it up manually instead:
 
 ```bash
-npm install -g @openai/codex   # requires Node.js ≥ 18.18
-codex login                    # ChatGPT account (incl. Free) or OpenAI API key
+npm install -g @openai/codex
+codex login
 ```
 
-Already installed? Keep it fresh with the CLI's own updater:
+You can sign in with a ChatGPT account, including Free, or an OpenAI API key. Already installed? Check `codex --version`; if a newly released model is unavailable, a stale CLI is a common cause:
 
 ```bash
 codex update
 ```
 
-A stale CLI is the usual reason a newly released model looks unavailable — and prefer `codex update` over reinstalling through a different channel, which can leave two skewed copies of `codex` on one machine.
+### 2. Start your first loop
 
-> Codex usage counts toward your ChatGPT / API usage limits — see [Codex pricing](https://developers.openai.com/codex/pricing).
+Open the target repository in Claude Code and ask naturally:
 
-## Install
+> Use codex-implementation-loop to implement item 1 in PLAN.md. Stop at a PR, use the baseline gate, review at standard depth, confirm before the next unit, and inherit my Codex model and effort settings.
 
-### Option A — Claude Code plugin marketplace
+Natural-language invocation works with both marketplace and manual installations. On the first run, Claude states the resolved controls before dispatching so cost, autonomy, and the publish boundary are visible.
 
-```text
-/plugin marketplace add olddonkey/olddonkey-skills
-/plugin install codex-implementation-loop@olddonkey-skills
-```
+## How the loop works
 
-### Option B — copy into your personal skills directory
+**decompose → dispatch → review → iterate → gate → publish → next**
+
+1. Claude turns a plan, spec, or TODO into one coherent, reviewable unit.
+2. Codex implements it in the working tree and runs only the focused tests named in the dispatch.
+3. Claude reads the actual diff, checks the whole working tree, and sends concrete findings back on the same Codex thread.
+4. Claude runs the full test suite itself and interprets it under the chosen gate policy.
+5. Claude stops at the configured boundary: working tree, commit, PR, or an explicitly authorized merge.
+
+Codex's summary is a map of where to look, not proof that the change is correct. The diff and the gate are the evidence.
+
+## Why use it
+
+- **Evidence-first review.** The checklist targets delegated-change failures that generic review often misses: weakened tests, silent default regressions, gitignored files, new dependencies, and softened enforcement points.
+- **Bounded autonomy.** Six controls settle how far the loop may act, how deeply it reviews, and what happens when the gate is red. They are chosen once per repository instead of re-litigated on every unit.
+- **Expensive lessons encoded once.** The workflow distinguishes focused tests from the full gate, detects stuck jobs by their event stream, and covers cancellation plus orphaned-process cleanup.
+- **Two bundled helpers.** [`codex-dispatch.sh`](./skills/codex-implementation-loop/scripts/codex-dispatch.sh) locates the live companion runtime and makes dispatch settings visible; [`run-gate.sh`](./skills/codex-implementation-loop/scripts/run-gate.sh) preserves the suite's real exit code and can compare failures with a baseline.
+
+Read the complete workflow in [`SKILL.md`](./skills/codex-implementation-loop/SKILL.md).
+
+## Controls
+
+The skill has conservative first-run choices. Specify only the values you want to change:
+
+| Control | Typical first run | Purpose |
+| --- | --- | --- |
+| Stop point | `pr` | Leave changes in the working tree, commit them, open a PR, or merge when explicitly authorized |
+| Dispatch mode | `implement` | Choose an implementation run or a read-only investigation |
+| Gate policy | `baseline` | Require no new non-flake failures, zero failures, or explicitly skip the gate for non-runtime changes |
+| On gate red | `stop` | Stop for the user or send failures back for a bounded number of iterations |
+| Review depth | `standard` | Choose light, standard, or independent deep review |
+| Cadence | `confirm` | Confirm between units or continue automatically when the publish strategy makes that safe |
+
+Model and effort inherit the user's Codex configuration unless explicitly overridden for a task.
+
+## Manual installation
+
+These options replace only the two `olddonkey-skills` marketplace commands in Quick start. The official Codex plugin and an authenticated Codex CLI are still required.
+
+### Copy into your personal skills directory
 
 ```bash
 git clone https://github.com/olddonkey/olddonkey-skills /tmp/olddonkey-skills
+mkdir -p ~/.claude/skills
 cp -R /tmp/olddonkey-skills/skills/codex-implementation-loop ~/.claude/skills/
 ```
 
-### Option C — git clone straight into skills (pull to update)
+### Symlink a clone for pull-to-update
 
 ```bash
 git clone https://github.com/olddonkey/olddonkey-skills ~/Documents/olddonkey-skills
+mkdir -p ~/.claude/skills
 ln -s ~/Documents/olddonkey-skills/skills/codex-implementation-loop ~/.claude/skills/codex-implementation-loop
 ```
 
-> If your agent doesn't follow symlinks in the skills directory, use Option B and re-copy after `git pull`.
+If you created `~/.claude/skills` for the first time during an active Claude Code session, restart the session so the new top-level directory is discovered. If your agent does not follow symlinks in its skills directory, use the copy option and re-copy after `git pull`.
 
-## Compatibility
+## Compatibility and limits
 
-Skills follow the plain `SKILL.md` format (YAML frontmatter + Markdown instructions + bundled `scripts/`). Built and tested with Claude Code; anything that reads the same format should work, though the bundled shell scripts assume a POSIX environment (developed on macOS).
+- The instructions use the open `SKILL.md` format, but the current runtime and bundled dispatch script are built and tested for **Claude Code plus the official [OpenAI Codex plugin](https://github.com/openai/codex-plugin-cc)**.
+- Other agents can reuse the workflow, but they need an adapter for their own dispatch runtime; `codex-dispatch.sh` currently discovers `codex-companion` inside Claude Code's plugin directories.
+- The scripts require Bash, Node.js, and common Unix command-line tools. They were developed on macOS.
+- Codex runs on the same checkout and machine-local environment as Claude Code. Its usage counts toward your ChatGPT or API limits; see [Codex pricing](https://developers.openai.com/codex/pricing).
+
+## Update
+
+For a marketplace installation, run inside Claude Code:
+
+```text
+/plugin marketplace update olddonkey-skills
+/plugin update codex-implementation-loop@olddonkey-skills
+/reload-plugins
+```
+
+For a cloned installation, run `git pull`; re-copy the skill when using the copy method.
 
 ## License
 
