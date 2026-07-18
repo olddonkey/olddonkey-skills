@@ -1,10 +1,10 @@
 <div align="center">
 
-# Donkey Skills
+# Olddonkey Skills
 
 **从真实使用中提炼的开源 [Agent Skills](https://support.claude.com/en/articles/12512176-what-are-skills) 集合，面向 Claude Code 及一切支持 `SKILL.md` 格式的 AI 编程代理。**
 
-[![License: MIT](https://img.shields.io/github/license/olddonkey/donkey-skills?style=flat-square&color=blue)](./LICENSE)
+[![License: MIT](https://img.shields.io/github/license/olddonkey/olddonkey-skills?style=flat-square&color=blue)](./LICENSE)
 [![Skills count](https://img.shields.io/badge/skills-1-orange?style=flat-square)](#skills)
 [![Spec](https://img.shields.io/badge/spec-SKILL.md-black?style=flat-square)](https://agentskills.io)
 
@@ -44,22 +44,22 @@
 ### 方式 A —— Claude Code 插件市场
 
 ```text
-/plugin marketplace add olddonkey/donkey-skills
-/plugin install codex-implementation-loop@donkey-skills
+/plugin marketplace add olddonkey/olddonkey-skills
+/plugin install codex-implementation-loop@olddonkey-skills
 ```
 
 ### 方式 B —— 拷贝进个人 skills 目录
 
 ```bash
-git clone https://github.com/olddonkey/donkey-skills /tmp/donkey-skills
-cp -R /tmp/donkey-skills/skills/codex-implementation-loop ~/.claude/skills/
+git clone https://github.com/olddonkey/olddonkey-skills /tmp/olddonkey-skills
+cp -R /tmp/olddonkey-skills/skills/codex-implementation-loop ~/.claude/skills/
 ```
 
 ### 方式 C —— 直接 clone，pull 即升级
 
 ```bash
-git clone https://github.com/olddonkey/donkey-skills ~/Documents/donkey-skills
-ln -s ~/Documents/donkey-skills/skills/codex-implementation-loop ~/.claude/skills/codex-implementation-loop
+git clone https://github.com/olddonkey/olddonkey-skills ~/Documents/olddonkey-skills
+ln -s ~/Documents/olddonkey-skills/skills/codex-implementation-loop ~/.claude/skills/codex-implementation-loop
 ```
 
 > 若你的 agent 不跟随 skills 目录里的软链接，请用方式 B，`git pull` 后重新拷贝一次。

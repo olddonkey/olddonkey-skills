@@ -1,10 +1,10 @@
 <div align="center">
 
-# Donkey Skills
+# Olddonkey Skills
 
 **Open-source [Agent Skills](https://support.claude.com/en/articles/12512176-what-are-skills) distilled from real-world usage — for Claude Code and any agent that speaks the `SKILL.md` format.**
 
-[![License: MIT](https://img.shields.io/github/license/olddonkey/donkey-skills?style=flat-square&color=blue)](./LICENSE)
+[![License: MIT](https://img.shields.io/github/license/olddonkey/olddonkey-skills?style=flat-square&color=blue)](./LICENSE)
 [![Skills count](https://img.shields.io/badge/skills-1-orange?style=flat-square)](#skills)
 [![Spec](https://img.shields.io/badge/spec-SKILL.md-black?style=flat-square)](https://agentskills.io)
 
@@ -44,22 +44,22 @@ Links: [SKILL.md](./skills/codex-implementation-loop/SKILL.md) · [scripts](./sk
 ### Option A — Claude Code plugin marketplace
 
 ```text
-/plugin marketplace add olddonkey/donkey-skills
-/plugin install codex-implementation-loop@donkey-skills
+/plugin marketplace add olddonkey/olddonkey-skills
+/plugin install codex-implementation-loop@olddonkey-skills
 ```
 
 ### Option B — copy into your personal skills directory
 
 ```bash
-git clone https://github.com/olddonkey/donkey-skills /tmp/donkey-skills
-cp -R /tmp/donkey-skills/skills/codex-implementation-loop ~/.claude/skills/
+git clone https://github.com/olddonkey/olddonkey-skills /tmp/olddonkey-skills
+cp -R /tmp/olddonkey-skills/skills/codex-implementation-loop ~/.claude/skills/
 ```
 
 ### Option C — git clone straight into skills (pull to update)
 
 ```bash
-git clone https://github.com/olddonkey/donkey-skills ~/Documents/donkey-skills
-ln -s ~/Documents/donkey-skills/skills/codex-implementation-loop ~/.claude/skills/codex-implementation-loop
+git clone https://github.com/olddonkey/olddonkey-skills ~/Documents/olddonkey-skills
+ln -s ~/Documents/olddonkey-skills/skills/codex-implementation-loop ~/.claude/skills/codex-implementation-loop
 ```
 
 > If your agent doesn't follow symlinks in the skills directory, use Option B and re-copy after `git pull`.
