@@ -59,6 +59,14 @@ npm install -g @openai/codex   # requires Node.js ≥ 18.18
 codex login                    # ChatGPT account (incl. Free) or OpenAI API key
 ```
 
+Already installed? Keep it fresh with the CLI's own updater:
+
+```bash
+codex update
+```
+
+A stale CLI is the usual reason a newly released model looks unavailable — and prefer `codex update` over reinstalling through a different channel, which can leave two skewed copies of `codex` on one machine.
+
 > Codex usage counts toward your ChatGPT / API usage limits — see [Codex pricing](https://developers.openai.com/codex/pricing).
 
 ## Install

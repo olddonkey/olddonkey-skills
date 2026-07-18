@@ -59,6 +59,14 @@ npm install -g @openai/codex   # 需要 Node.js ≥ 18.18
 codex login                    # ChatGPT 账号（含免费版）或 OpenAI API key
 ```
 
+已经装过?用 CLI 自带的更新器保持最新：
+
+```bash
+codex update
+```
+
+CLI 版本旧是"新模型看起来不存在"的头号原因——并且请用 `codex update` 而不是换渠道重装：一台机器上出现两份版本错开的 `codex`，是真实发生过的坑。
+
 > Codex 的用量计入你的 ChatGPT / API 使用额度——详见 [Codex 定价](https://developers.openai.com/codex/pricing)。
 
 ## 安装

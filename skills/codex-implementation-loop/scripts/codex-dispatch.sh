@@ -135,6 +135,10 @@ describe() { # $1=label $2=chosen value $3=config key
 
 echo "companion: $COMPANION" >&2
 echo "workspace: $(pwd)" >&2
+# Surface the CLI version on every dispatch: a stale codex is the usual
+# reason a newly released model "doesn't exist", and skew between multiple
+# installs is invisible unless someone prints what's actually running.
+command -v codex >/dev/null 2>&1 && echo "codex  : $(codex --version 2>/dev/null || echo '?')" >&2
 describe "model " "$MODEL"  "model" >&2
 describe "effort" "$EFFORT" "model_reasoning_effort" >&2
 if [[ $READ_ONLY -eq 1 ]]; then

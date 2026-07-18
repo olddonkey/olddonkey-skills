@@ -76,6 +76,7 @@ How resolution works, which shapes the choice:
 - **Pass a flag** to override for this task only. Never edit their global config to force a setting — that changes their own Codex use outside this loop.
 - **`ultra` and `max` efforts are real but flag-rejected.** The wrapper accepts only `none|minimal|low|medium|high|xhigh`; the higher two exist only as `model_reasoning_effort` in config.toml. So the way to run at max is to *omit* `--effort` and let config supply it. If the user asks for max, don't pass it — explain this and inherit.
 - **Model names are passed through to the CLI as-is** — nothing here maintains a model list, so new Codex models work the day they ship; availability depends on the user's account. Aliases may exist in the companion (as of 1.0.6, `spark` → `gpt-5.3-codex-spark`). **Model names age fast; never recommend one from memory.** When unsure what the user has or what's current, read `~/.codex/config.toml` first, then ask.
+- **A "missing" model usually means a stale CLI, not a wrong name.** New models require a recent `codex` CLI. Before concluding a model or flag is unavailable, check `codex --version` (the dispatch script prints it on every run). The safe update path is **`codex update`** — the CLI's own updater works regardless of how it was installed. Don't reinstall through a different channel (e.g. npm on top of a standalone install): two skewed copies of `codex` on one machine is a real failure mode, where a model "doesn't exist" until the copy actually being used gets updated. The CLI is the user's environment — get their OK before updating, and update between units rather than mid-unit so a version change doesn't muddy attribution.
 
 Reasonable way to pick, if the user wants a recommendation: raise effort for work where a subtle mistake is expensive to catch downstream — anything touching correctness boundaries, concurrency, or migrations — and lower it for mechanical, well-specified edits where the spec leaves little room for judgment. Model choice usually follows whatever they're already running; the interesting dial is effort.
 
@@ -232,6 +233,7 @@ Work these out once and record them (CLAUDE.md or memory) so future sessions ski
 
 - **The six dials above** — stop point, dispatch mode, gate policy, on-red behavior, review depth, cadence. Recording them is what lets later sessions resume without re-litigating settled decisions.
 - **Model and effort** for this project, and whether to inherit the user's config or override.
+- **CLI freshness**: note `codex --version` at loop start. When a model or flag seems missing later, a stale CLI is the first suspect — check the version before debugging anything else.
 - The exact full-suite command, its runtime, and whether serial or parallel is faster.
 - Known environment flakes on this machine, so the gate has a baseline. Keep a base-branch gate log around for `--baseline` comparison — and regenerate it after each merge, because the baseline is the base branch as it is *now*, not as it was last week.
 - Whether CI is trustworthy.
