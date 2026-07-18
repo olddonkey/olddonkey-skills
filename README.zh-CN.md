@@ -35,9 +35,31 @@
 
 链接：[SKILL.md](./skills/codex-implementation-loop/SKILL.md) · [scripts](./skills/codex-implementation-loop/scripts)
 
-**依赖：** [Claude Code](https://claude.com/claude-code) + [OpenAI Codex 插件](https://github.com/openai/codex)（提供 `codex-companion` 运行时）+ 已登录的 `codex` CLI。
+**依赖：** [Claude Code](https://claude.com/claude-code) + 官方 OpenAI Codex 插件（提供 `codex-companion` 运行时）+ 已登录的 `codex` CLI —— 安装步骤见下。
 
 ---
+
+## 前置 —— 装好 Codex
+
+本 skill 通过官方 [OpenAI Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) 驱动 Codex。装一次、登录一次，之后都由 skill 接管。
+
+在 Claude Code 里执行：
+
+```text
+/plugin marketplace add openai/codex-plugin-cc
+/plugin install codex@openai-codex
+/reload-plugins
+/codex:setup
+```
+
+`/codex:setup` 会检查 `codex` CLI 是否就绪——如果没装且机器上有 npm，它会主动提出帮你装。想手动装的话：
+
+```bash
+npm install -g @openai/codex   # 需要 Node.js ≥ 18.18
+codex login                    # ChatGPT 账号（含免费版）或 OpenAI API key
+```
+
+> Codex 的用量计入你的 ChatGPT / API 使用额度——详见 [Codex 定价](https://developers.openai.com/codex/pricing)。
 
 ## 安装
 

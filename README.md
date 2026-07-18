@@ -35,9 +35,31 @@ Highlights:
 
 Links: [SKILL.md](./skills/codex-implementation-loop/SKILL.md) · [scripts](./skills/codex-implementation-loop/scripts)
 
-**Requires:** [Claude Code](https://claude.com/claude-code) with the [OpenAI Codex plugin](https://github.com/openai/codex) installed (provides the `codex-companion` runtime), and a working `codex` CLI login.
+**Requires:** [Claude Code](https://claude.com/claude-code) + the official OpenAI Codex plugin (provides the `codex-companion` runtime) + a logged-in `codex` CLI — setup steps below.
 
 ---
+
+## Prerequisite — set up Codex
+
+This skill drives Codex through the official [OpenAI Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc). Install and log in once; the skill handles everything after that.
+
+Inside Claude Code:
+
+```text
+/plugin marketplace add openai/codex-plugin-cc
+/plugin install codex@openai-codex
+/reload-plugins
+/codex:setup
+```
+
+`/codex:setup` checks whether the `codex` CLI is ready — if it's missing and npm is available, it offers to install it for you. To do it manually instead:
+
+```bash
+npm install -g @openai/codex   # requires Node.js ≥ 18.18
+codex login                    # ChatGPT account (incl. Free) or OpenAI API key
+```
+
+> Codex usage counts toward your ChatGPT / API usage limits — see [Codex pricing](https://developers.openai.com/codex/pricing).
 
 ## Install
 
