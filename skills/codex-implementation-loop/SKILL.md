@@ -55,7 +55,7 @@ Use `scripts/codex-dispatch.sh` (bundled), which locates the newest installed co
 ```bash
 scripts/codex-dispatch.sh --prompt-file /path/to/prompt.txt            # inherit user's config
 scripts/codex-dispatch.sh --prompt-file /path/to/prompt.txt \
-    --model gpt-5.6-sol --effort xhigh                                 # explicit override
+    --model gpt-5.6-sol --effort xhigh          # explicit override (model name is an example — they age)
 ```
 
 Dispatch hygiene — each of these failure modes is silent when it happens:
@@ -75,7 +75,7 @@ How resolution works, which shapes the choice:
 - **Omit both flags** and the Codex CLI resolves from the user's `~/.codex/config.toml`. This is the default the script uses, because it honors the setup the user already chose for themselves.
 - **Pass a flag** to override for this task only. Never edit their global config to force a setting — that changes their own Codex use outside this loop.
 - **`ultra` and `max` efforts are real but flag-rejected.** The wrapper accepts only `none|minimal|low|medium|high|xhigh`; the higher two exist only as `model_reasoning_effort` in config.toml. So the way to run at max is to *omit* `--effort` and let config supply it. If the user asks for max, don't pass it — explain this and inherit.
-- **`spark` is a model alias** (→ `gpt-5.3-codex-spark`); any other value is passed through to the CLI as-is, so availability depends on their account rather than a fixed list. When unsure what they have, read `~/.codex/config.toml` instead of guessing.
+- **Model names are passed through to the CLI as-is** — nothing here maintains a model list, so new Codex models work the day they ship; availability depends on the user's account. Aliases may exist in the companion (as of 1.0.6, `spark` → `gpt-5.3-codex-spark`). **Model names age fast; never recommend one from memory.** When unsure what the user has or what's current, read `~/.codex/config.toml` first, then ask.
 
 Reasonable way to pick, if the user wants a recommendation: raise effort for work where a subtle mistake is expensive to catch downstream — anything touching correctness boundaries, concurrency, or migrations — and lower it for mechanical, well-specified edits where the spec leaves little room for judgment. Model choice usually follows whatever they're already running; the interesting dial is effort.
 
@@ -85,11 +85,11 @@ To give one project a standing preference without touching the user's global con
 
 ```
 codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] \
-                         [--model <model>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]
+                         [--model <model>] [--effort <level>] [prompt]
 ```
 
 - **`--write` is required** for Codex to modify files. Without it the workspace is read-only and it will politely explain it can't change anything.
-- **`--effort max` is rejected.** The wrapper accepts only `none|minimal|low|medium|high|xhigh`. `max` exists only as a global default in `~/.codex/config.toml`; if the user wants max, they already have it there — don't pass it as a flag, and don't edit their global config to force it, since that affects their own Codex use outside this loop.
+- **The accepted `--effort` levels belong to the installed companion, not to this document.** As of plugin 1.0.6 they are `none|minimal|low|medium|high|xhigh`, with `max`/`ultra` rejected as flags (config-only) — but the dispatch script reads the live list out of the installed companion at runtime, so trust its error message over any remembered list. If the user wants a config-only level like `max`, omit `--effort` so the CLI inherits it from `~/.codex/config.toml`; don't edit their global config to force it, since that affects their own Codex use outside this loop.
 - The prompt is the trailing positional argument.
 - With no resume flag, every invocation starts a **fresh thread** — right for a new unit. `--resume-last` continues the most recent thread, which is how you send review findings back with context intact; don't reuse a previous unit's thread for a new unit, or its framing bleeds in.
 

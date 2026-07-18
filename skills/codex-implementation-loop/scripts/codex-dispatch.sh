@@ -44,6 +44,8 @@ READ_ONLY=0
 BACKGROUND=0
 EXTRA=()
 
+# Fallback snapshot (companion 1.0.6). The live list is read from the
+# installed companion below — the wrapper is the authority, not this file.
 VALID_EFFORTS="none minimal low medium high xhigh"
 
 usage() {
@@ -67,20 +69,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# The wrapper accepts only these levels. `ultra` and `max` are real Codex
-# efforts but reachable only via model_reasoning_effort in config.toml —
-# passing either as a flag fails the whole dispatch. Omit --effort to
-# inherit whatever the user configured, including those two.
-if [[ -n "$EFFORT" && " $VALID_EFFORTS " != *" $EFFORT "* ]]; then
-  echo "invalid --effort '$EFFORT'; wrapper accepts: $VALID_EFFORTS" >&2
-  if [[ "$EFFORT" == "max" || "$EFFORT" == "ultra" ]]; then
-    echo "note: '$EFFORT' exists, but only as model_reasoning_effort in ~/.codex/config.toml." >&2
-    echo "      To use it, omit --effort so the CLI inherits the user's config." >&2
-    echo "      Don't edit their global config to force it — that changes their own Codex use." >&2
-  fi
-  exit 2
-fi
-
 if [[ -n "$PROMPT_FILE" ]]; then
   [[ -f "$PROMPT_FILE" ]] || { echo "prompt file not found: $PROMPT_FILE" >&2; exit 2; }
   PROMPT="$(cat "$PROMPT_FILE")"
@@ -99,6 +87,26 @@ fi
   echo "codex-companion.mjs not found; is the Codex plugin installed?" >&2
   exit 3
 }
+
+# Ask the INSTALLED companion which efforts it accepts — the list changes
+# across plugin versions, so read it at runtime instead of freezing a copy
+# here. Falls back to the snapshot above if the usage string moves.
+DETECTED_EFFORTS="$(grep -oE -- '--effort <[a-z|]+>' "$COMPANION" 2>/dev/null \
+                    | head -1 | sed -E 's/.*<([a-z|]+)>.*/\1/' | tr '|' ' ')"
+[[ -n "$DETECTED_EFFORTS" ]] && VALID_EFFORTS="$DETECTED_EFFORTS"
+
+# `ultra` and `max` are real Codex efforts but (as of 1.0.6) reachable only
+# via model_reasoning_effort in config.toml — passing either as a flag fails
+# the whole dispatch. Omit --effort to inherit whatever the user configured.
+if [[ -n "$EFFORT" && " $VALID_EFFORTS " != *" $EFFORT "* ]]; then
+  echo "invalid --effort '$EFFORT'; this companion accepts: $VALID_EFFORTS" >&2
+  if [[ "$EFFORT" == "max" || "$EFFORT" == "ultra" ]]; then
+    echo "note: '$EFFORT' exists, but only as model_reasoning_effort in ~/.codex/config.toml." >&2
+    echo "      To use it, omit --effort so the CLI inherits the user's config." >&2
+    echo "      Don't edit their global config to force it — that changes their own Codex use." >&2
+  fi
+  exit 2
+fi
 
 ARGS=(task)
 # Write access is what makes this an implementation run. Withholding it is
