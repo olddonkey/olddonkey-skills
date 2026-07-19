@@ -7,6 +7,8 @@ description: 'Delegate implementation work to Codex (via the codex-companion run
 
 A division of labor: **Codex writes the code, you own the judgment.** Codex is fast and thorough at implementation but it self-reports success, cannot commit, and will happily hang a machine if pointed at a long test suite. Your job is to give it a precise spec, then be the thing that actually verifies and ships.
 
+**This includes bug fixes.** A bug found at review, at the gate, or reported after shipping is a unit like any other: you diagnose and spec it, Codex implements the fix. If you catch yourself editing the code directly "because it's faster", the division of labor has silently inverted — and review has lost its independence, because you'd be reviewing your own work.
+
 The loop: **decompose → dispatch → review → iterate → gate → publish → next**.
 
 Do not skip review because Codex says it's done. Its summary is a claim; the diff is the evidence. In practice the highest-value findings come from reading the diff — silent behavior regressions, tests weakened to pass, gitignored files that will never ship.
@@ -25,6 +27,7 @@ These change what the loop does to the user's repo, so they're the user's call. 
 | **On gate red** | `stop` / `iterate` | `stop` |
 | **Review depth** | `light` / `standard` / `deep` | `standard` |
 | **Cadence** | `confirm` / `continuous` | ask first, then `continuous` |
+| **Fix lane** | `codex` / `claude-trivial-ok` | `codex` |
 
 **Stop point** decides how far each unit travels — leave changes in the working tree, commit to a branch, open a PR, or merge. It's the only dial that bounds irreversible action, which makes it the one worth being explicit about. `pr` is the default because a PR is a reviewable artifact that costs nothing to abandon, while merging is the step you can't quietly undo. Only use `merge` when the user has actually authorized autonomous merging; that authorization is per-project and doesn't carry over from another repo or another session.
 
@@ -39,6 +42,8 @@ Stop point and cadence interact: with a stop point short of `merge`, the unit ha
 **Review depth** — `standard` is the checklist below. `deep` adds an independent reviewer that hasn't seen the dispatch prompt, which is worth the cost when a change touches a correctness or security boundary, concurrency, migrations, auth, or money — places where a plausible-looking diff can be wrong in ways the author's framing hides. `light` still reads the whole diff; it just spends less time hunting on genuinely mechanical edits. Depth is a dial on rigor, not permission to skip reading the diff.
 
 **Cadence** — `continuous` moves to the next unit without checking in, which is the point of a loop once the user trusts it. `confirm` pauses after each unit. Worth asking once up front, because assuming `continuous` on the first run means a lot of merged work before anyone looks.
+
+**Fix lane** — who implements bug fixes. `codex` (the default) means every fix is a unit: diagnosis and spec are your lane, the change itself is Codex's, and review keeps its independence because the reviewer didn't write the fix. This is the dial most prone to silent drift — hand-fixing always feels faster in the moment, and each hand-fix quietly re-inverts the division of labor the user asked for. `claude-trivial-ok` is a user-granted carve-out for mechanical one-liners (a typo, a quoting fix, a comment) where a dispatch round genuinely costs more than the change; it must be explicitly granted, never assumed, and anything touching logic still goes to Codex. Under the carve-out the gate still runs — it's the only independent check left when implementer and reviewer are the same mind.
 
 ---
 
@@ -182,6 +187,10 @@ scripts/codex-dispatch.sh --resume --prompt-file review-findings.txt
 
 Then review again. Repeat until the diff is something you'd sign your name to — which you're about to.
 
+### Bugs that surface later
+
+A bug found outside an active thread — a later regression, a user report, something you notice in passing — is a **new unit**, not a hand-edit (see the fix-lane dial). Diagnose first: yourself for most things, or a `read-only` dispatch for the gnarly ones. Then dispatch the fix on a **fresh thread** with the diagnosis in the prompt — the repro, the root cause as you understand it, the shape of the expected fix, and the regression test you expect. A fix without a test that would have caught the bug is incomplete. Then review, gate, and ship it like any other unit.
+
 ## 5. Gate on the full test suite
 
 Run the whole suite yourself before publishing. Two details matter:
@@ -231,7 +240,7 @@ Keep going on your own except when:
 
 Work these out once and record them (CLAUDE.md or memory) so future sessions skip the discovery:
 
-- **The six dials above** — stop point, dispatch mode, gate policy, on-red behavior, review depth, cadence. Recording them is what lets later sessions resume without re-litigating settled decisions.
+- **The seven dials above** — stop point, dispatch mode, gate policy, on-red behavior, review depth, cadence, fix lane. Recording them is what lets later sessions resume without re-litigating settled decisions.
 - **Model and effort** for this project, and whether to inherit the user's config or override.
 - **CLI freshness**: note `codex --version` at loop start. When a model or flag seems missing later, a stale CLI is the first suspect — check the version before debugging anything else.
 - The exact full-suite command, its runtime, and whether serial or parallel is faster.
