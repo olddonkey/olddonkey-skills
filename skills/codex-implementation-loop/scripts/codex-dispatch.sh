@@ -141,6 +141,8 @@ echo "workspace: $(pwd)" >&2
 command -v codex >/dev/null 2>&1 && echo "codex  : $(codex --version 2>/dev/null || echo '?')" >&2
 describe "model " "$MODEL"  "model" >&2
 describe "effort" "$EFFORT" "model_reasoning_effort" >&2
+# Tier has no per-task flag — always inherited — so show what will apply.
+describe "tier  " ""        "service_tier" >&2
 if [[ $READ_ONLY -eq 1 ]]; then
   echo "mode  : READ-ONLY (no file writes; nothing to review/gate/publish)" >&2
 else
