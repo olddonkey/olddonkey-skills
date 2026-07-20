@@ -102,7 +102,7 @@ Repeat until the diff is something you'd sign. A bug that surfaces **outside** a
 Run the whole suite yourself via the bundled helper — piping through `tail` masks the real exit code:
 
 ```bash
-# strict policy — the suite's real exit code passes through:
+# strict policy — real exit code (forced red if the runner's own summary disagrees):
 "${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log -- <test command>
 # baseline policy ONLY — tolerates failures already present in the base-branch log:
 "${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log --baseline /tmp/base.log -- <test command>
