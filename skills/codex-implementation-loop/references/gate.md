@@ -15,3 +15,9 @@ Be honest about what the baseline gate proves and doesn't: it proves **no new fa
 The gate's failure parsing understands **unittest and pytest** output. Under `--baseline`, any other runner fails closed with an unsupported-runner message rather than guessing — plain pass-through mode (no `--baseline`) works with any runner. Also under `--baseline`, a run must show real executed tests: skipped-only or empty output is red even on exit 0.
 
 If the repo has no meaningful suite, say so instead of letting the gate silently pass on nothing: the bar becomes the tests this unit itself added, plus driving the affected flow once by hand. Flag the missing suite to the user as its own backlog item rather than quietly treating "no tests ran" as green.
+
+## Consistency and normalization guarantees
+
+- In **every** mode, a runner whose own summary reports failures (`=== N failed ===`, `FAILED (failures=N)`) while exiting 0 is distrusted and gates red — strict's "zero failures" is enforced, not assumed from the exit code.
+- Test-execution evidence is taken only from formal summary lines (pytest's `=== ... ===` fence, unittest's `Ran N tests`), never from arbitrary output — error messages containing phrases like "1 passed" don't count.
+- Failure-identifier normalization (`id [ExceptionClass]`) applies only when a pytest line contains exactly one raw ` - ` separator; any other shape — custom param IDs or messages containing ` - `, unbalanced brackets — keeps the whole line as the identifier. Consequence: volatile messages containing ` - ` read as changed failures (red). False-red on exotic flakes is accepted; false-green is not.

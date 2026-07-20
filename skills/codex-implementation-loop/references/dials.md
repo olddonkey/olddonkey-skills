@@ -23,7 +23,7 @@ Stop point and cadence interact: with a stop point short of `merge`, the unit ha
 A one-line record keeps the calibration greppable across sessions, e.g.:
 
 ```text
-codex-loop: stop=merge mode=implement gate=baseline on-red=iterate(max2) depth=standard cadence=continuous fix=codex
+codex-loop: stop=merge mode=implement gate=baseline on-red=iterate(max2) depth=standard cadence=continuous fix=codex tier=inherit kickoff=ask
             model=inherit effort=inherit serial ci=untrusted
             suite="PYTHONPATH=src python3 -m unittest discover -s tests" (~700s)
 ```
