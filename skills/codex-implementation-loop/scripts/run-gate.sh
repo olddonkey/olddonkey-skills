@@ -17,8 +17,9 @@
 #
 # Run it as a background job for long suites; read the log when it lands.
 #
-# Exit: without --baseline, the suite's exit code. With --baseline, 0 when
-# the suite passes or all parsed failures match the baseline and tests ran.
+# Exit: without --baseline, the suite's exit code unless an exit-zero runner
+# reports failures in its own summary. With --baseline, 0 when the suite passes
+# or all parsed failures match the baseline and tests ran.
 
 set -uo pipefail
 
@@ -105,26 +106,19 @@ echo "log:  $LOG" >&2
 
 # Emit stable failure identifiers from unittest headers and pytest's short
 # summary. unittest FAIL:/ERROR: headers contain no exception information, so
-# those remain ID-only. For pytest, retain the exception class but discard its
-# message so message-only changes still match while changed failure types do not.
+# those remain ID-only. For unambiguous pytest lines, retain the exception class
+# but discard its message so message-only changes still match.
 extract_failures() { # $1=log path
   awk '
     /^FAIL: / || /^ERROR: / { print; next }
     /^FAILED \(/ || /^ERROR \(/ { next }
     /^FAILED / || /^ERROR / {
       line = $0
-      depth = 0
       separator = 0
       separator_length = 0
       separator_count = 0
       for (i = 1; i <= length(line); i++) {
-        character = substr(line, i, 1)
-        if (character == "[") {
-          depth++
-        } else if (character == "]" && depth > 0) {
-          depth--
-        } else if (depth == 0 &&
-                   match(substr(line, i), /^[[:space:]]+-[[:space:]]+/)) {
+        if (match(substr(line, i), /^[[:space:]]+-[[:space:]]+/)) {
           separator_count++
           if (separator_count == 1) {
             separator = i
@@ -134,32 +128,15 @@ extract_failures() { # $1=log path
         }
       }
 
-      # Additional depth-0 separators in messages make the parse ambiguous,
-      # so keeping the whole line in that case is intentional fail-closed behavior.
+      # IDs or messages containing " - " get whole-line identity. Message-only
+      # changes in those lines therefore read as new failures: intentional fail-closed.
       if (separator_count == 1) {
         identifier = substr(line, 1, separator - 1)
-        bracket_depth = 0
-        brackets_balanced = 1
-        for (i = 1; i <= length(identifier); i++) {
-          character = substr(identifier, i, 1)
-          if (character == "[") {
-            bracket_depth++
-          } else if (character == "]") {
-            if (bracket_depth == 0) {
-              brackets_balanced = 0
-            } else {
-              bracket_depth--
-            }
-          }
-        }
-        if (bracket_depth != 0) brackets_balanced = 0
-
         exception = substr(line, separator + separator_length)
         sub(/^[[:space:]]+/, "", exception)
         sub(/[[:space:]].*$/, "", exception)
         sub(/:$/, "", exception)
-        if (brackets_balanced &&
-            exception ~ /^[A-Za-z_][A-Za-z0-9_.]*$/) {
+        if (exception ~ /^[A-Za-z_][A-Za-z0-9_.]*$/) {
           line = identifier " [" exception "]"
         }
       }
@@ -181,9 +158,11 @@ tests_ran() { # $1=log path
         unittest_skipped += (skipped + 0)
       }
     }
-    {
+    /^=+ .* =+$/ {
       line = tolower($0)
-      if (line !~ /no tests ran/ &&
+      sub(/^=+[[:space:]]+/, "", line)
+      sub(/[[:space:]]+=+$/, "", line)
+      if (line !~ /^no tests ran([^[:alpha:]]|$)/ &&
           line ~ /[1-9][0-9]*[[:space:]]+(passed|failed|xfailed|xpassed)([^[:alpha:]]|$)/) {
         ran = 1
       }
@@ -196,21 +175,49 @@ tests_ran() { # $1=log path
 }
 
 zero_tests_reported() { # $1=log path
-  grep -Eqi '(^Ran 0 tests?([[:space:]]|$)|no tests ran)' "$1" 2>/dev/null
+  awk '
+    /^Ran 0 tests?([[:space:]]|$)/ { zero = 1 }
+    /^=+ .* =+$/ {
+      line = tolower($0)
+      sub(/^=+[[:space:]]+/, "", line)
+      sub(/[[:space:]]+=+$/, "", line)
+      if (line ~ /^no tests ran([^[:alpha:]]|$)/) zero = 1
+    }
+    END { exit(zero ? 0 : 1) }
+  ' "$1" 2>/dev/null
 }
 
 supported_runner_summary() { # $1=log path
   awk '
     /^Ran [0-9]+ tests?/ { recognized = 1 }
-    {
+    /^=+ .* =+$/ {
       line = tolower($0)
-      sub(/^[[:space:]]*=+[[:space:]]*/, "", line)
+      sub(/^=+[[:space:]]+/, "", line)
+      sub(/[[:space:]]+=+$/, "", line)
       if (line ~ /^no tests ran([^[:alpha:]]|$)/ ||
-          line ~ /^[0-9]+[[:space:]]+(passed|failed|skipped|deselected|xfailed|xpassed|error|errors|warning|warnings)([^[:alpha:]]|$)/) {
+          line ~ /[0-9]+[[:space:]]+(passed|failed|skipped|deselected|xfailed|xpassed|error|errors|warning|warnings)([^[:alpha:]]|$)/) {
         recognized = 1
       }
     }
     END { exit(recognized ? 0 : 1) }
+  ' "$1" 2>/dev/null
+}
+
+failed_summary_present() { # $1=log path
+  awk '
+    /^FAILED \(/ { failed = 1 }
+    /^=+ .* =+$/ {
+      line = tolower($0)
+      sub(/^=+[[:space:]]+/, "", line)
+      sub(/[[:space:]]+=+$/, "", line)
+      while (match(line, /[0-9]+[[:space:]]+failed([^[:alpha:]]|$)/)) {
+        count = substr(line, RSTART, RLENGTH)
+        sub(/[[:space:]].*$/, "", count)
+        if ((count + 0) > 0) failed = 1
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }
+    END { exit(failed ? 0 : 1) }
   ' "$1" 2>/dev/null
 }
 
@@ -235,6 +242,10 @@ echo "=== gate finished in ${ELAPSED}s with exit code ${STATUS} ==="
 grep -E '^(Ran [0-9]+ |OK\b|FAILED\b|ERROR\b|=+ .*(passed|failed|no tests ran).* =+)' "$LOG" | tail -5
 
 CURRENT_FAILURES="$(extract_failures "$LOG" || true)"
+FAILED_SUMMARY=0
+if failed_summary_present "$LOG"; then
+  FAILED_SUMMARY=1
+fi
 FAILURES=0
 if [[ -n "$CURRENT_FAILURES" ]]; then
   while IFS= read -r _failure; do
@@ -261,7 +272,13 @@ elif [[ -n "$BASELINE" ]]; then
   echo "--- baseline not found ($BASELINE) ---"
 fi
 
-# With no baseline, retain the original pass-through behavior exactly.
+# A runner summary and its exit status must agree in every mode.
+if [[ $STATUS -eq 0 && $FAILED_SUMMARY -eq 1 ]]; then
+  echo "RESULT: gate RED — runner summary reports failures but exit code is 0"
+  exit 1
+fi
+
+# With no baseline, otherwise retain the suite's pass-through status.
 if [[ -z "$BASELINE" ]]; then
   if [[ $STATUS -eq 0 ]]; then
     echo "RESULT: gate green"
@@ -271,8 +288,8 @@ if [[ -z "$BASELINE" ]]; then
   exit "$STATUS"
 fi
 
-# In baseline mode, parsed failures and a successful process status contradict
-# each other. Do not trust fingerprints from a runner that masked its own exit.
+# Baseline mode additionally distrusts any parsed failure line paired with a
+# successful process status, even when the runner emitted no failed summary.
 if [[ $STATUS -eq 0 && $FAILURES -gt 0 ]]; then
   echo "RESULT: gate RED — exit 0 but failure lines present (is the runner masking its exit code?)"
   exit 1

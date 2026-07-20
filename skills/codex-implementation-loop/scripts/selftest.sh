@@ -256,22 +256,38 @@ run_case gate-plain-empty bash "$GATE" \
 expect_status 0 "plain gate preserves exit-zero empty-output pass-through"
 expect_output "RESULT: gate green" "plain gate keeps its empty-output green result"
 
-# Failure-looking output also remains pure pass-through without --baseline.
-run_case gate-plain-masked-failure bash "$GATE" \
-  --log "$TMP_ROOT/gate-plain-masked-failure.log" -- \
-  bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n=========================== 1 failed in 0.01s ===========================\n'\'''
-expect_status 0 "plain gate preserves exit-zero failure-looking output pass-through"
+# A runner-owned failed summary contradicts exit zero even without --baseline.
+run_case gate-plain-masked-summary bash "$GATE" \
+  --log "$TMP_ROOT/gate-plain-masked-summary.log" -- \
+  bash -c 'printf '\''=========================== 1 failed in 0.01s ===========================\n'\'''
+expect_status 1 "plain gate rejects an exit-zero pytest failed summary"
+expect_output "RESULT: gate RED — runner summary reports failures but exit code is 0" \
+  "plain gate diagnoses a pytest summary/exit contradiction"
+
+# Individual failure-looking lines may be application logs, so plain mode still
+# passes them through when no formal runner summary reports a failure.
+run_case gate-plain-failure-line bash "$GATE" \
+  --log "$TMP_ROOT/gate-plain-failure-line.log" -- \
+  bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n'\'''
+expect_status 0 "plain gate preserves an exit-zero individual failure-line pass-through"
 expect_output "RESULT: gate green" \
-  "plain gate keeps failure-looking exit-zero output green"
+  "plain gate tolerates an individual failure line without a summary"
+
+run_case gate-plain-unittest-summary bash "$GATE" \
+  --log "$TMP_ROOT/gate-plain-unittest-summary.log" -- \
+  bash -c 'printf '\''FAILED (failures=1)\n'\'''
+expect_status 1 "plain gate rejects an exit-zero unittest failed summary"
+expect_output "RESULT: gate RED — runner summary reports failures but exit code is 0" \
+  "plain gate diagnoses a unittest summary/exit contradiction"
 
 EMPTY_BASELINE="$TMP_ROOT/empty-baseline.log"
 : > "$EMPTY_BASELINE"
 run_case gate-baseline-masked-new bash "$GATE" \
   --log "$TMP_ROOT/gate-baseline-masked-new.log" --baseline "$EMPTY_BASELINE" -- \
-  bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n=========================== 1 failed in 0.01s ===========================\n'\'''
+  bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n'\'''
 expect_status 1 "baseline gate rejects an exit-zero run with a new parsed failure"
 expect_output "RESULT: gate RED — exit 0 but failure lines present (is the runner masking its exit code?)" \
-  "baseline gate diagnoses a runner that masked its failure exit code"
+  "baseline gate retains its stricter line-only masking check"
 
 # A shared log/baseline target must be rejected before the command can truncate
 # it. The first case exercises normalized string equality before either exists;
@@ -349,8 +365,8 @@ run_case gate-baseline-masked-known bash "$GATE" \
   --log "$TMP_ROOT/gate-baseline-masked-known.log" --baseline "$PYTEST_BASELINE" -- \
   bash -c 'printf '\''FAILED tests/test_widget.py::test_value - AssertionError: old detail\n=========================== 1 failed in 0.01s ===========================\n'\'''
 expect_status 1 "baseline gate rejects exit-zero failures even when they match baseline"
-expect_output "RESULT: gate RED — exit 0 but failure lines present (is the runner masking its exit code?)" \
-  "baseline gate treats a matching failure from an exit-zero runner as inconsistent"
+expect_output "RESULT: gate RED — runner summary reports failures but exit code is 0" \
+  "baseline gate applies the shared summary/exit consistency check"
 
 run_case gate-pytest-message-change bash "$GATE" \
   --log "$TMP_ROOT/gate-pytest-message-change.log" --baseline "$PYTEST_BASELINE" -- \
@@ -394,21 +410,51 @@ PYTEST_PARAM_BASELINE="$TMP_ROOT/pytest-param-baseline.log"
 write_lines "$PYTEST_PARAM_BASELINE" \
   'FAILED t.py::test_v[a - b] - AssertionError: msg' \
   '=========================== 1 failed in 0.01s ==========================='
+# The raw-separator rule deliberately keeps these whole-line identifiers: the
+# parameter ID contributes a second " - ", so even message-only changes are red.
 run_case gate-pytest-param-class-change bash "$GATE" \
   --log "$TMP_ROOT/gate-pytest-param-class-change.log" \
   --baseline "$PYTEST_PARAM_BASELINE" -- \
   bash -c 'printf '\''FAILED t.py::test_v[a - b] - RuntimeError: msg\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
-expect_status 1 "gate rejects an exception-class change for a bracketed pytest parameter ID"
-expect_output "FAILED t.py::test_v[a - b] [RuntimeError]" \
-  "gate preserves a pytest parameter ID containing a depth-nested separator"
+expect_status 1 "gate rejects a class change when a pytest parameter ID contains a raw separator"
+expect_output "FAILED t.py::test_v[a - b] - RuntimeError: msg" \
+  "gate keeps the raw-separator class-change line whole"
 
-run_case gate-pytest-param-message-change bash "$GATE" \
-  --log "$TMP_ROOT/gate-pytest-param-message-change.log" \
+run_case gate-pytest-raw-separator-message-change-red bash "$GATE" \
+  --log "$TMP_ROOT/gate-pytest-raw-separator-message-change-red.log" \
   --baseline "$PYTEST_PARAM_BASELINE" -- \
   bash -c 'printf '\''FAILED t.py::test_v[a - b] - AssertionError: changed message\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
-expect_status 0 "gate accepts a message-only change for a bracketed pytest parameter ID"
-expect_output "FAILED t.py::test_v[a - b] [AssertionError]" \
-  "gate normalizes one unambiguous depth-zero separator"
+expect_status 1 "gate intentionally rejects a message-only change when two raw separators are present"
+expect_output "FAILED t.py::test_v[a - b] - AssertionError: changed message" \
+  "gate keeps the raw-separator message-change line whole"
+
+run_case gate-pytest-param-identical bash "$GATE" \
+  --log "$TMP_ROOT/gate-pytest-param-identical.log" \
+  --baseline "$PYTEST_PARAM_BASELINE" -- \
+  bash -c 'printf '\''FAILED t.py::test_v[a - b] - AssertionError: msg\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
+expect_status 0 "gate matches identical whole-line pytest parameter failures"
+expect_output "RESULT: gate green (failures match baseline — no new failures)" \
+  "gate keeps identical raw-separator lines green"
+
+PYTEST_ADVERSARIAL_BASELINE="$TMP_ROOT/pytest-adversarial-baseline.log"
+write_lines "$PYTEST_ADVERSARIAL_BASELINE" \
+  'FAILED t.py::test_value[x] - RuntimeError y[[] - AssertionError: msg' \
+  '=========================== 1 failed in 0.01s ==========================='
+run_case gate-pytest-adversarial-class-change bash "$GATE" \
+  --log "$TMP_ROOT/gate-pytest-adversarial-class-change.log" \
+  --baseline "$PYTEST_ADVERSARIAL_BASELINE" -- \
+  bash -c 'printf '\''FAILED t.py::test_value[x] - RuntimeError y[[] - ValueError: msg\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
+expect_status 1 "gate rejects a class change hidden behind an adversarial pytest parameter ID"
+expect_output "RESULT: gate RED — do not publish until resolved or explained" \
+  "gate fails closed for an adversarial parameter-ID class change"
+
+run_case gate-pytest-adversarial-identical bash "$GATE" \
+  --log "$TMP_ROOT/gate-pytest-adversarial-identical.log" \
+  --baseline "$PYTEST_ADVERSARIAL_BASELINE" -- \
+  bash -c 'printf '\''FAILED t.py::test_value[x] - RuntimeError y[[] - AssertionError: msg\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
+expect_status 0 "gate matches an identical adversarial pytest failure line"
+expect_output "RESULT: gate green (failures match baseline — no new failures)" \
+  "gate keeps an unchanged adversarial whole-line identifier green"
 
 CRASH_BASELINE="$TMP_ROOT/crash-baseline.log"
 write_lines "$CRASH_BASELINE" 'ImportError: same crash text'
@@ -418,6 +464,17 @@ run_case gate-crash bash "$GATE" \
 expect_status 9 "gate stays nonzero when no failure identifier is parseable"
 expect_output "RESULT: gate RED — nonzero exit with no parseable failures (crash/collection error?)" \
   "gate explains an unparseable nonzero exit"
+
+COLLECTION_BASELINE="$TMP_ROOT/collection-baseline.log"
+write_lines "$COLLECTION_BASELINE" \
+  'ERROR collecting t.py - RuntimeError: expected 1 passed check'
+run_case gate-collection-count-words bash "$GATE" \
+  --log "$TMP_ROOT/gate-collection-count-words.log" \
+  --baseline "$COLLECTION_BASELINE" -- \
+  bash -c 'printf '\''ERROR collecting t.py - RuntimeError: expected 1 passed check\n'\''; exit 2'
+expect_status 2 "gate rejects collection-error count words without a formal pytest summary"
+expect_output "RESULT: gate RED — failures parsed but no completed tests were reported" \
+  "gate does not treat count words in an error message as test execution"
 
 run_case gate-zero-tests bash "$GATE" \
   --log "$TMP_ROOT/gate-zero-tests.log" --baseline "$EMPTY_BASELINE" -- \
