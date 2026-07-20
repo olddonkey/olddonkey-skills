@@ -510,6 +510,63 @@ expect_status 0 "gate matches an identical adversarial pytest failure line"
 expect_output "RESULT: gate green (failures match baseline — no new failures)" \
   "gate keeps an unchanged adversarial whole-line identifier green"
 
+# pytest 9 native subtests: the parent FAILED line is constant, the specific
+# failing subtest lives in the SUBFAILED line — a shifted subtest is new.
+PYTEST_SUBTEST_BASELINE="$TMP_ROOT/pytest-subtest-baseline.log"
+write_lines "$PYTEST_SUBTEST_BASELINE" \
+  'SUBFAILED(value=0) t.py::test_contains - AssertionError: value 0 broke' \
+  'FAILED t.py::test_contains - contains 1 failed subtest' \
+  '=========================== 2 failed in 0.01s ==========================='
+run_case gate-subtest-shift bash "$GATE" \
+  --log "$TMP_ROOT/gate-subtest-shift.log" --baseline "$PYTEST_SUBTEST_BASELINE" -- \
+  bash -c 'printf '\''SUBFAILED(value=1) t.py::test_contains - AssertionError: value 1 broke\nFAILED t.py::test_contains - contains 1 failed subtest\n=========================== 2 failed in 0.01s ===========================\n'\''; exit 1'
+expect_status 1 "gate rejects a shifted failing subtest behind an unchanged parent FAILED line"
+expect_output "SUBFAILED(value=1) t.py::test_contains [AssertionError]" \
+  "gate fingerprints the specific SUBFAILED identity"
+
+run_case gate-subtest-identical bash "$GATE" \
+  --log "$TMP_ROOT/gate-subtest-identical.log" --baseline "$PYTEST_SUBTEST_BASELINE" -- \
+  bash -c 'printf '\''SUBFAILED(value=0) t.py::test_contains - AssertionError: value 0 broke\nFAILED t.py::test_contains - contains 1 failed subtest\n=========================== 2 failed in 0.01s ===========================\n'\''; exit 1'
+expect_status 0 "gate matches an identical failing subtest against baseline"
+expect_output "RESULT: gate green (failures match baseline — no new failures)" \
+  "gate keeps a baseline-matched subtest failure green"
+
+# Execution evidence is the LAST formal summary. A summary-shaped line printed
+# earlier (application output, an inner pytest run) must not vouch for a run
+# whose real final summary shows no executed tests — and conversely an inner
+# failed summary must not red a run whose final summary is clean.
+FAKE_SUMMARY_BASELINE="$TMP_ROOT/fake-summary-baseline.log"
+write_lines "$FAKE_SUMMARY_BASELINE" \
+  'ERROR t.py - RuntimeError: collection failed'
+run_case gate-early-fake-summary bash "$GATE" \
+  --log "$TMP_ROOT/gate-early-fake-summary.log" --baseline "$FAKE_SUMMARY_BASELINE" -- \
+  bash -c 'printf '\''1 passed in 0.01s\nERROR t.py - RuntimeError: collection failed\n=========================== 1 error in 0.04s ===========================\n'\''; exit 2'
+expect_status 2 "gate ignores a summary-shaped line printed before the real final summary"
+expect_output "RESULT: gate RED — failures parsed but no completed tests were reported" \
+  "gate takes execution evidence only from the final formal summary"
+
+run_case gate-nested-runner bash "$GATE" \
+  --log "$TMP_ROOT/gate-nested-runner.log" --baseline "$EMPTY_BASELINE" -- \
+  bash -c 'printf '\''1 failed in 0.10s\n=========================== 3 passed in 1.20s ===========================\n'\'''
+expect_status 0 "gate trusts the outer runner final summary over an inner run captured mid-log"
+expect_output "RESULT: gate green" \
+  "gate stays green when an inner failed summary precedes a passing final summary"
+
+# Native-subtests quiet summaries add `N subtests passed/failed` terms.
+run_case gate-quiet-subtests-pass bash "$GATE" \
+  --log "$TMP_ROOT/gate-quiet-subtests-pass.log" --baseline "$EMPTY_BASELINE" -- \
+  bash -c 'printf '\''uu.\n1 passed, 2 subtests passed in 0.00s\n'\'''
+expect_status 0 "baseline gate accepts a passing quiet run with native subtests counts"
+expect_output "RESULT: gate green" \
+  "baseline gate parses the subtests quiet summary as executed tests"
+
+run_case gate-quiet-subtests-masked bash "$GATE" \
+  --log "$TMP_ROOT/gate-quiet-subtests-masked.log" -- \
+  bash -c 'printf '\''SUBFAILED(value=1) t.py::test_contains - AssertionError: boom\nFAILED t.py::test_contains - contains 1 failed subtest\n2 failed, 1 subtests passed in 0.01s\n'\'''
+expect_status 1 "plain gate rejects a masked exit-zero subtests failed quiet summary"
+expect_output "RESULT: gate RED — runner summary reports failures but exit code is 0" \
+  "plain gate reads failed counts from the subtests quiet summary"
+
 CRASH_BASELINE="$TMP_ROOT/crash-baseline.log"
 write_lines "$CRASH_BASELINE" 'ImportError: same crash text'
 run_case gate-crash bash "$GATE" \

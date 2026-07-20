@@ -107,8 +107,14 @@ echo "log:  $LOG" >&2
 # pytest emits its formal summary either fenced (`=== 1 failed in 0.1s ===`)
 # or, under -q, as a bare bottom line (`1 failed in 0.1s`). pytest_summary
 # returns the lowercased summary content for either shape and "" otherwise.
-# The bare form must match the full official shape — count list plus an
-# `in <duration>s` tail — so ordinary log lines never qualify as a summary.
+# The bare form must match the full official shape — count list (native
+# subtests add `N subtests passed/failed` terms) plus an `in <duration>s`
+# tail — so ordinary log lines never qualify as a summary.
+#
+# Callers must treat only the LAST summary-shaped line as the run's verdict:
+# the real runner always prints its summary at the very end, so anything
+# earlier (an inner pytest run captured in test output, an application log
+# line that happens to match) is not evidence about THIS run.
 PYTEST_SUMMARY_AWK='
   function pytest_summary(line,    content) {
     content = tolower(line)
@@ -117,7 +123,7 @@ PYTEST_SUMMARY_AWK='
       sub(/[[:space:]]+=+$/, "", content)
       return content
     }
-    if (content ~ /^(no tests ran|[0-9]+ (passed|failed|error|errors|skipped|deselected|xfailed|xpassed|warning|warnings)(, [0-9]+ (passed|failed|error|errors|skipped|deselected|xfailed|xpassed|warning|warnings))*) in [0-9]+(\.[0-9]+)?s( \([0-9:]+\))?$/) {
+    if (content ~ /^(no tests ran|[0-9]+ (subtests )?(passed|failed|error|errors|skipped|deselected|xfailed|xpassed|warning|warnings)(, [0-9]+ (subtests )?(passed|failed|error|errors|skipped|deselected|xfailed|xpassed|warning|warnings))*) in [0-9]+(\.[0-9]+)?s( \([0-9:]+\))?$/) {
       return content
     }
     return ""
@@ -127,12 +133,15 @@ PYTEST_SUMMARY_AWK='
 # Emit stable failure identifiers from unittest headers and pytest's short
 # summary. unittest FAIL:/ERROR: headers contain no exception information, so
 # those remain ID-only. For unambiguous pytest lines, retain the exception class
-# but discard its message so message-only changes still match.
+# but discard its message so message-only changes still match. pytest 9 native
+# subtests report the specific failing subtest as SUBFAILED(param)/SUBFAILED[msg]
+# while the parent FAILED line stays constant, so SUBFAILED lines carry the
+# real identity and must be fingerprinted too.
 extract_failures() { # $1=log path
   awk '
     /^FAIL: / || /^ERROR: / { print; next }
     /^FAILED \(/ || /^ERROR \(/ { next }
-    /^FAILED / || /^ERROR / {
+    /^FAILED / || /^ERROR / || /^SUBFAILED/ {
       line = $0
       separator = 0
       separator_length = 0
@@ -180,13 +189,14 @@ tests_ran() { # $1=log path
     }
     {
       summary = pytest_summary($0)
-      if (summary != "" &&
-          summary !~ /^no tests ran([^[:alpha:]]|$)/ &&
-          summary ~ /[1-9][0-9]*[[:space:]]+(passed|failed|xfailed|xpassed)([^[:alpha:]]|$)/) {
-        ran = 1
-      }
+      if (summary != "") last_summary = summary
     }
     END {
+      if (last_summary != "" &&
+          last_summary !~ /^no tests ran([^[:alpha:]]|$)/ &&
+          last_summary ~ /[1-9][0-9]*[[:space:]]+(subtests[[:space:]]+)?(passed|failed|xfailed|xpassed)([^[:alpha:]]|$)/) {
+        ran = 1
+      }
       if ((unittest_total - unittest_skipped) > 0) ran = 1
       exit(ran ? 0 : 1)
     }
@@ -197,9 +207,13 @@ zero_tests_reported() { # $1=log path
   awk "$PYTEST_SUMMARY_AWK"'
     /^Ran 0 tests?([[:space:]]|$)/ { zero = 1 }
     {
-      if (pytest_summary($0) ~ /^no tests ran([^[:alpha:]]|$)/) zero = 1
+      summary = pytest_summary($0)
+      if (summary != "") last_summary = summary
     }
-    END { exit(zero ? 0 : 1) }
+    END {
+      if (last_summary ~ /^no tests ran([^[:alpha:]]|$)/) zero = 1
+      exit(zero ? 0 : 1)
+    }
   ' "$1" 2>/dev/null
 }
 
@@ -208,31 +222,38 @@ supported_runner_summary() { # $1=log path
     /^Ran [0-9]+ tests?/ { recognized = 1 }
     {
       summary = pytest_summary($0)
-      if (summary != "" &&
-          (summary ~ /^no tests ran([^[:alpha:]]|$)/ ||
-           summary ~ /[0-9]+[[:space:]]+(passed|failed|skipped|deselected|xfailed|xpassed|error|errors|warning|warnings)([^[:alpha:]]|$)/)) {
+      if (summary != "") last_summary = summary
+    }
+    END {
+      if (last_summary != "" &&
+          (last_summary ~ /^no tests ran([^[:alpha:]]|$)/ ||
+           last_summary ~ /[0-9]+[[:space:]]+(subtests[[:space:]]+)?(passed|failed|skipped|deselected|xfailed|xpassed|error|errors|warning|warnings)([^[:alpha:]]|$)/)) {
         recognized = 1
       }
+      exit(recognized ? 0 : 1)
     }
-    END { exit(recognized ? 0 : 1) }
   ' "$1" 2>/dev/null
 }
 
-# Positive error counts (collection errors, fixture errors) contradict an
-# exit-zero run exactly like failed counts do.
+# Positive failed/error counts (including subtest terms) in the FINAL summary
+# contradict an exit-zero run. Earlier summary-shaped lines belong to inner
+# runs or application output, never to this run's verdict.
 failed_summary_present() { # $1=log path
   awk "$PYTEST_SUMMARY_AWK"'
     /^FAILED \(/ { failed = 1 }
     {
       summary = pytest_summary($0)
-      while (match(summary, /[0-9]+[[:space:]]+(failed|error|errors)([^[:alpha:]]|$)/)) {
-        count = substr(summary, RSTART, RLENGTH)
+      if (summary != "") last_summary = summary
+    }
+    END {
+      while (match(last_summary, /[0-9]+[[:space:]]+(subtests[[:space:]]+)?(failed|error|errors)([^[:alpha:]]|$)/)) {
+        count = substr(last_summary, RSTART, RLENGTH)
         sub(/[[:space:]].*$/, "", count)
         if ((count + 0) > 0) failed = 1
-        summary = substr(summary, RSTART + RLENGTH)
+        last_summary = substr(last_summary, RSTART + RLENGTH)
       }
+      exit(failed ? 0 : 1)
     }
-    END { exit(failed ? 0 : 1) }
   ' "$1" 2>/dev/null
 }
 
@@ -254,7 +275,7 @@ ELAPSED=$((SECONDS - START))
 echo "=== gate finished in ${ELAPSED}s with exit code ${STATUS} ==="
 
 # Surface the shapes most runners use for their summary line.
-grep -E '^(Ran [0-9]+ |OK\b|FAILED\b|ERROR\b|=+ .*(passed|failed|no tests ran).* =+|(no tests ran|[0-9]+ [a-z]+(, [0-9]+ [a-z]+)*) in [0-9]+(\.[0-9]+)?s)' "$LOG" | tail -5
+grep -E '^(Ran [0-9]+ |OK\b|FAILED\b|ERROR\b|SUBFAILED\b|=+ .*(passed|failed|no tests ran).* =+|(no tests ran|[0-9]+ [a-z]+(, [0-9]+ [a-z]+)*) in [0-9]+(\.[0-9]+)?s)' "$LOG" | tail -5
 
 CURRENT_FAILURES="$(extract_failures "$LOG" || true)"
 FAILED_SUMMARY=0
