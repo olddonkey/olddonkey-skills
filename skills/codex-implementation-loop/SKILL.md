@@ -79,7 +79,7 @@ Dispatch hygiene — each of these failure modes is silent when it happens:
 
 ### Choosing model and effort
 
-**These are the user's call, not yours to silently assume.** Confirm them when the loop starts, then reuse the answer — asking every unit defeats the point of a loop, but picking for them without saying so hides a decision that affects cost, speed, and quality on every dispatch.
+**These are the user's call, not yours to silently assume — but the default requires no asking at all**, because omitting the flags inherits the user's own codex config, which they already manage themselves (`/model`, `/fast`). Confirm an override question once, when the loop first starts for a repo; the recorded calibration carries across sessions, so a resumed loop reads the record instead of re-asking. Asking every unit — or every session — defeats the point of a loop, but picking for them without saying so hides a decision that affects cost, speed, and quality on every dispatch. The dispatch summary printing model/effort/tier on each run is disclosure, not a question.
 
 How resolution works, which shapes the choice:
 
