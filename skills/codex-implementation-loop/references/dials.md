@@ -12,7 +12,7 @@ Stop point and cadence interact: with a stop point short of `merge`, the unit ha
 
 **On gate red** — `stop` brings failures to the user. `iterate` sends them back to Codex automatically, which is efficient for obvious breakage but needs two boundaries: cap the attempts (two or three) so a stuck loop surfaces instead of grinding, and hold the line that a fix means the code satisfies the test, never the test bending to the code. If Codex's fix weakens an assertion, that's a stop, not a pass.
 
-**Review depth** — `standard` is the checklist below. `deep` adds an independent reviewer that hasn't seen the dispatch prompt, which is worth the cost when a change touches a correctness or security boundary, concurrency, migrations, auth, or money — places where a plausible-looking diff can be wrong in ways the author's framing hides. `light` still reads the whole diff; it just spends less time hunting on genuinely mechanical edits. Depth is a dial on rigor, not permission to skip reading the diff.
+**Review depth** — `standard` is the checklist in SKILL.md §3 (full detail: review-checklist.md in this directory). `deep` adds an independent reviewer that hasn't seen the dispatch prompt, which is worth the cost when a change touches a correctness or security boundary, concurrency, migrations, auth, or money — places where a plausible-looking diff can be wrong in ways the author's framing hides. `light` still reads the whole diff; it just spends less time hunting on genuinely mechanical edits. Depth is a dial on rigor, not permission to skip reading the diff.
 
 **Cadence** — `continuous` moves to the next unit without checking in, which is the point of a loop once the user trusts it. `confirm` pauses after each unit. Worth asking once up front, because assuming `continuous` on the first run means a lot of merged work before anyone looks.
 
@@ -23,7 +23,7 @@ Stop point and cadence interact: with a stop point short of `merge`, the unit ha
 A one-line record keeps the calibration greppable across sessions, e.g.:
 
 ```text
-codex-loop: stop=merge gate=baseline on-red=iterate(max2) depth=standard cadence=continuous
+codex-loop: stop=merge mode=implement gate=baseline on-red=iterate(max2) depth=standard cadence=continuous fix=codex
             model=inherit effort=inherit serial ci=untrusted
             suite="PYTHONPATH=src python3 -m unittest discover -s tests" (~700s)
 ```

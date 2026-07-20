@@ -47,11 +47,12 @@ A unit = one coherent, reviewable change, roughly one PR. Settle the design **be
 ## 2. Dispatch
 
 ```bash
-# ${CLAUDE_SKILL_DIR} is substituted by Claude Code at load time (personal,
-# project, and plugin installs); the fallback covers non-substituting agents.
-SKILL_DIR="${CLAUDE_SKILL_DIR:-$HOME/.claude/skills/codex-implementation-loop}"
-"$SKILL_DIR/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt        # inherit config
-"$SKILL_DIR/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
+# ${CLAUDE_SKILL_DIR} is replaced with this skill's absolute path when the skill
+# loads, making each command self-contained — no variable needs to survive
+# between Bash calls (env vars don't). In a non-substituting agent, replace it
+# manually with the skill's install directory.
+"${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt   # inherit config
+"${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
     --model gpt-5.6-sol --effort xhigh    # explicit override (model names age)
 ```
 
@@ -91,7 +92,7 @@ Read the actual diff; the summary only says where to look. Check the whole tree 
 Send findings back on the same thread with specifics — what's wrong, why it matters, what you expect:
 
 ```bash
-"$SKILL_DIR/scripts/codex-dispatch.sh" --resume --prompt-file /tmp/review-findings.txt
+"${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --resume --prompt-file /tmp/review-findings.txt
 ```
 
 Repeat until the diff is something you'd sign. A bug that surfaces **outside** an active thread is a new unit, not a hand-edit: diagnose, dispatch on a fresh thread with repro + root cause + expected fix + the regression test you expect — a fix without a test that would have caught the bug is incomplete.
@@ -101,7 +102,10 @@ Repeat until the diff is something you'd sign. A bug that surfaces **outside** a
 Run the whole suite yourself via the bundled helper — piping through `tail` masks the real exit code:
 
 ```bash
-"$SKILL_DIR/scripts/run-gate.sh" --log /tmp/gate.log --baseline /tmp/base.log -- <test command>
+# strict policy — the suite's real exit code passes through:
+"${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log -- <test command>
+# baseline policy ONLY — tolerates failures already present in the base-branch log:
+"${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log --baseline /tmp/base.log -- <test command>
 ```
 
 `baseline` policy = no new non-flake failures vs the base branch, decided mechanically (pytest identifiers include the exception class; skipped-only, empty, or unparseable runs fail closed). It proves *no new failure identifiers and that tests executed* — not that the full calibrated suite ran; check the reported count when it matters. On red, follow the on-red dial with capped attempts. Serial-vs-parallel, unreliable CI, no-suite repos, parser scope: [references/gate.md](references/gate.md).

@@ -23,7 +23,7 @@ How resolution works, which shapes the choice:
 
 Reasonable way to pick, if the user wants a recommendation: raise effort for work where a subtle mistake is expensive to catch downstream — anything touching correctness boundaries, concurrency, or migrations — and lower it for mechanical, well-specified edits where the spec leaves little room for judgment. Model choice usually follows whatever they're already running; the interesting dial is effort.
 
-To give one project a standing preference without touching the user's global config or this script, set `CODEX_LOOP_MODEL` / `CODEX_LOOP_EFFORT` in that project's environment, and record the choice (see calibration below) so later sessions don't re-litigate it.
+To give one project a standing preference without touching the user's global config or this script, set `CODEX_LOOP_MODEL` / `CODEX_LOOP_EFFORT` in that project's environment, and record the choice (see First-run calibration in SKILL.md) so later sessions don't re-litigate it.
 
 ### Monitoring, stuck jobs, and cleanup
 
