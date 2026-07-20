@@ -79,7 +79,13 @@ Dispatch hygiene — each of these failure modes is silent when it happens:
 
 ### Choosing model and effort
 
-**These are the user's call, not yours to silently assume — but the default requires no asking at all**, because omitting the flags inherits the user's own codex config, which they already manage themselves (`/model`, `/fast`). Confirm an override question once, when the loop first starts for a repo; the recorded calibration carries across sessions, so a resumed loop reads the record instead of re-asking. Asking every unit — or every session — defeats the point of a loop, but picking for them without saying so hides a decision that affects cost, speed, and quality on every dispatch. The dispatch summary printing model/effort/tier on each run is disclosure, not a question.
+**These are the user's call, not yours to silently assume.** At each loop kickoff — each time this skill is invoked to start or resume working through units — ask **one compact question** covering thinking level (effort) and speed (service tier), with the user's current config values presented as the inherit option (read them from `~/.codex/config.toml` first so the question shows real values, e.g. "inherit: gpt-5.6-sol / xhigh / priority"). The answer holds for the **entire invocation** — never re-ask per unit. These knobs sit at kickoff rather than in per-repo calibration because the right setting tracks the day's work: a heavy correctness-critical unit wants high effort; a batch of mechanical edits doesn't.
+
+Two boundaries on the kickoff question:
+- If the user has recorded a standing preference ("stop asking, always inherit my config"), respect it — the question exists to give control, not friction.
+- Effort and model are overridable per-dispatch via flags; **tier is config-only** — if the user picks a different tier at kickoff, they change it themselves (`/fast` in the codex TUI) or explicitly ask you to edit their config. Don't edit their global config on your own initiative.
+
+The dispatch summary printing model/effort/tier on each run is disclosure, not a question.
 
 How resolution works, which shapes the choice:
 
@@ -250,7 +256,7 @@ Keep going on your own except when:
 Work these out once and record them (CLAUDE.md or memory) so future sessions skip the discovery:
 
 - **The seven dials above** — stop point, dispatch mode, gate policy, on-red behavior, review depth, cadence, fix lane. Recording them is what lets later sessions resume without re-litigating settled decisions.
-- **Model, effort, and service tier** for this project, and whether to inherit the user's config or override (tier is config-only — no per-dispatch flag).
+- **Whether the kickoff effort/speed question is wanted** (the default) or the user prefers a standing "always inherit, don't ask". Model/effort/tier themselves are per-invocation kickoff answers, not per-repo constants (tier is config-only — no per-dispatch flag).
 - **CLI freshness**: note `codex --version` at loop start. When a model or flag seems missing later, a stale CLI is the first suspect — check the version before debugging anything else.
 - The exact full-suite command, its runtime, and whether serial or parallel is faster.
 - Known environment flakes on this machine, so the gate has a baseline. Keep a base-branch gate log around for `--baseline` comparison — and regenerate it after each merge, because the baseline is the base branch as it is *now*, not as it was last week.
