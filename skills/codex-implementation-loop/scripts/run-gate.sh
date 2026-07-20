@@ -62,13 +62,38 @@ normalize_path() { # $1=path; the file itself need not exist
   fi
 }
 
+resolve_symlink_path() { # $1=normalized path; resolves dangling link targets too
+  local path="$1"
+  local target directory
+  local links=0
+
+  while [[ -L "$path" ]]; do
+    links=$((links + 1))
+    [[ $links -le 40 ]] || break
+    target="$(readlink "$path" 2>/dev/null)" || break
+    if [[ "$target" == /* ]]; then
+      path="$target"
+    else
+      directory="${path%/*}"
+      [[ -n "$directory" ]] || directory="/"
+      path="$directory/$target"
+    fi
+    path="$(normalize_path "$path")"
+  done
+
+  printf '%s\n' "$path"
+}
+
 # Never overwrite the evidence before reading it. Normalized strings catch
-# equal paths even when the log does not exist yet; -ef also catches existing
-# symlink, hardlink, and alternate-relative-path aliases.
+# equal paths even when the log does not exist yet; resolved strings also catch
+# dangling symlinks, while -ef catches existing hardlink and filesystem aliases.
 if [[ -n "$BASELINE" ]]; then
   NORMALIZED_LOG="$(normalize_path "$LOG")"
   NORMALIZED_BASELINE="$(normalize_path "$BASELINE")"
+  RESOLVED_LOG="$(resolve_symlink_path "$NORMALIZED_LOG")"
+  RESOLVED_BASELINE="$(resolve_symlink_path "$NORMALIZED_BASELINE")"
   if [[ "$NORMALIZED_LOG" == "$NORMALIZED_BASELINE" ]] ||
+     [[ "$RESOLVED_LOG" == "$RESOLVED_BASELINE" ]] ||
      [[ -e "$LOG" && "$LOG" -ef "$BASELINE" ]]; then
     echo "error: --log and --baseline refer to the same file; use separate paths" >&2
     exit 2
@@ -88,9 +113,25 @@ extract_failures() { # $1=log path
     /^FAILED \(/ || /^ERROR \(/ { next }
     /^FAILED / || /^ERROR / {
       line = $0
-      if (match(line, /[[:space:]]+-[[:space:]]+/)) {
-        identifier = substr(line, 1, RSTART - 1)
-        exception = substr(line, RSTART + RLENGTH)
+      depth = 0
+      separator = 0
+      separator_length = 0
+      for (i = 1; i <= length(line); i++) {
+        character = substr(line, i, 1)
+        if (character == "[") {
+          depth++
+        } else if (character == "]" && depth > 0) {
+          depth--
+        } else if (depth == 0 &&
+                   match(substr(line, i), /^[[:space:]]+-[[:space:]]+/)) {
+          separator = i
+          separator_length = RLENGTH
+          break
+        }
+      }
+      if (separator > 0) {
+        identifier = substr(line, 1, separator - 1)
+        exception = substr(line, separator + separator_length)
         sub(/[[:space:]:].*$/, "", exception)
         line = identifier
         if (exception != "") line = line " [" exception "]"
@@ -103,7 +144,15 @@ extract_failures() { # $1=log path
 tests_ran() { # $1=log path
   awk '
     /^Ran [0-9]+ tests?/ {
-      if (($2 + 0) > 0) ran = 1
+      unittest_total += ($2 + 0)
+    }
+    /^OK([[:space:]]|$)/ || /^FAILED[[:space:]]+\(/ {
+      result = $0
+      if (match(result, /skipped=[0-9]+/)) {
+        skipped = substr(result, RSTART, RLENGTH)
+        sub(/^skipped=/, "", skipped)
+        unittest_skipped += (skipped + 0)
+      }
     }
     {
       line = tolower($0)
@@ -112,7 +161,10 @@ tests_ran() { # $1=log path
         ran = 1
       }
     }
-    END { exit(ran ? 0 : 1) }
+    END {
+      if ((unittest_total - unittest_skipped) > 0) ran = 1
+      exit(ran ? 0 : 1)
+    }
   ' "$1" 2>/dev/null
 }
 
@@ -134,6 +186,15 @@ supported_runner_summary() { # $1=log path
     END { exit(recognized ? 0 : 1) }
   ' "$1" 2>/dev/null
 }
+
+# Freeze the comparison evidence before the command can mutate either path.
+# Every post-run baseline decision uses these values, never the live file.
+BASELINE_EXISTS_AT_START=0
+BASELINE_FAILURES_AT_START=""
+if [[ -n "$BASELINE" && -f "$BASELINE" ]]; then
+  BASELINE_EXISTS_AT_START=1
+  BASELINE_FAILURES_AT_START="$(extract_failures "$BASELINE" | sort -u || true)"
+fi
 
 START=$SECONDS
 # Output goes to a file, never through a pipe, so $? is the suite's own.
@@ -162,11 +223,11 @@ fi
 # non-flake failures", not "zero failures", on suites with known
 # environment flakes. Compare rather than eyeballing when possible.
 NEW_FAILURES=""
-if [[ -n "$BASELINE" && -f "$BASELINE" ]]; then
+if [[ -n "$BASELINE" && $BASELINE_EXISTS_AT_START -eq 1 ]]; then
   echo "--- failures not present in baseline ($BASELINE) ---"
   NEW_FAILURES="$(comm -13 \
-    <(extract_failures "$BASELINE" | sort -u) \
-    <(extract_failures "$LOG"      | sort -u) \
+    <(printf '%s\n' "$BASELINE_FAILURES_AT_START" | sort -u) \
+    <(printf '%s\n' "$CURRENT_FAILURES"           | sort -u) \
     || true)"
   [[ -z "$NEW_FAILURES" ]] || printf '%s\n' "$NEW_FAILURES"
 elif [[ -n "$BASELINE" ]]; then
@@ -213,7 +274,7 @@ fi
 
 if ! tests_ran "$LOG"; then
   echo "RESULT: gate RED — failures parsed but no completed tests were reported"
-elif [[ ! -f "$BASELINE" || -n "$NEW_FAILURES" ]]; then
+elif [[ $BASELINE_EXISTS_AT_START -eq 0 || -n "$NEW_FAILURES" ]]; then
   echo "RESULT: gate RED — do not publish until resolved or explained"
 else
   echo "RESULT: gate green (failures match baseline — no new failures)"

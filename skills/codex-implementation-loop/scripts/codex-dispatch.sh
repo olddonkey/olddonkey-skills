@@ -110,7 +110,7 @@ except (ValueError, TypeError):
 if not isinstance(entries, list):
     raise SystemExit(0)
 
-scope_order = {"local": 0, "project": 1, "user": 2}
+scope_order = {"managed": 0, "local": 1, "project": 2, "user": 3}
 candidates = []
 for index, entry in enumerate(entries):
     if not isinstance(entry, dict):
@@ -122,7 +122,7 @@ for index, entry in enumerate(entries):
         continue
     companion = os.path.join(install_path, "scripts", "codex-companion.mjs")
     if os.path.isfile(companion):
-        candidates.append((scope_order.get(entry.get("scope"), 3), index, install_path))
+        candidates.append((scope_order.get(entry.get("scope"), 4), index, install_path))
 
 if candidates:
     print(min(candidates)[2])
@@ -165,10 +165,10 @@ entries = [
     )
 ]
 if entries:
-    scope_order = {"local": 0, "project": 1, "user": 2}
+    scope_order = {"managed": 0, "local": 1, "project": 2, "user": 3}
     chosen = min(
         enumerate(entries),
-        key=lambda item: (scope_order.get(item[1].get("scope"), 3), item[0]),
+        key=lambda item: (scope_order.get(item[1].get("scope"), 4), item[0]),
     )[1]
     print(chosen["installPath"])
 PY
