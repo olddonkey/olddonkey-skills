@@ -280,6 +280,32 @@ expect_status 1 "plain gate rejects an exit-zero unittest failed summary"
 expect_output "RESULT: gate RED — runner summary reports failures but exit code is 0" \
   "plain gate diagnoses a unittest summary/exit contradiction"
 
+# pytest -q emits its summary without fences; a failing quiet summary must
+# contradict a masked exit-zero even without --baseline.
+run_case gate-plain-quiet-masked bash "$GATE" \
+  --log "$TMP_ROOT/gate-plain-quiet-masked.log" -- \
+  bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n1 failed in 0.01s\n'\'''
+expect_status 1 "plain gate rejects an exit-zero quiet-mode failed summary"
+expect_output "RESULT: gate RED — runner summary reports failures but exit code is 0" \
+  "plain gate diagnoses a quiet-mode summary/exit contradiction"
+
+# Positive error counts (collection errors) are failure evidence too.
+run_case gate-plain-error-masked bash "$GATE" \
+  --log "$TMP_ROOT/gate-plain-error-masked.log" -- \
+  bash -c 'printf '\''ERROR test_collect.py - RuntimeError: boom\n=========================== 1 error in 0.04s ===========================\n'\'''
+expect_status 1 "plain gate rejects an exit-zero errors summary"
+expect_output "RESULT: gate RED — runner summary reports failures but exit code is 0" \
+  "plain gate treats positive error counts as failure evidence"
+
+# The quiet form only counts when it matches the full official pytest shape,
+# so application log lines mentioning failure counts stay out of the check.
+run_case gate-plain-quiet-lookalike bash "$GATE" \
+  --log "$TMP_ROOT/gate-plain-quiet-lookalike.log" -- \
+  bash -c 'printf '\''deploy: 3 failed in the last hour\n2 failed in staging\n'\'''
+expect_status 0 "plain gate ignores failure-count words outside a formal summary shape"
+expect_output "RESULT: gate green" \
+  "plain gate keeps lookalike log lines out of the consistency check"
+
 EMPTY_BASELINE="$TMP_ROOT/empty-baseline.log"
 : > "$EMPTY_BASELINE"
 run_case gate-baseline-masked-new bash "$GATE" \
@@ -288,6 +314,34 @@ run_case gate-baseline-masked-new bash "$GATE" \
 expect_status 1 "baseline gate rejects an exit-zero run with a new parsed failure"
 expect_output "RESULT: gate RED — exit 0 but failure lines present (is the runner masking its exit code?)" \
   "baseline gate retains its stricter line-only masking check"
+
+# Quiet-mode summaries are first-class execution evidence under --baseline:
+# a passing -q run is green, a baseline-matched -q failure is green, and a
+# quiet no-tests run still fails closed.
+run_case gate-quiet-pass bash "$GATE" \
+  --log "$TMP_ROOT/gate-quiet-pass.log" --baseline "$EMPTY_BASELINE" -- \
+  bash -c 'printf '\''.\n2 passed in 0.03s\n'\'''
+expect_status 0 "baseline gate accepts a passing pytest -q run"
+expect_output "RESULT: gate green" \
+  "baseline gate recognizes the quiet-mode passed summary as executed tests"
+
+QUIET_BASELINE="$TMP_ROOT/pytest-quiet-baseline.log"
+write_lines "$QUIET_BASELINE" \
+  'FAILED tests/test_widget.py::test_flaky - AssertionError: detail' \
+  '1 failed in 0.01s'
+run_case gate-quiet-known bash "$GATE" \
+  --log "$TMP_ROOT/gate-quiet-known.log" --baseline "$QUIET_BASELINE" -- \
+  bash -c 'printf '\''FAILED tests/test_widget.py::test_flaky - AssertionError: detail\n1 failed in 0.01s\n'\''; exit 1'
+expect_status 0 "baseline gate matches a known failure reported by a quiet-mode summary"
+expect_output "RESULT: gate green (failures match baseline — no new failures)" \
+  "baseline gate counts quiet-mode failed summaries as executed tests"
+
+run_case gate-quiet-no-tests bash "$GATE" \
+  --log "$TMP_ROOT/gate-quiet-no-tests.log" --baseline "$EMPTY_BASELINE" -- \
+  bash -c 'printf '\''no tests ran in 0.01s\n'\'''
+expect_nonzero "baseline gate fails closed on a quiet-mode no-tests run"
+expect_output "RESULT: gate RED — no executed tests — skipped-only or unrecognized runner output" \
+  "baseline gate reads the quiet-mode no-tests summary"
 
 # A shared log/baseline target must be rejected before the command can truncate
 # it. The first case exercises normalized string equality before either exists;

@@ -104,6 +104,26 @@ fi
 echo "gate: $*" >&2
 echo "log:  $LOG" >&2
 
+# pytest emits its formal summary either fenced (`=== 1 failed in 0.1s ===`)
+# or, under -q, as a bare bottom line (`1 failed in 0.1s`). pytest_summary
+# returns the lowercased summary content for either shape and "" otherwise.
+# The bare form must match the full official shape — count list plus an
+# `in <duration>s` tail — so ordinary log lines never qualify as a summary.
+PYTEST_SUMMARY_AWK='
+  function pytest_summary(line,    content) {
+    content = tolower(line)
+    if (content ~ /^=+ .* =+$/) {
+      sub(/^=+[[:space:]]+/, "", content)
+      sub(/[[:space:]]+=+$/, "", content)
+      return content
+    }
+    if (content ~ /^(no tests ran|[0-9]+ (passed|failed|error|errors|skipped|deselected|xfailed|xpassed|warning|warnings)(, [0-9]+ (passed|failed|error|errors|skipped|deselected|xfailed|xpassed|warning|warnings))*) in [0-9]+(\.[0-9]+)?s( \([0-9:]+\))?$/) {
+      return content
+    }
+    return ""
+  }
+'
+
 # Emit stable failure identifiers from unittest headers and pytest's short
 # summary. unittest FAIL:/ERROR: headers contain no exception information, so
 # those remain ID-only. For unambiguous pytest lines, retain the exception class
@@ -146,7 +166,7 @@ extract_failures() { # $1=log path
 }
 
 tests_ran() { # $1=log path
-  awk '
+  awk "$PYTEST_SUMMARY_AWK"'
     /^Ran [0-9]+ tests?/ {
       unittest_total += ($2 + 0)
     }
@@ -158,12 +178,11 @@ tests_ran() { # $1=log path
         unittest_skipped += (skipped + 0)
       }
     }
-    /^=+ .* =+$/ {
-      line = tolower($0)
-      sub(/^=+[[:space:]]+/, "", line)
-      sub(/[[:space:]]+=+$/, "", line)
-      if (line !~ /^no tests ran([^[:alpha:]]|$)/ &&
-          line ~ /[1-9][0-9]*[[:space:]]+(passed|failed|xfailed|xpassed)([^[:alpha:]]|$)/) {
+    {
+      summary = pytest_summary($0)
+      if (summary != "" &&
+          summary !~ /^no tests ran([^[:alpha:]]|$)/ &&
+          summary ~ /[1-9][0-9]*[[:space:]]+(passed|failed|xfailed|xpassed)([^[:alpha:]]|$)/) {
         ran = 1
       }
     }
@@ -175,27 +194,23 @@ tests_ran() { # $1=log path
 }
 
 zero_tests_reported() { # $1=log path
-  awk '
+  awk "$PYTEST_SUMMARY_AWK"'
     /^Ran 0 tests?([[:space:]]|$)/ { zero = 1 }
-    /^=+ .* =+$/ {
-      line = tolower($0)
-      sub(/^=+[[:space:]]+/, "", line)
-      sub(/[[:space:]]+=+$/, "", line)
-      if (line ~ /^no tests ran([^[:alpha:]]|$)/) zero = 1
+    {
+      if (pytest_summary($0) ~ /^no tests ran([^[:alpha:]]|$)/) zero = 1
     }
     END { exit(zero ? 0 : 1) }
   ' "$1" 2>/dev/null
 }
 
 supported_runner_summary() { # $1=log path
-  awk '
+  awk "$PYTEST_SUMMARY_AWK"'
     /^Ran [0-9]+ tests?/ { recognized = 1 }
-    /^=+ .* =+$/ {
-      line = tolower($0)
-      sub(/^=+[[:space:]]+/, "", line)
-      sub(/[[:space:]]+=+$/, "", line)
-      if (line ~ /^no tests ran([^[:alpha:]]|$)/ ||
-          line ~ /[0-9]+[[:space:]]+(passed|failed|skipped|deselected|xfailed|xpassed|error|errors|warning|warnings)([^[:alpha:]]|$)/) {
+    {
+      summary = pytest_summary($0)
+      if (summary != "" &&
+          (summary ~ /^no tests ran([^[:alpha:]]|$)/ ||
+           summary ~ /[0-9]+[[:space:]]+(passed|failed|skipped|deselected|xfailed|xpassed|error|errors|warning|warnings)([^[:alpha:]]|$)/)) {
         recognized = 1
       }
     }
@@ -203,18 +218,18 @@ supported_runner_summary() { # $1=log path
   ' "$1" 2>/dev/null
 }
 
+# Positive error counts (collection errors, fixture errors) contradict an
+# exit-zero run exactly like failed counts do.
 failed_summary_present() { # $1=log path
-  awk '
+  awk "$PYTEST_SUMMARY_AWK"'
     /^FAILED \(/ { failed = 1 }
-    /^=+ .* =+$/ {
-      line = tolower($0)
-      sub(/^=+[[:space:]]+/, "", line)
-      sub(/[[:space:]]+=+$/, "", line)
-      while (match(line, /[0-9]+[[:space:]]+failed([^[:alpha:]]|$)/)) {
-        count = substr(line, RSTART, RLENGTH)
+    {
+      summary = pytest_summary($0)
+      while (match(summary, /[0-9]+[[:space:]]+(failed|error|errors)([^[:alpha:]]|$)/)) {
+        count = substr(summary, RSTART, RLENGTH)
         sub(/[[:space:]].*$/, "", count)
         if ((count + 0) > 0) failed = 1
-        line = substr(line, RSTART + RLENGTH)
+        summary = substr(summary, RSTART + RLENGTH)
       }
     }
     END { exit(failed ? 0 : 1) }
@@ -239,7 +254,7 @@ ELAPSED=$((SECONDS - START))
 echo "=== gate finished in ${ELAPSED}s with exit code ${STATUS} ==="
 
 # Surface the shapes most runners use for their summary line.
-grep -E '^(Ran [0-9]+ |OK\b|FAILED\b|ERROR\b|=+ .*(passed|failed|no tests ran).* =+)' "$LOG" | tail -5
+grep -E '^(Ran [0-9]+ |OK\b|FAILED\b|ERROR\b|=+ .*(passed|failed|no tests ran).* =+|(no tests ran|[0-9]+ [a-z]+(, [0-9]+ [a-z]+)*) in [0-9]+(\.[0-9]+)?s)' "$LOG" | tail -5
 
 CURRENT_FAILURES="$(extract_failures "$LOG" || true)"
 FAILED_SUMMARY=0
