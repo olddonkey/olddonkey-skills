@@ -116,6 +116,7 @@ extract_failures() { # $1=log path
       depth = 0
       separator = 0
       separator_length = 0
+      separator_count = 0
       for (i = 1; i <= length(line); i++) {
         character = substr(line, i, 1)
         if (character == "[") {
@@ -124,17 +125,43 @@ extract_failures() { # $1=log path
           depth--
         } else if (depth == 0 &&
                    match(substr(line, i), /^[[:space:]]+-[[:space:]]+/)) {
-          separator = i
-          separator_length = RLENGTH
-          break
+          separator_count++
+          if (separator_count == 1) {
+            separator = i
+            separator_length = RLENGTH
+          }
+          i += RLENGTH - 1
         }
       }
-      if (separator > 0) {
+
+      # Additional depth-0 separators in messages make the parse ambiguous,
+      # so keeping the whole line in that case is intentional fail-closed behavior.
+      if (separator_count == 1) {
         identifier = substr(line, 1, separator - 1)
+        bracket_depth = 0
+        brackets_balanced = 1
+        for (i = 1; i <= length(identifier); i++) {
+          character = substr(identifier, i, 1)
+          if (character == "[") {
+            bracket_depth++
+          } else if (character == "]") {
+            if (bracket_depth == 0) {
+              brackets_balanced = 0
+            } else {
+              bracket_depth--
+            }
+          }
+        }
+        if (bracket_depth != 0) brackets_balanced = 0
+
         exception = substr(line, separator + separator_length)
-        sub(/[[:space:]:].*$/, "", exception)
-        line = identifier
-        if (exception != "") line = line " [" exception "]"
+        sub(/^[[:space:]]+/, "", exception)
+        sub(/[[:space:]].*$/, "", exception)
+        sub(/:$/, "", exception)
+        if (brackets_balanced &&
+            exception ~ /^[A-Za-z_][A-Za-z0-9_.]*$/) {
+          line = identifier " [" exception "]"
+        }
       }
       print line
     }
@@ -242,6 +269,13 @@ if [[ -z "$BASELINE" ]]; then
     echo "RESULT: gate RED — do not publish until resolved or explained"
   fi
   exit "$STATUS"
+fi
+
+# In baseline mode, parsed failures and a successful process status contradict
+# each other. Do not trust fingerprints from a runner that masked its own exit.
+if [[ $STATUS -eq 0 && $FAILURES -gt 0 ]]; then
+  echo "RESULT: gate RED — exit 0 but failure lines present (is the runner masking its exit code?)"
+  exit 1
 fi
 
 # A nonzero run with no recognizable failures is never baseline-clean. Check
