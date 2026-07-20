@@ -21,15 +21,17 @@ These change what the loop does to the user's repo, so they're the user's call. 
 
 | Dial | Options | Recommended default |
 | --- | --- | --- |
-| **Stop point** | `worktree` / `commit` / `pr` / `merge` | `pr` |
+| **Stop point** | `worktree` / `commit` / `pr` / `merge` | recommend `pr`; assumed default stops at `commit` |
 | **Dispatch mode** | `implement` / `read-only` | `implement` |
 | **Gate policy** | `baseline` / `strict` / `skip` | `baseline` |
 | **On gate red** | `stop` / `iterate` | `stop` |
 | **Review depth** | `light` / `standard` / `deep` | `standard` |
-| **Cadence** | `confirm` / `continuous` | ask first, then `continuous` |
+| **Cadence** | `confirm` / `continuous` | `confirm`; `continuous` fits stop=`merge` |
 | **Fix lane** | `codex` / `claude-trivial-ok` | `codex` |
 
-**Stop point** decides how far each unit travels — leave changes in the working tree, commit to a branch, open a PR, or merge. It's the only dial that bounds irreversible action, which makes it the one worth being explicit about. `pr` is the default because a PR is a reviewable artifact that costs nothing to abandon, while merging is the step you can't quietly undo. Only use `merge` when the user has actually authorized autonomous merging; that authorization is per-project and doesn't carry over from another repo or another session.
+One boundary is not a dial: **an assumed default never leaves the machine.** Telling the user which default you're using is transparency, not authorization — and pushing a branch or opening a PR is outward-visible (CI runs, notifications fire, collaborators see it). With no explicit user choice, carry a unit as far as a local commit and stop; push/PR/merge each need the user to have actually said yes once for this repo.
+
+**Stop point** decides how far each unit travels — leave changes in the working tree, commit to a branch, open a PR, or merge. It's the only dial that bounds irreversible action, which makes it the one worth being explicit about. `pr` is the recommendation because a PR is a reviewable artifact that costs nothing to abandon, while merging is the step you can't quietly undo — but per the boundary above, reaching `pr` at all requires the user to have actually chosen it. Only use `merge` when the user has actually authorized autonomous merging; that authorization is per-project and doesn't carry over from another repo or another session.
 
 Stop point and cadence interact: with a stop point short of `merge`, the unit hasn't landed when the next one would start, so `continuous` stacks unit 2 on top of unit 1's unmerged changes — diffs blur together and review attribution breaks. Unless the user deliberately wants stacked branches, pair `worktree`/`commit`/`pr` with `confirm` (or wait for each unit to land before dispatching the next); `continuous` really fits `merge`.
 
@@ -58,8 +60,11 @@ If the design isn't settled, settle it **before** dispatching. Codex implements 
 Use `scripts/codex-dispatch.sh` (bundled), which locates the newest installed companion and invokes it correctly:
 
 ```bash
-scripts/codex-dispatch.sh --prompt-file /path/to/prompt.txt            # inherit user's config
-scripts/codex-dispatch.sh --prompt-file /path/to/prompt.txt \
+# SKILL_DIR = this skill's own install directory (for plugin installs, ${CLAUDE_PLUGIN_ROOT}).
+# The scripts live next to this SKILL.md — NOT in the target repo, which is where a bare
+# relative path would point after you cd to the repo root.
+"$SKILL_DIR/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt     # inherit user's config
+"$SKILL_DIR/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
     --model gpt-5.6-sol --effort xhigh          # explicit override (model name is an example — they age)
 ```
 
@@ -68,7 +73,8 @@ Dispatch hygiene — each of these failure modes is silent when it happens:
 - **Run it from the root of the target repo.** The companion operates on the invoking directory; dispatched from the wrong place, Codex works on the wrong workspace with no error. The script prints `workspace:` so a wrong-directory dispatch is visible immediately — read that line.
 - **Start from a clean tree** (`git status --short` first). Codex's changes arrive unstaged in the working tree; pre-existing dirt makes "what did Codex actually change" unanswerable at review time.
 - **One unit in flight at a time.** Iteration uses `--resume-last`, which binds to the most recent thread — two concurrent dispatches would cross their review threads.
-- **Write the prompt to a file** rather than inlining it — dispatch prompts are long, and shell-escaping a multi-paragraph prompt is a reliable way to corrupt it.
+- **Write the prompt to a file, and put that file outside the target repo** (`/tmp` or your scratch directory) — dispatch prompts are long, and shell-escaping a multi-paragraph prompt is a reliable way to corrupt it. Outside the repo, because the clean-tree rule applies to your own droppings too: a prompt file inside the repo pollutes the very diff you're about to review.
+- **If the stop point involves a branch** (`commit`/`pr`/`merge`), create and switch to the unit branch *before* dispatching — Codex's changes then land on the right branch from the start, and the pre-push branch check becomes a confirmation instead of a rescue.
 - **Background at the harness level** (your shell's background-task mechanism), which keeps the full event stream in one file you can read later. The companion's own `--background` is different: it *detaches* and returns a job id to poll. Use it only when you specifically want detachment, and know that a detached task keeps running even when the launching command looks like it failed — bad arguments can still start a real job.
 
 ### Choosing model and effort
@@ -81,7 +87,7 @@ How resolution works, which shapes the choice:
 - **Pass a flag** to override for this task only. Never edit their global config to force a setting — that changes their own Codex use outside this loop.
 - **`ultra` and `max` efforts are real but flag-rejected.** The wrapper accepts only `none|minimal|low|medium|high|xhigh`; the higher two exist only as `model_reasoning_effort` in config.toml. So the way to run at max is to *omit* `--effort` and let config supply it. If the user asks for max, don't pass it — explain this and inherit.
 - **Model names are passed through to the CLI as-is** — nothing here maintains a model list, so new Codex models work the day they ship; availability depends on the user's account. Aliases may exist in the companion (as of 1.0.6, `spark` → `gpt-5.3-codex-spark`). **Model names age fast; never recommend one from memory.** When unsure what the user has or what's current, read `~/.codex/config.toml` first, then ask.
-- **Service tier is a third speed lever, separate from model and effort.** Codex supports priority routing (**Fast**) and cheaper-but-slower **flex**; support varies by model. Same model, same reasoning — different queue: model trades capability, effort trades thinking depth, tier trades routing speed/cost. The user picks it with the **`/fast` slash command in the codex TUI**, which persists to `service_tier` in `~/.codex/config.toml` (stored values: `fast` / `flex` / `default`); editing the config key directly works too. The companion has no per-task tier flag, so every dispatch inherits whatever the config says — the dispatch script prints the inherited tier so it's visible. Ask once at calibration; a mid-loop tier change is a conditions change worth noting, not something to do silently.
+- **Service tier is a third speed lever, separate from model and effort.** Codex supports priority routing (**Fast**) and cheaper-but-slower **flex**; support varies by model. Same model, same reasoning — different queue: model trades capability, effort trades thinking depth, tier trades routing speed/cost. The user picks it with the **`/fast` slash command in the codex TUI**, which persists to `service_tier` in `~/.codex/config.toml`; editing the config key directly works too. Canonical values per the official schema are `priority` / `flex` / `default`, with legacy `fast` still accepted — and `fast` is what the TUI currently writes, so expect either spelling when reading a config. The companion has no per-task tier flag, so every dispatch inherits whatever the config says — the dispatch script prints the inherited tier so it's visible. Ask once at calibration; a mid-loop tier change is a conditions change worth noting, not something to do silently.
 - **A "missing" model usually means a stale CLI, not a wrong name.** New models require a recent `codex` CLI. Before concluding a model or flag is unavailable, check `codex --version` (the dispatch script prints it on every run). The safe update path is **`codex update`** — the CLI's own updater works regardless of how it was installed. Don't reinstall through a different channel (e.g. npm on top of a standalone install): two skewed copies of `codex` on one machine is a real failure mode, where a model "doesn't exist" until the copy actually being used gets updated. The CLI is the user's environment — get their OK before updating, and update between units rather than mid-unit so a version change doesn't muddy attribution.
 
 Reasonable way to pick, if the user wants a recommendation: raise effort for work where a subtle mistake is expensive to catch downstream — anything touching correctness boundaries, concurrency, or migrations — and lower it for mechanical, well-specified edits where the spec leaves little room for judgment. Model choice usually follows whatever they're already running; the interesting dial is effort.
@@ -140,9 +146,9 @@ Unit: <one-line name>
 
 These aren't hypothetical; each cost real time to learn.
 
-- **Codex runs in the real environment**, not an isolated sandbox. It shares the machine with you.
+- **Codex executes on the same host as you.** Its sandbox level is whatever the user's codex config sets (`workspace-write` is common; some setups run `danger-full-access`) — but every mode shares your CPU, RAM, and disk, which is what makes the test-suite rule below matter regardless of sandbox.
 - **Its `.git` is effectively read-only** — it cannot commit, branch, or push. Tell it to leave changes in the working tree; you commit and publish.
-- **Never ask it to run the full test suite.** On a suite with real subprocess/socket/lock tests this can crawl for hours *and* saturate the machine, slowing everything else you're running. Tell it explicitly: run only a focused subset covering the modules it touched, or nothing at all, because you own the full gate.
+- **Don't let it run the full test suite by default.** On a suite with real subprocess/socket/lock tests this can crawl for hours *and* saturate the machine, slowing everything else you're running. Tell it explicitly: run only a focused subset covering the modules it touched, or nothing at all, because you own the full gate. If first-run calibration shows the suite is genuinely small and fast, you may relax this deliberately — the gate stays yours either way.
 - Ask it to report which files it changed, which tests it added, and which focused subset it ran — so your review has a starting map.
 
 ### Monitoring, stuck jobs, and cleanup
@@ -183,7 +189,7 @@ Check the whole working tree (`git status --short`), not just the files Codex me
 If you find issues, send them back on the same thread with specifics: what's wrong, why it matters, what you expect instead. Mechanically that's the dispatch script again with `--resume`, so the thread keeps its context:
 
 ```bash
-scripts/codex-dispatch.sh --resume --prompt-file review-findings.txt
+"$SKILL_DIR/scripts/codex-dispatch.sh" --resume --prompt-file /tmp/review-findings.txt
 ```
 
 Then review again. Repeat until the diff is something you'd sign your name to — which you're about to.
@@ -199,7 +205,7 @@ Run the whole suite yourself before publishing. Two details matter:
 **Capture the real exit code.** Piping the run through `tail`/`head` makes the pipeline's exit status that of the pager, so a failing suite looks green. Use the bundled helper, which writes full output to a log and reports the actual status:
 
 ```bash
-scripts/run-gate.sh --log /tmp/gate.log -- <your test command>
+"$SKILL_DIR/scripts/run-gate.sh" --log /tmp/gate.log -- <your test command>
 ```
 
 **Prefer serial.** For suites heavy in real I/O, file locks, fixed ports, or subprocess spawning, parallelism serializes on the shared resources anyway and often ends up *slower* than serial while making failures harder to attribute. Measure before assuming parallel helps.
