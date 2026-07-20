@@ -94,6 +94,23 @@ write_lines "$BIN_DIR/codex" \
 chmod +x "$BIN_DIR/node" "$BIN_DIR/codex"
 TEST_PATH="$BIN_DIR:$PATH"
 
+# Resolution fallbacks must be testable without discovering a real Claude CLI
+# from the developer machine. Populate an isolated PATH with only the commands
+# the dispatcher needs, deliberately omitting `claude`.
+NO_CLAUDE_BIN="$TMP_ROOT/no-claude-bin"
+mkdir -p "$NO_CLAUDE_BIN"
+for required_tool in awk bash cat cut find grep head python3 sed sort tail tr; do
+  REQUIRED_TOOL_PATH="$(command -v "$required_tool" 2>/dev/null || true)"
+  [[ -n "$REQUIRED_TOOL_PATH" ]] || {
+    printf 'selftest: required tool not found: %s\n' "$required_tool" >&2
+    exit 1
+  }
+  ln -s "$REQUIRED_TOOL_PATH" "$NO_CLAUDE_BIN/$required_tool" || exit 1
+done
+ln -s "$BIN_DIR/node" "$NO_CLAUDE_BIN/node" || exit 1
+ln -s "$BIN_DIR/codex" "$NO_CLAUDE_BIN/codex" || exit 1
+NO_CLAUDE_PATH="$NO_CLAUDE_BIN"
+
 NO_USAGE_COMPANION="$TMP_ROOT/no-usage/codex-companion.mjs"
 LIMITED_COMPANION="$TMP_ROOT/override/codex-companion.mjs"
 mkdir -p "$(dirname "$NO_USAGE_COMPANION")" "$(dirname "$LIMITED_COMPANION")"
@@ -138,23 +155,62 @@ expect_output "companion: $LIMITED_COMPANION (explicit override)" \
 expect_output "model : config-model (from config.toml; profiles/overrides not resolved)" \
   "dispatch reads and qualifies the CODEX_HOME config display"
 
-# installed_plugins.json is authoritative over a newer cache path, and a user
-# entry wins over an earlier non-user entry when multiple installs are listed.
+# The Claude CLI view is preferred and resolves enabled entries with
+# local > project > user precedence, independent of JSON list order.
+CLAUDE_BIN="$TMP_ROOT/claude-bin"
+CLAUDE_DISABLED_ROOT="$TMP_ROOT/claude-disabled"
+CLAUDE_USER_ROOT="$TMP_ROOT/claude-user"
+CLAUDE_PROJECT_ROOT="$TMP_ROOT/claude-project"
+CLAUDE_LOCAL_ROOT="$TMP_ROOT/claude-local"
+mkdir -p "$CLAUDE_BIN" \
+  "$CLAUDE_DISABLED_ROOT/scripts" "$CLAUDE_USER_ROOT/scripts" \
+  "$CLAUDE_PROJECT_ROOT/scripts" "$CLAUDE_LOCAL_ROOT/scripts"
+write_lines "$CLAUDE_BIN/claude" \
+  '#!/usr/bin/env bash' \
+  '[[ "$*" == "plugin list --json" ]] || exit 64' \
+  'printf '\''%s\n'\'' "${SELFTEST_CLAUDE_JSON:-}"'
+chmod +x "$CLAUDE_BIN/claude"
+for companion_root in \
+  "$CLAUDE_DISABLED_ROOT" "$CLAUDE_USER_ROOT" \
+  "$CLAUDE_PROJECT_ROOT" "$CLAUDE_LOCAL_ROOT"; do
+  write_lines "$companion_root/scripts/codex-companion.mjs" '// --effort <low|high>'
+done
+CLAUDE_PLUGIN_JSON="$(printf \
+  '[{"id":"codex@openai-codex","scope":"local","enabled":false,"installPath":"%s"},{"id":"codex@openai-codex","scope":"user","enabled":true,"installPath":"%s"},{"id":"codex@openai-codex","scope":"project","enabled":true,"installPath":"%s"},{"id":"codex@openai-codex","scope":"local","enabled":true,"installPath":"%s"}]' \
+  "$CLAUDE_DISABLED_ROOT" "$CLAUDE_USER_ROOT" "$CLAUDE_PROJECT_ROOT" "$CLAUDE_LOCAL_ROOT")"
+CLAUDE_NODE_LOG="$TMP_ROOT/claude-list.node"
+run_case dispatch-claude-list env \
+  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" CODEX_LOOP_COMPANION="" \
+  SELFTEST_CLAUDE_JSON="$CLAUDE_PLUGIN_JSON" SELFTEST_NODE_LOG="$CLAUDE_NODE_LOG" \
+  PATH="$CLAUDE_BIN:$NO_CLAUDE_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort low
+expect_status 0 "dispatch accepts the enabled local install from the Claude CLI"
+expect_first_line "$CLAUDE_NODE_LOG" "$CLAUDE_LOCAL_ROOT/scripts/codex-companion.mjs" \
+  "dispatch applies local > project > user precedence to the Claude CLI list"
+expect_output "(claude plugin list)" "dispatch reports Claude-CLI resolution"
+
+# With `claude` absent, installed_plugins.json remains authoritative over a
+# newer cache entry. Disabled local entries are skipped and project beats user.
 ACTIVE_ROOT="$HOME_DIR/.claude/plugins/cache/openai-codex/codex/1.0.6"
 STALE_ROOT="$HOME_DIR/.claude/plugins/cache/openai-codex/codex/9.9.9"
-mkdir -p "$ACTIVE_ROOT/scripts" "$STALE_ROOT/scripts" "$HOME_DIR/.claude/plugins"
+DISABLED_ROOT="$HOME_DIR/.claude/plugins/cache/openai-codex/codex/0.0.1"
+mkdir -p \
+  "$ACTIVE_ROOT/scripts" "$STALE_ROOT/scripts" "$DISABLED_ROOT/scripts" \
+  "$HOME_DIR/.claude/plugins"
 write_lines "$ACTIVE_ROOT/scripts/codex-companion.mjs" '// --effort <low|high>'
 write_lines "$STALE_ROOT/scripts/codex-companion.mjs" '// --effort <low|high>'
-printf '{"plugins":{"codex@openai-codex":[{"scope":"project","installPath":"%s"},{"scope":"user","installPath":"%s"}]}}\n' \
-  "$STALE_ROOT" "$ACTIVE_ROOT" > "$HOME_DIR/.claude/plugins/installed_plugins.json"
+write_lines "$DISABLED_ROOT/scripts/codex-companion.mjs" '// --effort <low|high>'
+printf '{"plugins":{"codex@openai-codex":[{"scope":"user","enabled":true,"installPath":"%s"},{"scope":"local","enabled":false,"installPath":"%s"},{"scope":"project","installPath":"%s"}]}}\n' \
+  "$STALE_ROOT" "$DISABLED_ROOT" "$ACTIVE_ROOT" \
+  > "$HOME_DIR/.claude/plugins/installed_plugins.json"
 ACTIVE_NODE_LOG="$TMP_ROOT/active.node"
 run_case dispatch-active env \
   HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" CODEX_LOOP_COMPANION="" \
-  SELFTEST_NODE_LOG="$ACTIVE_NODE_LOG" PATH="$TEST_PATH" \
+  SELFTEST_NODE_LOG="$ACTIVE_NODE_LOG" PATH="$NO_CLAUDE_PATH" \
   bash "$DISPATCH" --prompt selftest --effort low
-expect_status 0 "dispatch accepts the active installed companion"
+expect_status 0 "dispatch falls through cleanly when the Claude CLI is absent"
 expect_first_line "$ACTIVE_NODE_LOG" "$ACTIVE_ROOT/scripts/codex-companion.mjs" \
-  "dispatch prefers the active user install over a newer cache entry"
+  "dispatch applies project-over-user precedence and skips a disabled local install"
 expect_output "(active install)" "dispatch reports active-install resolution"
 
 # A missing cache plus malformed plugin manifest must still reach marketplaces.
@@ -166,7 +222,7 @@ write_lines "$MARKET_HOME/.claude/plugins/installed_plugins.json" '{not valid js
 MARKET_NODE_LOG="$TMP_ROOT/market.node"
 run_case dispatch-marketplace env \
   HOME="$MARKET_HOME" CODEX_HOME="$CONFIG_DIR" CODEX_LOOP_COMPANION="" \
-  SELFTEST_NODE_LOG="$MARKET_NODE_LOG" PATH="$TEST_PATH" \
+  SELFTEST_NODE_LOG="$MARKET_NODE_LOG" PATH="$NO_CLAUDE_PATH" \
   bash "$DISPATCH" --prompt selftest --effort low
 expect_status 0 "dispatch reaches marketplace fallback when cache is missing"
 expect_first_line "$MARKET_NODE_LOG" "$MARKET_COMPANION" \
@@ -178,6 +234,33 @@ run_case gate-pass bash "$GATE" --log "$TMP_ROOT/gate-pass.log" -- \
   bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
 expect_status 0 "gate passes a successful command"
 expect_output "RESULT: gate green" "gate prints its normal green result"
+
+# Without --baseline, an exit-zero command with no output remains a pass-through
+# success even though no supported-runner summary is present.
+run_case gate-plain-empty bash "$GATE" \
+  --log "$TMP_ROOT/gate-plain-empty.log" -- bash -c ':'
+expect_status 0 "plain gate preserves exit-zero empty-output pass-through"
+expect_output "RESULT: gate green" "plain gate keeps its empty-output green result"
+
+# A shared log/baseline target must be rejected before the command can truncate
+# it. The first case exercises normalized string equality before either exists;
+# the second exercises filesystem identity through a symlink alias.
+SAME_PATH="$TMP_ROOT/gate-same-path.log"
+run_case gate-same-path bash "$GATE" \
+  --log "$SAME_PATH" --baseline "$SAME_PATH" -- bash -c 'exit 99'
+expect_status 2 "gate rejects identical --log and --baseline strings"
+expect_output "--log and --baseline refer to the same file" \
+  "gate explains the identical-path configuration error"
+
+SAME_TARGET="$TMP_ROOT/gate-same-target.log"
+SAME_ALIAS="$TMP_ROOT/gate-same-alias.log"
+write_lines "$SAME_TARGET" 'existing baseline evidence'
+ln -s "$SAME_TARGET" "$SAME_ALIAS"
+run_case gate-same-alias bash "$GATE" \
+  --log "$SAME_ALIAS" --baseline "$SAME_TARGET" -- bash -c 'exit 99'
+expect_status 2 "gate rejects a symlink alias of the baseline"
+expect_output "--log and --baseline refer to the same file" \
+  "gate explains the filesystem-alias configuration error"
 
 UNIT_BASELINE="$TMP_ROOT/unittest-baseline.log"
 write_lines "$UNIT_BASELINE" \
@@ -214,12 +297,23 @@ PYTEST_BASELINE="$TMP_ROOT/pytest-baseline.log"
 write_lines "$PYTEST_BASELINE" \
   'FAILED tests/test_widget.py::test_value - AssertionError: old detail' \
   '=========================== 1 failed in 0.01s ==========================='
-run_case gate-pytest-match bash "$GATE" \
-  --log "$TMP_ROOT/gate-pytest-match.log" --baseline "$PYTEST_BASELINE" -- \
+run_case gate-pytest-message-change bash "$GATE" \
+  --log "$TMP_ROOT/gate-pytest-message-change.log" --baseline "$PYTEST_BASELINE" -- \
   bash -c 'printf '\''FAILED tests/test_widget.py::test_value - AssertionError: new detail\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
-expect_status 0 "gate recognizes and baselines a pytest FAILED identifier"
+expect_status 0 "gate baselines a pytest message-only change with the same exception class"
 expect_output "--- 1 failure/error header(s) ---" \
   "gate extracts the pytest FAILED short-summary line"
+expect_output "FAILED tests/test_widget.py::test_value [AssertionError]" \
+  "gate retains the pytest exception class in its stable identifier"
+
+run_case gate-pytest-class-change bash "$GATE" \
+  --log "$TMP_ROOT/gate-pytest-class-change.log" --baseline "$PYTEST_BASELINE" -- \
+  bash -c 'printf '\''FAILED tests/test_widget.py::test_value - RuntimeError: deterministic regression\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
+expect_status 1 "gate rejects the same pytest test ID with a different exception class"
+expect_output "FAILED tests/test_widget.py::test_value [RuntimeError]" \
+  "gate reports the changed pytest exception class as a new failure"
+expect_output "RESULT: gate RED — do not publish until resolved or explained" \
+  "gate marks a pytest exception-class change red"
 
 CRASH_BASELINE="$TMP_ROOT/crash-baseline.log"
 write_lines "$CRASH_BASELINE" 'ImportError: same crash text'
@@ -236,8 +330,22 @@ run_case gate-zero-tests bash "$GATE" \
   --log "$TMP_ROOT/gate-zero-tests.log" --baseline "$EMPTY_BASELINE" -- \
   bash -c 'printf '\''Ran 0 tests in 0.000s\nOK\n'\'''
 expect_nonzero "baseline gate fails closed when unittest reports zero tests"
-expect_output "RESULT: gate RED — no tests ran" \
-  "gate reports the zero-test failure"
+expect_output "RESULT: gate RED — no executed tests — skipped-only or unrecognized runner output" \
+  "gate reports that zero tests were executed"
+
+run_case gate-skipped-only bash "$GATE" \
+  --log "$TMP_ROOT/gate-skipped-only.log" --baseline "$EMPTY_BASELINE" -- \
+  bash -c 'printf '\''============================= 1 skipped in 0.10s =============================\n'\'''
+expect_nonzero "baseline gate rejects an exit-zero skipped-only pytest run"
+expect_output "RESULT: gate RED — no executed tests — skipped-only or unrecognized runner output" \
+  "gate explains the skipped-only baseline failure"
+
+run_case gate-baseline-empty bash "$GATE" \
+  --log "$TMP_ROOT/gate-baseline-empty.log" --baseline "$EMPTY_BASELINE" -- \
+  bash -c ':'
+expect_nonzero "baseline gate rejects exit-zero empty output"
+expect_output "RESULT: gate RED — unrecognized runner output; --baseline supports unittest/pytest only" \
+  "gate fails closed on an unrecognized baseline runner"
 
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' "$FAILED_CHECKS" "$CHECKS" >&2

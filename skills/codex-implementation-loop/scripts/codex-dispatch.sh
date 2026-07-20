@@ -75,9 +75,9 @@ if [[ -n "$PROMPT_FILE" ]]; then
 fi
 [[ -n "$PROMPT" ]] || { echo "need --prompt-file or --prompt" >&2; usage 1; }
 
-# Prefer an explicit override, then the plugin manager's active install. Cache
-# scans are fallbacks only: stale cached versions can be newer than the version
-# the plugin manager has actually activated.
+# Prefer an explicit override, then Claude's active plugin view, then its
+# installed-plugin manifest. Cache scans are fallbacks only: stale cached
+# versions can be newer than the version the plugin manager has activated.
 COMPANION=""
 COMPANION_SOURCE=""
 COMPANION_OVERRIDE="${CODEX_LOOP_COMPANION:-}"
@@ -87,6 +87,48 @@ if [[ -n "$COMPANION_OVERRIDE" && -f "$COMPANION_OVERRIDE" ]]; then
   COMPANION_SOURCE="explicit override"
 fi
 
+claude_plugin_install_path() {
+  command -v claude >/dev/null 2>&1 || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  local plugin_json=""
+  plugin_json="$(claude plugin list --json 2>/dev/null)" || return 0
+  [[ -n "$plugin_json" ]] || return 0
+
+  # The CLI view already incorporates settings precedence. Filter to enabled
+  # Codex entries, retain that precedence explicitly, and ignore stale paths.
+  python3 -c '
+import json
+import os
+import sys
+
+try:
+    entries = json.load(sys.stdin)
+except (ValueError, TypeError):
+    raise SystemExit(0)
+
+if not isinstance(entries, list):
+    raise SystemExit(0)
+
+scope_order = {"local": 0, "project": 1, "user": 2}
+candidates = []
+for index, entry in enumerate(entries):
+    if not isinstance(entry, dict):
+        continue
+    if entry.get("id") != "codex@openai-codex" or entry.get("enabled") is not True:
+        continue
+    install_path = entry.get("installPath")
+    if not isinstance(install_path, str):
+        continue
+    companion = os.path.join(install_path, "scripts", "codex-companion.mjs")
+    if os.path.isfile(companion):
+        candidates.append((scope_order.get(entry.get("scope"), 3), index, install_path))
+
+if candidates:
+    print(min(candidates)[2])
+' <<< "$plugin_json" 2>/dev/null || true
+}
+
 active_install_path() {
   local manifest="$HOME/.claude/plugins/installed_plugins.json"
   [[ -f "$manifest" ]] || return 0
@@ -94,6 +136,7 @@ active_install_path() {
 
   python3 - "$manifest" 2>/dev/null <<'PY' || true
 import json
+import os
 import sys
 
 try:
@@ -102,6 +145,8 @@ try:
 except (OSError, ValueError, TypeError):
     raise SystemExit(0)
 
+if not isinstance(data, dict):
+    raise SystemExit(0)
 entries = data.get("plugins", {}).get("codex@openai-codex", [])
 if isinstance(entries, dict):
     entries = [entries]
@@ -110,15 +155,32 @@ if not isinstance(entries, list):
 
 entries = [
     entry for entry in entries
-    if isinstance(entry, dict) and isinstance(entry.get("installPath"), str)
+    if (
+        isinstance(entry, dict)
+        and isinstance(entry.get("installPath"), str)
+        and entry.get("enabled") is not False
+        and os.path.isfile(
+            os.path.join(entry["installPath"], "scripts", "codex-companion.mjs")
+        )
+    )
 ]
-chosen = next((entry for entry in entries if entry.get("scope") == "user"), None)
-if chosen is None and entries:
-    chosen = entries[0]
-if chosen is not None:
+if entries:
+    scope_order = {"local": 0, "project": 1, "user": 2}
+    chosen = min(
+        enumerate(entries),
+        key=lambda item: (scope_order.get(item[1].get("scope"), 3), item[0]),
+    )[1]
     print(chosen["installPath"])
 PY
 }
+
+if [[ -z "$COMPANION" ]]; then
+  CLAUDE_INSTALL_PATH="$(claude_plugin_install_path)"
+  if [[ -n "$CLAUDE_INSTALL_PATH" && -f "$CLAUDE_INSTALL_PATH/scripts/codex-companion.mjs" ]]; then
+    COMPANION="$CLAUDE_INSTALL_PATH/scripts/codex-companion.mjs"
+    COMPANION_SOURCE="claude plugin list"
+  fi
+fi
 
 if [[ -z "$COMPANION" ]]; then
   ACTIVE_INSTALL_PATH="$(active_install_path)"

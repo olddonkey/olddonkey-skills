@@ -39,19 +39,62 @@ done
 # The file mktemp creates IS the log — appending a suffix would orphan it.
 [[ -n "$LOG" ]] || LOG="$(mktemp -t gate.XXXXXX)"
 
+normalize_path() { # $1=path; the file itself need not exist
+  local path="$1"
+  local directory filename
+
+  if [[ "$path" == */* ]]; then
+    directory="${path%/*}"
+    filename="${path##*/}"
+    [[ -n "$directory" ]] || directory="/"
+  else
+    directory="."
+    filename="$path"
+  fi
+
+  if directory="$(cd "$directory" 2>/dev/null && pwd -P)"; then
+    [[ "$directory" == "/" ]] && directory=""
+    printf '%s/%s\n' "$directory" "$filename"
+  elif [[ "$path" == /* ]]; then
+    printf '%s\n' "$path"
+  else
+    printf '%s/%s\n' "$PWD" "$path"
+  fi
+}
+
+# Never overwrite the evidence before reading it. Normalized strings catch
+# equal paths even when the log does not exist yet; -ef also catches existing
+# symlink, hardlink, and alternate-relative-path aliases.
+if [[ -n "$BASELINE" ]]; then
+  NORMALIZED_LOG="$(normalize_path "$LOG")"
+  NORMALIZED_BASELINE="$(normalize_path "$BASELINE")"
+  if [[ "$NORMALIZED_LOG" == "$NORMALIZED_BASELINE" ]] ||
+     [[ -e "$LOG" && "$LOG" -ef "$BASELINE" ]]; then
+    echo "error: --log and --baseline refer to the same file; use separate paths" >&2
+    exit 2
+  fi
+fi
+
 echo "gate: $*" >&2
 echo "log:  $LOG" >&2
 
 # Emit stable failure identifiers from unittest headers and pytest's short
-# summary. Pytest details after " - " are intentionally excluded so the same
-# test remains the same identifier when its assertion text changes.
+# summary. unittest FAIL:/ERROR: headers contain no exception information, so
+# those remain ID-only. For pytest, retain the exception class but discard its
+# message so message-only changes still match while changed failure types do not.
 extract_failures() { # $1=log path
   awk '
     /^FAIL: / || /^ERROR: / { print; next }
     /^FAILED \(/ || /^ERROR \(/ { next }
     /^FAILED / || /^ERROR / {
       line = $0
-      sub(/[[:space:]]+-[[:space:]].*$/, "", line)
+      if (match(line, /[[:space:]]+-[[:space:]]+/)) {
+        identifier = substr(line, 1, RSTART - 1)
+        exception = substr(line, RSTART + RLENGTH)
+        sub(/[[:space:]:].*$/, "", exception)
+        line = identifier
+        if (exception != "") line = line " [" exception "]"
+      }
       print line
     }
   ' "$1" 2>/dev/null
@@ -75,6 +118,21 @@ tests_ran() { # $1=log path
 
 zero_tests_reported() { # $1=log path
   grep -Eqi '(^Ran 0 tests?([[:space:]]|$)|no tests ran)' "$1" 2>/dev/null
+}
+
+supported_runner_summary() { # $1=log path
+  awk '
+    /^Ran [0-9]+ tests?/ { recognized = 1 }
+    {
+      line = tolower($0)
+      sub(/^[[:space:]]*=+[[:space:]]*/, "", line)
+      if (line ~ /^no tests ran([^[:alpha:]]|$)/ ||
+          line ~ /^[0-9]+[[:space:]]+(passed|failed|skipped|deselected|xfailed|xpassed|error|errors|warning|warnings)([^[:alpha:]]|$)/) {
+        recognized = 1
+      }
+    }
+    END { exit(recognized ? 0 : 1) }
+  ' "$1" 2>/dev/null
 }
 
 START=$SECONDS
@@ -133,16 +191,24 @@ if [[ $STATUS -ne 0 && $FAILURES -eq 0 ]]; then
   exit "$STATUS"
 fi
 
-# A baseline gate fails closed when the runner explicitly reports zero tests,
-# even if that runner happens to return zero (as unittest does).
+if [[ $STATUS -eq 0 ]]; then
+  if ! supported_runner_summary "$LOG"; then
+    echo "RESULT: gate RED — unrecognized runner output; --baseline supports unittest/pytest only"
+    exit 1
+  fi
+  if zero_tests_reported "$LOG" || ! tests_ran "$LOG"; then
+    echo "RESULT: gate RED — no executed tests — skipped-only or unrecognized runner output"
+    exit 1
+  fi
+  echo "RESULT: gate green"
+  exit 0
+fi
+
+# Keep the explicit diagnostic for nonzero zero-test runs. A zero-exit run was
+# already checked above with the stricter executed-test requirement.
 if zero_tests_reported "$LOG"; then
   echo "RESULT: gate RED — no tests ran"
   exit 1
-fi
-
-if [[ $STATUS -eq 0 ]]; then
-  echo "RESULT: gate green"
-  exit 0
 fi
 
 if ! tests_ran "$LOG"; then
