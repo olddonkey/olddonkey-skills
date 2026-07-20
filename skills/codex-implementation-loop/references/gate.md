@@ -10,7 +10,7 @@ When the gate is red, follow the **on-red** dial: `stop` hands it to the user; `
 
 If the repo's CI is unreliable for reasons unrelated to code (billing, broken infra), the local gate is the real signal — note that plainly in the PR so a red CI badge isn't mistaken for a broken change.
 
-Be honest about what the baseline gate proves and doesn't: it proves **no new failure identifiers** (pytest identifiers include the exception class; a message-only change in a known flake stays green by design), and that at least some tests executed — it does **not** prove the full calibrated suite ran. Compare the reported test count against the calibration record when it matters.
+Be honest about what the baseline gate proves and doesn't: it proves **no new failure identifiers** (pytest identifiers include the exception class; for ordinary single-separator lines a message-only change in a known flake stays green — messages containing ` - ` keep whole-line identity and go red, see the guarantees below), and that at least some tests executed — it does **not** prove the full calibrated suite ran. Compare the reported test count against the calibration record when it matters.
 
 The gate's failure parsing understands **unittest and pytest** output. Under `--baseline`, any other runner fails closed with an unsupported-runner message rather than guessing — plain pass-through mode (no `--baseline`) works with any runner. Also under `--baseline`, a run must show real executed tests: skipped-only or empty output is red even on exit 0.
 
@@ -18,6 +18,7 @@ If the repo has no meaningful suite, say so instead of letting the gate silently
 
 ## Consistency and normalization guarantees
 
-- In **every** mode, a runner whose own summary reports failures (`=== N failed ===`, `FAILED (failures=N)`) while exiting 0 is distrusted and gates red — strict's "zero failures" is enforced, not assumed from the exit code.
-- Test-execution evidence is taken only from formal summary lines (pytest's `=== ... ===` fence, unittest's `Ran N tests`), never from arbitrary output — error messages containing phrases like "1 passed" don't count.
+- In **every** mode, a runner whose own final summary reports failures or errors (`=== N failed ===`, `=== N error ===`, quiet-mode `N failed in Xs`, subtest terms like `N failed, M subtests passed`, `FAILED (failures=N)`) while exiting 0 is distrusted and gates red — strict's "zero failures" is enforced, not assumed from the exit code.
+- Test-execution evidence comes from the **last** formal summary line in the log (pytest's `=== ... ===` fence or its full-shape `-q` bottom line `N passed in Xs`, unittest's `Ran N tests`), never from arbitrary output — error messages containing phrases like "1 passed", or an inner pytest run's summary captured mid-log, don't count: the real runner's summary is always the final one it prints.
 - Failure-identifier normalization (`id [ExceptionClass]`) applies only when a pytest line contains exactly one raw ` - ` separator; any other shape — custom param IDs or messages containing ` - `, unbalanced brackets — keeps the whole line as the identifier. Consequence: volatile messages containing ` - ` read as changed failures (red). False-red on exotic flakes is accepted; false-green is not.
+- pytest 9 native subtest failures are fingerprinted from their `SUBFAILED(param)`/`SUBFAILED[msg]` lines, which carry the specific failing subtest — a different subtest failing under the same parent test is a new failure, not a baseline match.
