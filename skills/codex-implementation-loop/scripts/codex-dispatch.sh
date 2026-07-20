@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Dispatch an implementation task to Codex via the codex-companion runtime.
 #
-# Locates the newest installed companion so you don't rediscover the path
-# (it moves with every plugin version bump), and rejects the invalid
+# Locates the active installed companion (with cache fallbacks) so you don't
+# rediscover the path when plugin versions change, and rejects the invalid
 # --effort value that the wrapper silently refuses.
 #
 # Usage:
@@ -75,13 +75,70 @@ if [[ -n "$PROMPT_FILE" ]]; then
 fi
 [[ -n "$PROMPT" ]] || { echo "need --prompt-file or --prompt" >&2; usage 1; }
 
-# Companion lives in the plugin cache and moves with each version bump.
-COMPANION="$(find "$HOME/.claude/plugins/cache" \
-                  -name codex-companion.mjs -type f 2>/dev/null \
-             | sort -V | tail -1)"
+# Prefer an explicit override, then the plugin manager's active install. Cache
+# scans are fallbacks only: stale cached versions can be newer than the version
+# the plugin manager has actually activated.
+COMPANION=""
+COMPANION_SOURCE=""
+COMPANION_OVERRIDE="${CODEX_LOOP_COMPANION:-}"
+
+if [[ -n "$COMPANION_OVERRIDE" && -f "$COMPANION_OVERRIDE" ]]; then
+  COMPANION="$COMPANION_OVERRIDE"
+  COMPANION_SOURCE="explicit override"
+fi
+
+active_install_path() {
+  local manifest="$HOME/.claude/plugins/installed_plugins.json"
+  [[ -f "$manifest" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  python3 - "$manifest" 2>/dev/null <<'PY' || true
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except (OSError, ValueError, TypeError):
+    raise SystemExit(0)
+
+entries = data.get("plugins", {}).get("codex@openai-codex", [])
+if isinstance(entries, dict):
+    entries = [entries]
+if not isinstance(entries, list):
+    raise SystemExit(0)
+
+entries = [
+    entry for entry in entries
+    if isinstance(entry, dict) and isinstance(entry.get("installPath"), str)
+]
+chosen = next((entry for entry in entries if entry.get("scope") == "user"), None)
+if chosen is None and entries:
+    chosen = entries[0]
+if chosen is not None:
+    print(chosen["installPath"])
+PY
+}
+
+if [[ -z "$COMPANION" ]]; then
+  ACTIVE_INSTALL_PATH="$(active_install_path)"
+  if [[ -n "$ACTIVE_INSTALL_PATH" && -f "$ACTIVE_INSTALL_PATH/scripts/codex-companion.mjs" ]]; then
+    COMPANION="$ACTIVE_INSTALL_PATH/scripts/codex-companion.mjs"
+    COMPANION_SOURCE="active install"
+  fi
+fi
+
+if [[ -z "$COMPANION" ]]; then
+  COMPANION="$(find "$HOME/.claude/plugins/cache" \
+                    -name codex-companion.mjs -type f 2>/dev/null \
+               | sort -V | tail -1 || true)"
+  [[ -z "$COMPANION" ]] || COMPANION_SOURCE="cache scan"
+fi
 if [[ -z "$COMPANION" ]]; then
   COMPANION="$(find "$HOME/.claude/plugins/marketplaces" \
-                    -name codex-companion.mjs -type f 2>/dev/null | tail -1)"
+                    -name codex-companion.mjs -type f 2>/dev/null \
+               | tail -1 || true)"
+  [[ -z "$COMPANION" ]] || COMPANION_SOURCE="marketplace fallback"
 fi
 [[ -n "$COMPANION" ]] || {
   echo "codex-companion.mjs not found; is the Codex plugin installed?" >&2
@@ -92,7 +149,8 @@ fi
 # across plugin versions, so read it at runtime instead of freezing a copy
 # here. Falls back to the snapshot above if the usage string moves.
 DETECTED_EFFORTS="$(grep -oE -- '--effort <[a-z|]+>' "$COMPANION" 2>/dev/null \
-                    | head -1 | sed -E 's/.*<([a-z|]+)>.*/\1/' | tr '|' ' ')"
+                    | head -1 | sed -E 's/.*<([a-z|]+)>.*/\1/' | tr '|' ' ' \
+                    || true)"
 [[ -n "$DETECTED_EFFORTS" ]] && VALID_EFFORTS="$DETECTED_EFFORTS"
 
 # `ultra` and `max` are real Codex efforts but (as of 1.0.6) reachable only
@@ -122,18 +180,19 @@ ARGS=(task)
 [[ $RESUME -eq 1 ]] && ARGS+=(--resume-last)
 [[ ${#EXTRA[@]} -gt 0 ]] && ARGS+=("${EXTRA[@]}")
 
-CONFIG="$HOME/.codex/config.toml"
+CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
 describe() { # $1=label $2=chosen value $3=config key
   if [[ -n "$2" ]]; then
     echo "$1: $2 (explicit)"
   elif [[ -f "$CONFIG" ]] && grep -qE "^[[:space:]]*$3[[:space:]]*=" "$CONFIG"; then
-    echo "$1: $(grep -E "^[[:space:]]*$3[[:space:]]*=" "$CONFIG" | head -1 | cut -d= -f2- | tr -d ' \"') (inherited from config.toml)"
+    echo "$1: $(grep -E "^[[:space:]]*$3[[:space:]]*=" "$CONFIG" \
+      | head -1 | cut -d= -f2- | tr -d ' \"' || true) (from config.toml; profiles/overrides not resolved)"
   else
     echo "$1: <Codex CLI default>"
   fi
 }
 
-echo "companion: $COMPANION" >&2
+echo "companion: $COMPANION ($COMPANION_SOURCE)" >&2
 echo "workspace: $(pwd)" >&2
 # Surface the CLI version on every dispatch: a stale codex is the usual
 # reason a newly released model "doesn't exist", and skew between multiple
