@@ -70,7 +70,7 @@ Codex's summary is a map of where to look, not proof that the change is correct.
 ## Why use it
 
 - **Evidence-first review.** The checklist targets delegated-change failures that generic review often misses: weakened tests, silent default regressions, gitignored files, new dependencies, and softened enforcement points.
-- **Bounded autonomy.** Six controls settle how far the loop may act, how deeply it reviews, and what happens when the gate is red. They are chosen once per repository instead of re-litigated on every unit.
+- **Bounded autonomy.** Seven controls settle how far the loop may act, how deeply it reviews, who implements fixes, and what happens when the gate is red. They are chosen once per repository instead of re-litigated on every unit.
 - **Expensive lessons encoded once.** The workflow distinguishes focused tests from the full gate, detects stuck jobs by their event stream, and covers cancellation plus orphaned-process cleanup.
 - **Two bundled helpers.** [`codex-dispatch.sh`](./skills/codex-implementation-loop/scripts/codex-dispatch.sh) locates the live companion runtime and makes dispatch settings visible; [`run-gate.sh`](./skills/codex-implementation-loop/scripts/run-gate.sh) preserves the suite's real exit code and can compare failures with a baseline.
 
@@ -88,6 +88,7 @@ The skill has conservative first-run choices. Specify only the values you want t
 | On gate red | `stop` | Stop for the user or send failures back for a bounded number of iterations |
 | Review depth | `standard` | Choose light, standard, or independent deep review |
 | Cadence | `confirm` | Confirm between units or continue automatically when the publish strategy makes that safe |
+| Fix lane | `codex` | Route bug fixes through Codex as fresh units; optionally allow trivial mechanical one-liners to be fixed directly |
 
 Model and effort inherit the user's Codex configuration unless explicitly overridden for a task.
 

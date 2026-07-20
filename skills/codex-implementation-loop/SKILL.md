@@ -1,6 +1,6 @@
 ---
 name: codex-implementation-loop
-description: 'Delegate implementation work to Codex (via the codex-companion runtime), then review its diff, send it back to iterate, gate on the full test suite, and ship it as a PR. Use this whenever the user wants Codex to write code, mentions handing off / delegating implementation to Codex, asks to work through a plan or spec unit-by-unit with Codex doing the coding, or wants a review-and-merge loop wrapped around Codex output — and also when resuming such a loop ("keep going", "next unit", "继续下一个"). It encodes constraints that are expensive to rediscover: Codex runs in the real environment with effectively read-only git, must never be asked to run a full test suite, accepts only specific --effort values, and its self-report is a claim rather than evidence.'
+description: 'Delegate implementation work to Codex (via the codex-companion runtime), then review its diff, send it back to iterate, gate on the full test suite, and ship it as a PR. Use this whenever the user wants Codex to write code, mentions handing off / delegating implementation to Codex, asks to work through a plan or spec unit-by-unit with Codex doing the coding, or wants a review-and-merge loop wrapped around Codex output — and also when resuming such a loop ("keep going", "next unit", "继续下一个"). It encodes constraints that are expensive to rediscover: Codex runs in the real environment with effectively read-only git, must not be pointed at a full test suite by default, accepts only specific --effort values, and its self-report is a claim rather than evidence.'
 ---
 
 # Codex implementation loop
@@ -21,7 +21,7 @@ These change what the loop does to the user's repo, so they're the user's call. 
 
 | Dial | Options | Recommended default |
 | --- | --- | --- |
-| **Stop point** | `worktree` / `commit` / `pr` / `merge` | recommend `pr`; assumed default stops at `commit` |
+| **Stop point** | `worktree` / `commit` / `pr` / `merge` | recommend `pr`; assumed default stops at `worktree` |
 | **Dispatch mode** | `implement` / `read-only` | `implement` |
 | **Gate policy** | `baseline` / `strict` / `skip` | `baseline` |
 | **On gate red** | `stop` / `iterate` | `stop` |
@@ -29,9 +29,9 @@ These change what the loop does to the user's repo, so they're the user's call. 
 | **Cadence** | `confirm` / `continuous` | `confirm`; `continuous` fits stop=`merge` |
 | **Fix lane** | `codex` / `claude-trivial-ok` | `codex` |
 
-One boundary is not a dial: **an assumed default never leaves the machine.** Telling the user which default you're using is transparency, not authorization — and pushing a branch or opening a PR is outward-visible (CI runs, notifications fire, collaborators see it). With no explicit user choice, carry a unit as far as a local commit and stop; push/PR/merge each need the user to have actually said yes once for this repo. **Once is once**: this is a per-repo authorization given at calibration, not a per-unit confirmation — after the user has chosen (e.g. "merge everything autonomously"), the loop runs to that stop point on every unit without asking again. The boundary only exists for the case where nobody ever consented.
+One boundary is not a dial: **an assumed default never leaves the machine.** Telling the user which default you're using is transparency, not authorization — and pushing a branch or opening a PR is outward-visible (CI runs, notifications fire, collaborators see it). With no explicit user choice, leave the changes in the working tree and stop — even a local commit can fire the repo's hooks or signing machinery, so the truly consent-free default touches nothing but files. Commit, push, PR, and merge each need the user to have actually said yes once for this repo. **Once is once**: this is a per-repo authorization given at calibration, not a per-unit confirmation — after the user has chosen (e.g. "merge everything autonomously"), the loop runs to that stop point on every unit without asking again. The boundary only exists for the case where nobody ever consented.
 
-**Stop point** decides how far each unit travels — leave changes in the working tree, commit to a branch, open a PR, or merge. It's the only dial that bounds irreversible action, which makes it the one worth being explicit about. `pr` is the recommendation because a PR is a reviewable artifact that costs nothing to abandon, while merging is the step you can't quietly undo — but per the boundary above, reaching `pr` at all requires the user to have actually chosen it. Only use `merge` when the user has actually authorized autonomous merging; that authorization is per-project and doesn't carry over from another repo or another session.
+**Stop point** decides how far each unit travels — leave changes in the working tree, commit to a branch, open a PR, or merge. It's the only dial that bounds irreversible action, which makes it the one worth being explicit about. `pr` is the recommendation because a PR is a reviewable artifact that costs nothing to abandon, while merging is the step you can't quietly undo — but per the boundary above, reaching `pr` at all requires the user to have actually chosen it. Only use `merge` when the user has actually authorized autonomous merging; that authorization is per-repo and doesn't transfer between repos; once given and recorded in calibration it persists across sessions until the user revokes it or the work changes character (see calibration).
 
 Stop point and cadence interact: with a stop point short of `merge`, the unit hasn't landed when the next one would start, so `continuous` stacks unit 2 on top of unit 1's unmerged changes — diffs blur together and review attribution breaks. Unless the user deliberately wants stacked branches, pair `worktree`/`commit`/`pr` with `confirm` (or wait for each unit to land before dispatching the next); `continuous` really fits `merge`.
 
@@ -60,9 +60,9 @@ If the design isn't settled, settle it **before** dispatching. Codex implements 
 Use `scripts/codex-dispatch.sh` (bundled), which locates the newest installed companion and invokes it correctly:
 
 ```bash
-# SKILL_DIR = this skill's own install directory (for plugin installs, ${CLAUDE_PLUGIN_ROOT}).
 # The scripts live next to this SKILL.md — NOT in the target repo, which is where a bare
-# relative path would point after you cd to the repo root.
+# relative path would point after you cd to the repo root. Set SKILL_DIR explicitly:
+SKILL_DIR="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills/codex-implementation-loop}"
 "$SKILL_DIR/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt     # inherit user's config
 "$SKILL_DIR/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
     --model gpt-5.6-sol --effort xhigh          # explicit override (model name is an example — they age)
@@ -77,28 +77,11 @@ Dispatch hygiene — each of these failure modes is silent when it happens:
 - **If the stop point involves a branch** (`commit`/`pr`/`merge`), create and switch to the unit branch *before* dispatching — Codex's changes then land on the right branch from the start, and the pre-push branch check becomes a confirmation instead of a rescue.
 - **Background at the harness level** (your shell's background-task mechanism), which keeps the full event stream in one file you can read later. The companion's own `--background` is different: it *detaches* and returns a job id to poll. Use it only when you specifically want detachment, and know that a detached task keeps running even when the launching command looks like it failed — bad arguments can still start a real job.
 
-### Choosing model and effort
+### Model, effort, speed — the kickoff question
 
-**These are the user's call, not yours to silently assume.** At each loop kickoff — each time this skill is invoked to start or resume working through units — ask **one compact question** covering thinking level (effort) and speed (service tier), with the user's current config values presented as the inherit option (read them from `~/.codex/config.toml` first so the question shows real values, e.g. "inherit: gpt-5.6-sol / xhigh / priority"). The answer holds for the **entire invocation** — never re-ask per unit. These knobs sit at kickoff rather than in per-repo calibration because the right setting tracks the day's work: a heavy correctness-critical unit wants high effort; a batch of mechanical edits doesn't.
+At each loop kickoff — each time this skill is invoked to start or resume working through units — ask **one compact question** covering thinking level (effort) and speed (service tier), presenting the user's current config values as the inherit option (read `~/.codex/config.toml` first so the question shows real values). The answer holds for the **entire invocation**; never re-ask per unit. A recorded standing preference ("always inherit, stop asking") suppresses the question — it exists to give control, not friction.
 
-Two boundaries on the kickoff question:
-- If the user has recorded a standing preference ("stop asking, always inherit my config"), respect it — the question exists to give control, not friction.
-- Effort and model are overridable per-dispatch via flags; **tier is config-only** — if the user picks a different tier at kickoff, they change it themselves (`/fast` in the codex TUI) or explicitly ask you to edit their config. Don't edit their global config on your own initiative.
-
-The dispatch summary printing model/effort/tier on each run is disclosure, not a question.
-
-How resolution works, which shapes the choice:
-
-- **Omit both flags** and the Codex CLI resolves from the user's `~/.codex/config.toml`. This is the default the script uses, because it honors the setup the user already chose for themselves.
-- **Pass a flag** to override for this task only. Never edit their global config to force a setting — that changes their own Codex use outside this loop.
-- **`ultra` and `max` efforts are real but flag-rejected.** The wrapper accepts only `none|minimal|low|medium|high|xhigh`; the higher two exist only as `model_reasoning_effort` in config.toml. So the way to run at max is to *omit* `--effort` and let config supply it. If the user asks for max, don't pass it — explain this and inherit.
-- **Model names are passed through to the CLI as-is** — nothing here maintains a model list, so new Codex models work the day they ship; availability depends on the user's account. Aliases may exist in the companion (as of 1.0.6, `spark` → `gpt-5.3-codex-spark`). **Model names age fast; never recommend one from memory.** When unsure what the user has or what's current, read `~/.codex/config.toml` first, then ask.
-- **Service tier is a third speed lever, separate from model and effort.** Codex supports priority routing (**Fast**) and cheaper-but-slower **flex**; support varies by model. Same model, same reasoning — different queue: model trades capability, effort trades thinking depth, tier trades routing speed/cost. The user picks it with the **`/fast` slash command in the codex TUI**, which persists to `service_tier` in `~/.codex/config.toml`; editing the config key directly works too. Canonical values per the official schema are `priority` / `flex` / `default`, with legacy `fast` still accepted — and `fast` is what the TUI currently writes, so expect either spelling when reading a config. The companion has no per-task tier flag, so every dispatch inherits whatever the config says — the dispatch script prints the inherited tier so it's visible. Ask once at calibration; a mid-loop tier change is a conditions change worth noting, not something to do silently.
-- **A "missing" model usually means a stale CLI, not a wrong name.** New models require a recent `codex` CLI. Before concluding a model or flag is unavailable, check `codex --version` (the dispatch script prints it on every run). The safe update path is **`codex update`** — the CLI's own updater works regardless of how it was installed. Don't reinstall through a different channel (e.g. npm on top of a standalone install): two skewed copies of `codex` on one machine is a real failure mode, where a model "doesn't exist" until the copy actually being used gets updated. The CLI is the user's environment — get their OK before updating, and update between units rather than mid-unit so a version change doesn't muddy attribution.
-
-Reasonable way to pick, if the user wants a recommendation: raise effort for work where a subtle mistake is expensive to catch downstream — anything touching correctness boundaries, concurrency, or migrations — and lower it for mechanical, well-specified edits where the spec leaves little room for judgment. Model choice usually follows whatever they're already running; the interesting dial is effort.
-
-To give one project a standing preference without touching the user's global config or this script, set `CODEX_LOOP_MODEL` / `CODEX_LOOP_EFFORT` in that project's environment, and record the choice (see calibration below) so later sessions don't re-litigate it.
+Everything else about the runtime — how flags interact with the user's config, config-only efforts (`max`/`ultra`), tier mechanics and canonical values, model-name aging, stale-CLI diagnosis, and the companion's task contract — lives in [references/runtime.md](references/runtime.md). Read it before the first dispatch of a session.
 
 ### Runtime contract
 
@@ -152,27 +135,14 @@ Unit: <one-line name>
 
 These aren't hypothetical; each cost real time to learn.
 
-- **Codex executes on the same host as you.** Its sandbox level is whatever the user's codex config sets (`workspace-write` is common; some setups run `danger-full-access`) — but every mode shares your CPU, RAM, and disk, which is what makes the test-suite rule below matter regardless of sandbox.
+- **Codex executes on the same host as you.** The companion pins the sandbox per task — `workspace-write` for implement dispatches, `read-only` for read-only ones — regardless of the user's own codex sandbox config. Sandboxed or not, it shares your CPU, RAM, and disk, which is what makes the test-suite rule below matter (and the sandbox explains oddities like /dev/fd permission errors inside its test runs).
 - **Its `.git` is effectively read-only** — it cannot commit, branch, or push. Tell it to leave changes in the working tree; you commit and publish.
 - **Don't let it run the full test suite by default.** On a suite with real subprocess/socket/lock tests this can crawl for hours *and* saturate the machine, slowing everything else you're running. Tell it explicitly: run only a focused subset covering the modules it touched, or nothing at all, because you own the full gate. If first-run calibration shows the suite is genuinely small and fast, you may relax this deliberately — the gate stays yours either way.
 - Ask it to report which files it changed, which tests it added, and which focused subset it ran — so your review has a starting map.
 
-### Monitoring, stuck jobs, and cleanup
+### If a job looks stuck
 
-The same companion script has `status` and `cancel` subcommands (the dispatch script prints the companion path on every run):
-
-```bash
-node <companion> status --all      # list known jobs
-node <companion> cancel <job-id>   # stop one
-```
-
-Judge progress by the event stream, not the clock. Codex being quiet for a couple of minutes is normal; a job that has produced no new events for 15–20 minutes, or is visibly re-running the same failing command, is stuck. Cancel it, read what it was attempting, and fix the cause — usually an ambiguous spec or a missing environment constraint — or split the unit. Don't just re-dispatch the same prompt at the same problem.
-
-After killing a job, **also kill the test processes it spawned** — orphaned runners keep eating the machine long after the parent dies, and they're easy to miss because the job looks gone. Find them by repo path:
-
-```bash
-pgrep -fl 'unittest|pytest' | grep <repo-dir>    # then kill those PIDs
-```
+Judge progress by the event stream, not the clock; see the monitoring section of [references/runtime.md](references/runtime.md) for the stuck heuristic, `status`/`cancel` commands, and orphaned-test-process cleanup. The short version: no new events for 15–20 minutes means cancel, read what it was attempting, fix the prompt or split the unit — and always kill the test processes the job spawned.
 
 ## 3. Review the diff yourself
 
@@ -221,6 +191,8 @@ Interpret results according to the **gate policy** dial. Under `baseline` — th
 When the gate is red, follow the **on-red** dial: `stop` hands it to the user; `iterate` sends the failures back to Codex for a bounded number of attempts. Either way the standard is the same — the code satisfies the test. If a proposed fix relaxes an assertion, deletes a case, or widens a tolerance to make red turn green, stop and raise it, because that converts a caught bug into a shipped one.
 
 If the repo's CI is unreliable for reasons unrelated to code (billing, broken infra), the local gate is the real signal — note that plainly in the PR so a red CI badge isn't mistaken for a broken change.
+
+The gate's failure parsing understands **unittest and pytest** output. Under `--baseline`, any other runner fails closed with an unsupported-runner message rather than guessing — plain pass-through mode (no `--baseline`) works with any runner. Also under `--baseline`, a run must show real executed tests: skipped-only or empty output is red even on exit 0.
 
 If the repo has no meaningful suite, say so instead of letting the gate silently pass on nothing: the bar becomes the tests this unit itself added, plus driving the affected flow once by hand. Flag the missing suite to the user as its own backlog item rather than quietly treating "no tests ran" as green.
 
@@ -272,4 +244,4 @@ codex-loop: stop=merge gate=baseline on-red=iterate(max2) depth=standard cadence
             suite="PYTHONPATH=src python3 -m unittest discover -s tests" (~700s)
 ```
 
-A stored setting is a record of what the user chose, not a standing permission that outlives the reason for it. If the work changes character — a unit that touches a security boundary while depth is `light`, or money while the stop point is `merge` — say so and re-check rather than riding the setting into territory it wasn't chosen for.
+A stored setting IS standing authorization for the scope it was given in — that's what lets later sessions resume without re-asking. What it does not do is stretch to work of a different character than it was granted for. If the work changes character — a unit that touches a security boundary while depth is `light`, or money while the stop point is `merge` — say so and re-check rather than riding the setting into territory it wasn't chosen for.

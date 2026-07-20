@@ -1,0 +1,17 @@
+name: selftest
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: |
+          bash -n skills/codex-implementation-loop/scripts/codex-dispatch.sh
+          bash -n skills/codex-implementation-loop/scripts/run-gate.sh
+          bash -n skills/codex-implementation-loop/scripts/selftest.sh
+      - name: Regression selftest
+        run: bash skills/codex-implementation-loop/scripts/selftest.sh
