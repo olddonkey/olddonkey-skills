@@ -40,6 +40,24 @@ done
 # The file mktemp creates IS the log — appending a suffix would orphan it.
 [[ -n "$LOG" ]] || LOG="$(mktemp -t gate.XXXXXX)"
 
+# All parsing reads an ANSI-stripped view of the raw bytes: forced-color
+# runners (`pytest --color=yes`) wrap their summary lines in CSI sequences
+# that would otherwise defeat every anchored pattern. The log on disk keeps
+# the original bytes.
+#
+# Every parser runs under LC_ALL=C: test logs are arbitrary bytes, and in a
+# UTF-8 locale one invalid byte makes sed/awk/grep abort or misread — an
+# empty parse view would then hide a failed summary behind a masked exit
+# code. Bytewise processing is the only locale that can't be poisoned by
+# log content. strip_ansi failures are checked by callers and fail closed.
+PARSE_LOG="$(mktemp -t gate-parse.XXXXXX)" || exit 2
+BASELINE_PARSE="$(mktemp -t gate-parse.XXXXXX)" || exit 2
+trap 'rm -f "$PARSE_LOG" "$BASELINE_PARSE"' EXIT
+ANSI_ESC="$(printf '\033')"
+strip_ansi() { # $1=source path, $2=destination path
+  LC_ALL=C sed "s/${ANSI_ESC}\\[[0-9;]*[A-Za-z]//g" "$1" > "$2"
+}
+
 normalize_path() { # $1=path; the file itself need not exist
   local path="$1"
   local directory filename
@@ -111,11 +129,13 @@ echo "log:  $LOG" >&2
 # subtests add `N subtests passed/failed` terms) plus an `in <duration>s`
 # tail — so ordinary log lines never qualify as a summary.
 #
-# Callers must treat only the LAST summary-shaped line as the run's verdict:
-# the real runner always prints its summary at the very end, so anything
-# earlier (an inner pytest run captured in test output, an application log
-# line that happens to match) is not evidence about THIS run.
-PYTEST_SUMMARY_AWK='
+# The shared rules below track the LAST runner verdict of EITHER kind by log
+# position: a pytest summary line, or a unittest block (`Ran N tests` plus its
+# OK/FAILED result line). The real runner always reports at the very end, so
+# whichever runner printed last owns the verdict — anything earlier (an inner
+# runner invoked by a test, application output that happens to match) is not
+# evidence about THIS run, in either direction.
+RUNNER_VERDICT_AWK='
   function pytest_summary(line,    content) {
     content = tolower(line)
     if (content ~ /^=+ .* =+$/) {
@@ -128,6 +148,30 @@ PYTEST_SUMMARY_AWK='
     }
     return ""
   }
+  /^Ran [0-9]+ tests?/ {
+    last_runner = "unittest"
+    unit_total = $2 + 0
+    unit_skipped = 0
+    unit_result = ""
+  }
+  /^OK([[:space:]]|$)/ || /^FAILED[[:space:]]+\(/ || /^ERROR[[:space:]]+\(/ {
+    if (last_runner != "unittest") unit_total = 0
+    last_runner = "unittest"
+    unit_result = $0
+    unit_skipped = 0
+    if (match(unit_result, /skipped=[0-9]+/)) {
+      unit_skip_field = substr(unit_result, RSTART, RLENGTH)
+      sub(/^skipped=/, "", unit_skip_field)
+      unit_skipped = unit_skip_field + 0
+    }
+  }
+  {
+    runner_line = pytest_summary($0)
+    if (runner_line != "") {
+      last_runner = "pytest"
+      last_summary = runner_line
+    }
+  }
 '
 
 # Emit stable failure identifiers from unittest headers and pytest's short
@@ -138,7 +182,7 @@ PYTEST_SUMMARY_AWK='
 # while the parent FAILED line stays constant, so SUBFAILED lines carry the
 # real identity and must be fingerprinted too.
 extract_failures() { # $1=log path
-  awk '
+  LC_ALL=C awk '
     /^FAIL: / || /^ERROR: / { print; next }
     /^FAILED \(/ || /^ERROR \(/ { next }
     /^FAILED / || /^ERROR / || /^SUBFAILED/ {
@@ -174,58 +218,36 @@ extract_failures() { # $1=log path
   ' "$1" 2>/dev/null
 }
 
-tests_ran() { # $1=log path
-  awk "$PYTEST_SUMMARY_AWK"'
-    /^Ran [0-9]+ tests?/ {
-      unittest_total += ($2 + 0)
-    }
-    /^OK([[:space:]]|$)/ || /^FAILED[[:space:]]+\(/ {
-      result = $0
-      if (match(result, /skipped=[0-9]+/)) {
-        skipped = substr(result, RSTART, RLENGTH)
-        sub(/^skipped=/, "", skipped)
-        unittest_skipped += (skipped + 0)
-      }
-    }
-    {
-      summary = pytest_summary($0)
-      if (summary != "") last_summary = summary
-    }
+tests_ran() { # $1=stripped log path
+  LC_ALL=C awk "$RUNNER_VERDICT_AWK"'
     END {
-      if (last_summary != "" &&
+      if (last_runner == "pytest" &&
           last_summary !~ /^no tests ran([^[:alpha:]]|$)/ &&
           last_summary ~ /[1-9][0-9]*[[:space:]]+(subtests[[:space:]]+)?(passed|failed|xfailed|xpassed)([^[:alpha:]]|$)/) {
         ran = 1
       }
-      if ((unittest_total - unittest_skipped) > 0) ran = 1
+      if (last_runner == "unittest" && (unit_total - unit_skipped) > 0) ran = 1
       exit(ran ? 0 : 1)
     }
   ' "$1" 2>/dev/null
 }
 
-zero_tests_reported() { # $1=log path
-  awk "$PYTEST_SUMMARY_AWK"'
-    /^Ran 0 tests?([[:space:]]|$)/ { zero = 1 }
-    {
-      summary = pytest_summary($0)
-      if (summary != "") last_summary = summary
-    }
+zero_tests_reported() { # $1=stripped log path
+  LC_ALL=C awk "$RUNNER_VERDICT_AWK"'
     END {
-      if (last_summary ~ /^no tests ran([^[:alpha:]]|$)/) zero = 1
+      if (last_runner == "unittest" && unit_total == 0) zero = 1
+      if (last_runner == "pytest" &&
+          last_summary ~ /^no tests ran([^[:alpha:]]|$)/) zero = 1
       exit(zero ? 0 : 1)
     }
   ' "$1" 2>/dev/null
 }
 
-supported_runner_summary() { # $1=log path
-  awk "$PYTEST_SUMMARY_AWK"'
-    /^Ran [0-9]+ tests?/ { recognized = 1 }
-    {
-      summary = pytest_summary($0)
-      if (summary != "") last_summary = summary
-    }
+supported_runner_summary() { # $1=stripped log path
+  LC_ALL=C awk "$RUNNER_VERDICT_AWK"'
     END {
-      if (last_summary != "" &&
+      if (last_runner == "unittest") recognized = 1
+      if (last_runner == "pytest" &&
           (last_summary ~ /^no tests ran([^[:alpha:]]|$)/ ||
            last_summary ~ /[0-9]+[[:space:]]+(subtests[[:space:]]+)?(passed|failed|skipped|deselected|xfailed|xpassed|error|errors|warning|warnings)([^[:alpha:]]|$)/)) {
         recognized = 1
@@ -235,22 +257,21 @@ supported_runner_summary() { # $1=log path
   ' "$1" 2>/dev/null
 }
 
-# Positive failed/error counts (including subtest terms) in the FINAL summary
-# contradict an exit-zero run. Earlier summary-shaped lines belong to inner
-# runs or application output, never to this run's verdict.
-failed_summary_present() { # $1=log path
-  awk "$PYTEST_SUMMARY_AWK"'
-    /^FAILED \(/ { failed = 1 }
-    {
-      summary = pytest_summary($0)
-      if (summary != "") last_summary = summary
-    }
+# Positive failed/error counts (including subtest terms) in the FINAL runner
+# verdict contradict an exit-zero run. Earlier blocks belong to inner runs or
+# application output, never to this run's verdict.
+failed_summary_present() { # $1=stripped log path
+  LC_ALL=C awk "$RUNNER_VERDICT_AWK"'
     END {
-      while (match(last_summary, /[0-9]+[[:space:]]+(subtests[[:space:]]+)?(failed|error|errors)([^[:alpha:]]|$)/)) {
-        count = substr(last_summary, RSTART, RLENGTH)
-        sub(/[[:space:]].*$/, "", count)
-        if ((count + 0) > 0) failed = 1
-        last_summary = substr(last_summary, RSTART + RLENGTH)
+      if (last_runner == "unittest" &&
+          unit_result ~ /^(FAILED|ERROR)[[:space:]]+\(/) failed = 1
+      if (last_runner == "pytest") {
+        while (match(last_summary, /[0-9]+[[:space:]]+(subtests[[:space:]]+)?(failed|error|errors)([^[:alpha:]]|$)/)) {
+          count = substr(last_summary, RSTART, RLENGTH)
+          sub(/[[:space:]].*$/, "", count)
+          if ((count + 0) > 0) failed = 1
+          last_summary = substr(last_summary, RSTART + RLENGTH)
+        }
       }
       exit(failed ? 0 : 1)
     }
@@ -263,7 +284,11 @@ BASELINE_EXISTS_AT_START=0
 BASELINE_FAILURES_AT_START=""
 if [[ -n "$BASELINE" && -f "$BASELINE" ]]; then
   BASELINE_EXISTS_AT_START=1
-  BASELINE_FAILURES_AT_START="$(extract_failures "$BASELINE" | sort -u || true)"
+  if ! strip_ansi "$BASELINE" "$BASELINE_PARSE"; then
+    echo "error: could not normalize baseline for parsing: $BASELINE" >&2
+    exit 2
+  fi
+  BASELINE_FAILURES_AT_START="$(extract_failures "$BASELINE_PARSE" | LC_ALL=C sort -u || true)"
 fi
 
 START=$SECONDS
@@ -274,12 +299,19 @@ ELAPSED=$((SECONDS - START))
 
 echo "=== gate finished in ${ELAPSED}s with exit code ${STATUS} ==="
 
-# Surface the shapes most runners use for their summary line.
-grep -E '^(Ran [0-9]+ |OK\b|FAILED\b|ERROR\b|SUBFAILED\b|=+ .*(passed|failed|no tests ran).* =+|(no tests ran|[0-9]+ [a-z]+(, [0-9]+ [a-z]+)*) in [0-9]+(\.[0-9]+)?s)' "$LOG" | tail -5
+# An unparsed log must never be judged: an empty parse view would hide a
+# failed summary behind a masked exit code, so normalization failure is red.
+if ! strip_ansi "$LOG" "$PARSE_LOG"; then
+  echo "RESULT: gate RED — log normalization failed; refusing to judge unparsed output"
+  exit 1
+fi
 
-CURRENT_FAILURES="$(extract_failures "$LOG" || true)"
+# Surface the shapes most runners use for their summary line.
+LC_ALL=C grep -aE '^(Ran [0-9]+ |OK\b|FAILED\b|ERROR\b|SUBFAILED\b|=+ .*(passed|failed|no tests ran).* =+|(no tests ran|[0-9]+ [a-z]+( [a-z]+)?(, [0-9]+ [a-z]+( [a-z]+)?)*) in [0-9]+(\.[0-9]+)?s)' "$PARSE_LOG" | tail -5
+
+CURRENT_FAILURES="$(extract_failures "$PARSE_LOG" || true)"
 FAILED_SUMMARY=0
-if failed_summary_present "$LOG"; then
+if failed_summary_present "$PARSE_LOG"; then
   FAILED_SUMMARY=1
 fi
 FAILURES=0
@@ -290,7 +322,7 @@ if [[ -n "$CURRENT_FAILURES" ]]; then
 fi
 if [[ $FAILURES -gt 0 ]]; then
   echo "--- ${FAILURES} failure/error header(s) ---"
-  awk 'NR <= 40' <<< "$CURRENT_FAILURES"
+  LC_ALL=C awk 'NR <= 40' <<< "$CURRENT_FAILURES"
 fi
 
 # A gate is only meaningful against a baseline: the bar is "no NEW
@@ -299,9 +331,9 @@ fi
 NEW_FAILURES=""
 if [[ -n "$BASELINE" && $BASELINE_EXISTS_AT_START -eq 1 ]]; then
   echo "--- failures not present in baseline ($BASELINE) ---"
-  NEW_FAILURES="$(comm -13 \
-    <(printf '%s\n' "$BASELINE_FAILURES_AT_START" | sort -u) \
-    <(printf '%s\n' "$CURRENT_FAILURES"           | sort -u) \
+  NEW_FAILURES="$(LC_ALL=C comm -13 \
+    <(printf '%s\n' "$BASELINE_FAILURES_AT_START" | LC_ALL=C sort -u) \
+    <(printf '%s\n' "$CURRENT_FAILURES"           | LC_ALL=C sort -u) \
     || true)"
   [[ -z "$NEW_FAILURES" ]] || printf '%s\n' "$NEW_FAILURES"
 elif [[ -n "$BASELINE" ]]; then
@@ -340,11 +372,11 @@ if [[ $STATUS -ne 0 && $FAILURES -eq 0 ]]; then
 fi
 
 if [[ $STATUS -eq 0 ]]; then
-  if ! supported_runner_summary "$LOG"; then
+  if ! supported_runner_summary "$PARSE_LOG"; then
     echo "RESULT: gate RED — unrecognized runner output; --baseline supports unittest/pytest only"
     exit 1
   fi
-  if zero_tests_reported "$LOG" || ! tests_ran "$LOG"; then
+  if zero_tests_reported "$PARSE_LOG" || ! tests_ran "$PARSE_LOG"; then
     echo "RESULT: gate RED — no executed tests — skipped-only or unrecognized runner output"
     exit 1
   fi
@@ -354,12 +386,12 @@ fi
 
 # Keep the explicit diagnostic for nonzero zero-test runs. A zero-exit run was
 # already checked above with the stricter executed-test requirement.
-if zero_tests_reported "$LOG"; then
+if zero_tests_reported "$PARSE_LOG"; then
   echo "RESULT: gate RED — no tests ran"
   exit 1
 fi
 
-if ! tests_ran "$LOG"; then
+if ! tests_ran "$PARSE_LOG"; then
   echo "RESULT: gate RED — failures parsed but no completed tests were reported"
 elif [[ $BASELINE_EXISTS_AT_START -eq 0 || -n "$NEW_FAILURES" ]]; then
   echo "RESULT: gate RED — do not publish until resolved or explained"
