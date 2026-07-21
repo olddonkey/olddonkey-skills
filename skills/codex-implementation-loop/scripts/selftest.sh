@@ -559,6 +559,8 @@ run_case gate-quiet-subtests-pass bash "$GATE" \
 expect_status 0 "baseline gate accepts a passing quiet run with native subtests counts"
 expect_output "RESULT: gate green" \
   "baseline gate parses the subtests quiet summary as executed tests"
+expect_output "1 passed, 2 subtests passed in 0.00s" \
+  "gate surfaces the subtests quiet summary in its preview"
 
 run_case gate-quiet-subtests-masked bash "$GATE" \
   --log "$TMP_ROOT/gate-quiet-subtests-masked.log" -- \
@@ -566,6 +568,42 @@ run_case gate-quiet-subtests-masked bash "$GATE" \
 expect_status 1 "plain gate rejects a masked exit-zero subtests failed quiet summary"
 expect_output "RESULT: gate RED — runner summary reports failures but exit code is 0" \
   "plain gate reads failed counts from the subtests quiet summary"
+
+# The verdict is the LAST runner block of either kind: unittest output from an
+# inner child must not vouch for an outer pytest run, and an inner unittest
+# failure must not red a clean outer pytest run.
+CROSS_RUNNER_BASELINE="$TMP_ROOT/cross-runner-baseline.log"
+write_lines "$CROSS_RUNNER_BASELINE" \
+  'ERROR t.py - RuntimeError: collection failed'
+run_case gate-cross-runner-inner-unittest bash "$GATE" \
+  --log "$TMP_ROOT/gate-cross-runner-inner-unittest.log" \
+  --baseline "$CROSS_RUNNER_BASELINE" -- \
+  bash -c 'printf '\''Ran 3 tests in 0.001s\nOK\nERROR t.py - RuntimeError: collection failed\n=========================== 1 error in 0.04s ===========================\n'\''; exit 2'
+expect_status 2 "gate ignores inner unittest output when the final verdict is a pytest collection error"
+expect_output "RESULT: gate RED — failures parsed but no completed tests were reported" \
+  "gate refuses cross-runner execution evidence"
+
+run_case gate-cross-runner-inner-unittest-failed bash "$GATE" \
+  --log "$TMP_ROOT/gate-cross-runner-inner-unittest-failed.log" -- \
+  bash -c 'printf '\''FAILED (failures=1)\n=========================== 3 passed in 1.20s ===========================\n'\'''
+expect_status 0 "plain gate trusts the final pytest verdict over an inner unittest failed line"
+expect_output "RESULT: gate green" \
+  "plain gate stays green when an inner unittest failure precedes a passing final summary"
+
+# Forced-color output (--color=yes) is parsed through an ANSI-stripped view.
+run_case gate-ansi-pass bash "$GATE" \
+  --log "$TMP_ROOT/gate-ansi-pass.log" --baseline "$EMPTY_BASELINE" -- \
+  bash -c 'printf '\''\033[32m\033[1m========== 1 passed\033[0m\033[32m in 0.01s ==========\033[0m\n'\'''
+expect_status 0 "baseline gate recognizes a color-wrapped passing summary"
+expect_output "RESULT: gate green" \
+  "baseline gate parses ANSI-colored fenced summaries"
+
+run_case gate-ansi-masked bash "$GATE" \
+  --log "$TMP_ROOT/gate-ansi-masked.log" -- \
+  bash -c 'printf '\''\033[31mFAILED t.py::test_x - AssertionError: boom\033[0m\n\033[31m========== 1 failed in 0.01s ==========\033[0m\n'\'''
+expect_status 1 "plain gate sees a color-wrapped failed summary through the ANSI stripping"
+expect_output "FAILED t.py::test_x [AssertionError]" \
+  "gate extracts fingerprints from color-wrapped failure lines"
 
 CRASH_BASELINE="$TMP_ROOT/crash-baseline.log"
 write_lines "$CRASH_BASELINE" 'ImportError: same crash text'
