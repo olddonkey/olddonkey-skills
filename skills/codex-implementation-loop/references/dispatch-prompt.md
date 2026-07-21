@@ -22,6 +22,8 @@ Unit: <one-line name>
 ## Environment
 - You run in the real environment; .git is read-only — leave changes in
   the working tree, I commit and publish.
+- Do NOT use MCP servers, app connectors, or any external service — the
+  sandbox does not bound them; work with local files and shell only.
 - Do NOT run the full test suite. Run only <focused subset>, or nothing;
   I own the full gate.
 - When done, report: files changed, tests added, which subset you ran

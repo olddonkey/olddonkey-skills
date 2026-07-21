@@ -117,6 +117,8 @@ Run the whole suite yourself via the bundled helper — piping through `tail` ma
 
 Go exactly as far as the stop point says. **Check the branch before pushing** (`git status -sb`) — other tools quietly move checkouts, and a blind push lands commits on whatever is checked out; with the unit branch created at dispatch time this is confirmation, not rescue. Write commits/PRs so an absent reader understands *why*, with real gate numbers; match the repo's existing conventions. Merge only under recorded authorization (non-negotiable #2).
 
+**Bind the gate to the tree that ships.** A gate result certifies one tree, not a branch name: commit what was gated, record the SHA, and confirm the tree is clean (`git status --short`) — a commit hook or missed staging silently changes what ships and voids the gate. Before merging, verify the remote PR head still equals the gated SHA; if head or base has moved (rebase, concurrent push, review fixup), what exists now is ungated — re-review and re-gate. Where CI is trusted, require it green on that same SHA, not just on the branch.
+
 ## 7. Record and continue
 
 Note what landed and what's next somewhere durable (memory, progress doc, the plan) — a cross-session loop that isn't written down gets re-derived. Then take the next unit per the cadence dial.
