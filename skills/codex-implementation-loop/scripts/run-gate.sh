@@ -240,6 +240,9 @@ extract_failures() { # $1=log path
   ' "$1" 2>/dev/null
 }
 
+# A unittest verdict is complete only when the `Ran N tests` line has its
+# paired OK/FAILED result line — a bare count line is a truncated or masked
+# run and must not count as evidence.
 tests_ran() { # $1=stripped log path
   LC_ALL=C awk "$RUNNER_VERDICT_AWK"'
     END {
@@ -248,7 +251,8 @@ tests_ran() { # $1=stripped log path
           last_summary ~ /[1-9][0-9]*[[:space:]]+(subtests[[:space:]]+)?(passed|failed|xfailed|xpassed)([^[:alpha:]]|$)/) {
         ran = 1
       }
-      if (last_runner == "unittest" && (unit_total - unit_skipped) > 0) ran = 1
+      if (last_runner == "unittest" && unit_result != "" &&
+          (unit_total - unit_skipped) > 0) ran = 1
       exit(ran ? 0 : 1)
     }
   ' "$1" 2>/dev/null
@@ -268,7 +272,7 @@ zero_tests_reported() { # $1=stripped log path
 supported_runner_summary() { # $1=stripped log path
   LC_ALL=C awk "$RUNNER_VERDICT_AWK"'
     END {
-      if (last_runner == "unittest") recognized = 1
+      if (last_runner == "unittest" && unit_result != "") recognized = 1
       if (last_runner == "pytest" &&
           (last_summary ~ /^no tests ran([^[:alpha:]]|$)/ ||
            last_summary ~ /[0-9]+[[:space:]]+(subtests[[:space:]]+)?(passed|failed|skipped|deselected|xfailed|xpassed|error|errors|warning|warnings)([^[:alpha:]]|$)/)) {

@@ -230,29 +230,57 @@ fi
 
 CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
 
-# MCP servers and app connectors configured for Codex run OUTSIDE the exec
-# sandbox: `workspace-write` bounds files and shell, not tool calls that
-# reach external services. The companion (checked against 1.0.6) has no
-# per-dispatch switch to disable them, so an implement dispatch on a config
-# with external tools fails closed until the user acknowledges the exposure
-# once for this environment. Prompt-level prohibitions are a second layer,
-# never the boundary.
+# MCP servers and app connectors run OUTSIDE the exec sandbox in EVERY mode:
+# `workspace-write` and `read-only` bound files and shell, not tool calls
+# that reach external services — a read-only investigation can still mutate
+# remote state through an auto-approved tool. The companion (checked against
+# 1.0.6) has no per-dispatch switch to disable them, so any dispatch stops
+# until the user acknowledges the exposure once for this environment.
+#
+# Detection is a best-effort tripwire over the LOCAL config layers, not a
+# boundary: it dedupes nested tables to one entry per server/connector and
+# honors `enabled = false`, but it cannot see Apps enabled server-side or
+# tools injected by other config layers. Its silence is NOT proof of
+# isolation, and prompt-level prohibitions are a second layer, never the
+# boundary.
 external_tool_sections() { # $1=config path
   [[ -f "$1" ]] || return 0
-  LC_ALL=C grep -E '^\[(mcp_servers|apps)([].])' "$1" 2>/dev/null | head -8 || true
+  LC_ALL=C awk '
+    /^\[(mcp_servers|apps)[].]/ {
+      section = $0
+      sub(/^\[/, "", section)
+      sub(/\].*$/, "", section)
+      split(section, segments, ".")
+      identity = segments[1]
+      if (segments[2] != "") identity = segments[1] "." segments[2]
+      current = identity
+      if (!(identity in seen)) { seen[identity] = 1; order[++count] = identity }
+      next
+    }
+    /^\[/ { current = ""; next }
+    current != "" && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*false/ {
+      disabled[current] = 1
+    }
+    END {
+      for (i = 1; i <= count; i++) {
+        if (!(order[i] in disabled)) print "[" order[i] "]"
+      }
+    }
+  ' "$1" 2>/dev/null || true
 }
 EXTERNAL_TOOLS="$(external_tool_sections "$CONFIG"; external_tool_sections "$PWD/.codex/config.toml")"
 if [[ -n "$EXTERNAL_TOOLS" ]]; then
-  if [[ $READ_ONLY -eq 0 && "${CODEX_LOOP_ALLOW_EXTERNAL_TOOLS:-0}" != "1" ]]; then
-    echo "error: implement dispatch blocked — Codex config enables external tools that the workspace-write sandbox does NOT cover:" >&2
-    printf '%s\n' "$EXTERNAL_TOOLS" | sed 's/^/  /' >&2
-    echo "These can produce side effects beyond the working tree (MCP servers, app connectors)." >&2
-    echo "Either export CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 to acknowledge this once for the" >&2
-    echo "environment, or disable those sections in the Codex config while running the loop." >&2
-    echo "(read-only dispatches are not blocked)" >&2
+  if [[ "${CODEX_LOOP_ALLOW_EXTERNAL_TOOLS:-0}" != "1" ]]; then
+    echo "error: dispatch blocked — Codex config enables external tools that the exec sandbox does NOT cover (in any mode, including read-only):" >&2
+    printf '%s\n' "$EXTERNAL_TOOLS" | LC_ALL=C sed 's/^/  /' >&2
+    echo "Tool calls reach external services regardless of the filesystem sandbox." >&2
+    echo "This scan covers local config layers only — server-side-enabled Apps are invisible" >&2
+    echo "to it, so passing this check is not proof of isolation." >&2
+    echo "Export CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 to acknowledge the exposure once for this" >&2
+    echo "environment, or disable those tools in the Codex config while running the loop." >&2
     exit 4
   fi
-  echo "note  : external tools enabled in Codex config (outside the sandbox boundary)" >&2
+  echo "note  : external tools enabled in Codex config (outside the sandbox, all modes)" >&2
 fi
 
 ARGS=(task)
@@ -270,8 +298,9 @@ ARGS=(task)
 [[ ${#EXTRA[@]} -gt 0 ]] && ARGS+=("${EXTRA[@]}")
 
 # Read a key only from the TOP-LEVEL region of a TOML config (above the
-# first [section]). A plain grep would happily return a key that lives in
-# an inactive [profiles.*] table and display a value that is not in effect.
+# first [section]). A plain grep would happily return a key that lives
+# inside some [section] table (a profile or server block) and display a
+# value that is not in effect.
 top_level_value() { # $1=config path $2=key
   [[ -f "$1" ]] || return 0
   LC_ALL=C awk -v key="$2" '
@@ -295,9 +324,9 @@ describe() { # $1=label $2=chosen value $3=config key
   project_value="$(top_level_value "$PWD/.codex/config.toml" "$3")"
   global_value="$(top_level_value "$CONFIG" "$3")"
   if [[ -n "$project_value" ]]; then
-    echo "$1: $project_value (project .codex/config.toml top-level; profiles not resolved)"
+    echo "$1: $project_value (project .codex/config.toml top-level; other config layers not resolved)"
   elif [[ -n "$global_value" ]]; then
-    echo "$1: $global_value (config.toml top-level; active profile overrides not resolved)"
+    echo "$1: $global_value (config.toml top-level; other config layers not resolved)"
   else
     echo "$1: <Codex CLI default>"
   fi
@@ -312,12 +341,10 @@ command -v codex >/dev/null 2>&1 && echo "codex  : $(codex --version 2>/dev/null
 describe "model " "$MODEL"  "model" >&2
 describe "effort" "$EFFORT" "model_reasoning_effort" >&2
 # Tier has no per-task flag — always inherited — so show what will apply.
+# Profile/overlay mechanics have changed across Codex CLI versions; rather
+# than guess which scheme is installed, the labels above say plainly that
+# only top-level keys are read and the CLI's own resolution is authoritative.
 describe "tier  " ""        "service_tier" >&2
-# An active profile rewrites any of the above at resolution time; disclose it
-# rather than pretending the top-level values are the whole story.
-ACTIVE_PROFILE="$(top_level_value "$CONFIG" "profile")"
-[[ -z "$ACTIVE_PROFILE" ]] || \
-  echo "profile: $ACTIVE_PROFILE active in config.toml — its overrides apply but are not shown above" >&2
 if [[ $READ_ONLY -eq 1 ]]; then
   echo "mode  : READ-ONLY (no file writes; nothing to review/gate/publish)" >&2
 else
