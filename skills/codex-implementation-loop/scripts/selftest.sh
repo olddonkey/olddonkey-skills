@@ -78,6 +78,14 @@ expect_file_line() { # $1=file $2=exact line $3=description
   fi
 }
 
+skip_checks() { # $@=descriptions; marked skipped so counts stay stable
+  local description
+  for description in "$@"; do
+    CHECKS=$((CHECKS + 1))
+    printf 'ok %d - %s # SKIP no tomllib python3 available\n' "$CHECKS" "$description"
+  done
+}
+
 run_case() { # $1=name, remaining args=command
   local name="$1"
   shift
@@ -133,6 +141,48 @@ mkdir -p "$(dirname "$NO_USAGE_COMPANION")" "$(dirname "$LIMITED_COMPANION")"
 write_lines "$NO_USAGE_COMPANION" '// companion fixture without an effort usage string'
 write_lines "$LIMITED_COMPANION" '// usage: --effort <low|high>'
 
+# The external-tools scan needs a python3 with tomllib. Find one so the
+# detection-verdict cases run on any machine; without one they are skipped
+# (stable check count) and the deterministic fail-closed cases still run.
+TOML_PYTHON=""
+for toml_candidate in python3 python3.13 python3.12 python3.11; do
+  if command -v "$toml_candidate" >/dev/null 2>&1 && \
+     "$toml_candidate" -c 'import tomllib' >/dev/null 2>&1; then
+    TOML_PYTHON="$(command -v "$toml_candidate")"
+    break
+  fi
+done
+TOOLS_PATH="$TEST_PATH"
+if [[ -n "$TOML_PYTHON" ]]; then
+  TOML_BIN="$TMP_ROOT/toml-bin"
+  mkdir -p "$TOML_BIN"
+  ln -s "$TOML_PYTHON" "$TOML_BIN/python3"
+  TOOLS_PATH="$TOML_BIN:$TEST_PATH"
+fi
+
+# A PATH with every needed tool EXCEPT python3, for the fail-closed cases.
+NO_PYTHON_BIN="$TMP_ROOT/no-python-bin"
+mkdir -p "$NO_PYTHON_BIN"
+for required_tool in awk bash cat cut find grep head sed sort tail tr; do
+  REQUIRED_TOOL_PATH="$(command -v "$required_tool" 2>/dev/null || true)"
+  [[ -n "$REQUIRED_TOOL_PATH" ]] || {
+    printf 'selftest: required tool not found: %s\n' "$required_tool" >&2
+    exit 1
+  }
+  ln -s "$REQUIRED_TOOL_PATH" "$NO_PYTHON_BIN/$required_tool" || exit 1
+done
+ln -s "$BIN_DIR/node" "$NO_PYTHON_BIN/node" || exit 1
+
+# A python3 that passes the tomllib probe but crashes on the actual scan,
+# to pin the parser-failure fail-closed path.
+CRASH_PYTHON_BIN="$TMP_ROOT/crash-python-bin"
+mkdir -p "$CRASH_PYTHON_BIN"
+write_lines "$CRASH_PYTHON_BIN/python3" \
+  '#!/usr/bin/env bash' \
+  '[[ "${1:-}" == "-c" ]] && exit 0' \
+  'exit 9'
+chmod +x "$CRASH_PYTHON_BIN/python3"
+
 # A grep miss must use the built-in effort snapshot, not terminate under -e.
 run_case dispatch-snapshot env \
   HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" \
@@ -159,7 +209,7 @@ write_lines "$CONFIG_DIR/config.toml" \
   'service_tier = "fast"'
 OVERRIDE_NODE_LOG="$TMP_ROOT/override-valid.node"
 run_case dispatch-override-valid env \
-  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" \
+  HOME="$HOME_DIR" CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 CODEX_HOME="$CONFIG_DIR" \
   CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
   SELFTEST_NODE_LOG="$OVERRIDE_NODE_LOG" PATH="$TEST_PATH" \
   bash "$DISPATCH" --prompt selftest --effort high
@@ -179,7 +229,7 @@ write_lines "$PROFILE_CONFIG_DIR/config.toml" \
   '[profiles.speedy]' \
   'model = "profile-model"'
 run_case dispatch-profile-table env \
-  HOME="$HOME_DIR" CODEX_HOME="$PROFILE_CONFIG_DIR" \
+  HOME="$HOME_DIR" CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 CODEX_HOME="$PROFILE_CONFIG_DIR" \
   CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
   SELFTEST_NODE_LOG="$TMP_ROOT/profile-table.node" PATH="$TEST_PATH" \
   bash "$DISPATCH" --prompt selftest --effort high
@@ -189,7 +239,9 @@ expect_output "model : <Codex CLI default>" \
 
 # MCP servers / app connectors run outside the exec sandbox in EVERY mode,
 # so any dispatch stops until the exposure is acknowledged once. Detection
-# dedupes nested tables to one entry per server and honors enabled=false.
+# uses a real TOML parser (tomllib); these verdict cases run through the
+# shim PATH when an interpreter exists and are skipped (stable count)
+# otherwise — the fail-closed cases below run everywhere.
 TOOLS_CONFIG_DIR="$TMP_ROOT/codex-home-tools"
 mkdir -p "$TOOLS_CONFIG_DIR"
 write_lines "$TOOLS_CONFIG_DIR/config.toml" \
@@ -198,112 +250,180 @@ write_lines "$TOOLS_CONFIG_DIR/config.toml" \
   'command = "definitely-not-run"' \
   '[mcp_servers.filewriter.env]' \
   'KEY = "value"'
-run_case dispatch-external-tools-blocked env \
+if [[ -n "$TOML_PYTHON" ]]; then
+  run_case dispatch-external-tools-blocked env \
+    HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
+    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+    SELFTEST_NODE_LOG="$TMP_ROOT/tools-blocked.node" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort high
+  expect_status 4 "dispatch stops when Codex config enables external tools"
+  expect_output "[mcp_servers.filewriter]" \
+    "dispatch names the enabled external tool"
+  expect_no_output "[mcp_servers.filewriter.env]" \
+    "dispatch dedupes nested tables to one entry per server"
+
+  run_case dispatch-external-tools-acknowledged env \
+    HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
+    CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 \
+    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+    SELFTEST_NODE_LOG="$TMP_ROOT/tools-ack.node" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort high
+  expect_status 0 "dispatch proceeds after explicit external-tools acknowledgment"
+  expect_output "note  : external tools enabled in Codex config" \
+    "dispatch still discloses acknowledged external tools"
+
+  # read-only bounds files and shell, NOT tool calls — no exemption.
+  run_case dispatch-external-tools-readonly env \
+    HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
+    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+    SELFTEST_NODE_LOG="$TMP_ROOT/tools-ro.node" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort high --read-only
+  expect_status 4 "read-only dispatch is blocked by external tools too"
+
+  # A server disabled with `enabled = false` in its ROOT table is not an
+  # exposure; the same key in a nested per-tool table must not hide the
+  # connector, whose other tools remain callable.
+  DISABLED_TOOLS_DIR="$TMP_ROOT/codex-home-tools-disabled"
+  mkdir -p "$DISABLED_TOOLS_DIR"
+  write_lines "$DISABLED_TOOLS_DIR/config.toml" \
+    '[mcp_servers.filewriter]' \
+    'command = "definitely-not-run"' \
+    'enabled = false'
+  run_case dispatch-external-tools-disabled env \
+    HOME="$HOME_DIR" CODEX_HOME="$DISABLED_TOOLS_DIR" \
+    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+    SELFTEST_NODE_LOG="$TMP_ROOT/tools-disabled.node" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort high
+  expect_status 0 "dispatch does not block on a server disabled with enabled=false"
+
+  PARTIAL_TOOLS_DIR="$TMP_ROOT/codex-home-tools-partial"
+  mkdir -p "$PARTIAL_TOOLS_DIR"
+  write_lines "$PARTIAL_TOOLS_DIR/config.toml" \
+    '[apps.connector_a.tools.disabled_tool]' \
+    'enabled = false' \
+    '[apps.connector_a.tools.enabled_tool]' \
+    'approval_mode = "approve"'
+  run_case dispatch-external-tools-partial env \
+    HOME="$HOME_DIR" CODEX_HOME="$PARTIAL_TOOLS_DIR" \
+    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+    SELFTEST_NODE_LOG="$TMP_ROOT/tools-partial.node" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort high
+  expect_status 4 "dispatch still blocks when only one tool of a connector is disabled"
+  expect_output "[apps.connector_a]" \
+    "dispatch lists the connector whose other tools remain callable"
+
+  # Legal TOML the CLI honors: indented headers, dotted keys (with or
+  # without whitespace around the dots), and inline tables.
+  VARIANT_TOOLS_DIR="$TMP_ROOT/codex-home-tools-variants"
+  mkdir -p "$VARIANT_TOOLS_DIR"
+  write_lines "$VARIANT_TOOLS_DIR/config.toml" \
+    '  [mcp_servers.demo]' \
+    '  command = "printf"'
+  run_case dispatch-tools-indented env \
+    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
+    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+    SELFTEST_NODE_LOG="$TMP_ROOT/tools-indented.node" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort high
+  expect_status 4 "dispatch blocks on an indented server table header"
+
+  write_lines "$VARIANT_TOOLS_DIR/config.toml" \
+    'mcp_servers.demo.command = "printf"'
+  run_case dispatch-tools-dotted env \
+    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
+    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+    SELFTEST_NODE_LOG="$TMP_ROOT/tools-dotted.node" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort high
+  expect_status 4 "dispatch blocks on a top-level dotted-key server definition"
+  expect_output "[mcp_servers.demo]" \
+    "dispatch names the dotted-key server"
+
+  write_lines "$VARIANT_TOOLS_DIR/config.toml" \
+    'mcp_servers . demo . command = "printf"'
+  run_case dispatch-tools-spaced-dotted env \
+    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
+    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+    SELFTEST_NODE_LOG="$TMP_ROOT/tools-spaced.node" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort high
+  expect_status 4 "dispatch blocks on a dotted key with whitespace around the dots"
+  expect_output "[mcp_servers.demo]" \
+    "dispatch names the whitespace-dotted server"
+
+  write_lines "$VARIANT_TOOLS_DIR/config.toml" \
+    'mcp_servers = { demo = { command = "printf" } }'
+  run_case dispatch-tools-inline env \
+    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
+    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+    SELFTEST_NODE_LOG="$TMP_ROOT/tools-inline.node" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort high
+  expect_status 4 "dispatch blocks on an inline-table server definition"
+
+  write_lines "$VARIANT_TOOLS_DIR/config.toml" \
+    'mcp_servers.demo.command = "printf"' \
+    'mcp_servers.demo.enabled = false'
+  run_case dispatch-tools-dotted-disabled env \
+    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
+    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+    SELFTEST_NODE_LOG="$TMP_ROOT/tools-dotted-disabled.node" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort high
+  expect_status 0 "dispatch does not block on a dotted-key server disabled at its root"
+else
+  skip_checks \
+    "dispatch stops when Codex config enables external tools" \
+    "dispatch names the enabled external tool" \
+    "dispatch dedupes nested tables to one entry per server" \
+    "dispatch proceeds after explicit external-tools acknowledgment" \
+    "dispatch still discloses acknowledged external tools" \
+    "read-only dispatch is blocked by external tools too" \
+    "dispatch does not block on a server disabled with enabled=false" \
+    "dispatch still blocks when only one tool of a connector is disabled" \
+    "dispatch lists the connector whose other tools remain callable" \
+    "dispatch blocks on an indented server table header" \
+    "dispatch blocks on a top-level dotted-key server definition" \
+    "dispatch names the dotted-key server" \
+    "dispatch blocks on a dotted key with whitespace around the dots" \
+    "dispatch names the whitespace-dotted server" \
+    "dispatch blocks on an inline-table server definition" \
+    "dispatch does not block on a dotted-key server disabled at its root"
+fi
+
+# Without a TOML parser the config is UNVERIFIABLE and any dispatch with a
+# config file fails closed; no config file means no exposure to verify, and
+# a python3 that probes fine but crashes on the scan also fails closed.
+run_case dispatch-tools-noverify env \
   HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
   CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/tools-blocked.node" PATH="$TEST_PATH" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/tools-noverify.node" PATH="$NO_PYTHON_BIN" \
   bash "$DISPATCH" --prompt selftest --effort high
-expect_status 4 "dispatch stops when Codex config enables external tools"
-expect_output "[mcp_servers.filewriter]" \
-  "dispatch names the enabled external tool"
-expect_no_output "[mcp_servers.filewriter.env]" \
-  "dispatch dedupes nested tables to one entry per server"
+expect_status 4 "dispatch fails closed when no TOML parser is available"
+expect_output "cannot verify the Codex config" \
+  "dispatch explains the unverifiable config"
 
-run_case dispatch-external-tools-acknowledged env \
+run_case dispatch-tools-noverify-ack env \
   HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
   CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 \
   CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/tools-ack.node" PATH="$TEST_PATH" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/tools-noverify-ack.node" PATH="$NO_PYTHON_BIN" \
   bash "$DISPATCH" --prompt selftest --effort high
-expect_status 0 "dispatch proceeds after explicit external-tools acknowledgment"
-expect_output "note  : external tools enabled in Codex config" \
-  "dispatch still discloses acknowledged external tools"
+expect_status 0 "dispatch proceeds on an unverifiable config after acknowledgment"
 
-# read-only bounds files and shell, NOT tool calls — it gets no exemption.
-run_case dispatch-external-tools-readonly env \
+EMPTY_CODEX_HOME="$TMP_ROOT/codex-home-empty"
+mkdir -p "$EMPTY_CODEX_HOME"
+run_case dispatch-tools-noconfig env \
+  HOME="$HOME_DIR" CODEX_HOME="$EMPTY_CODEX_HOME" \
+  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/tools-noconfig.node" PATH="$NO_PYTHON_BIN" \
+  bash "$DISPATCH" --prompt selftest --effort high
+expect_status 0 "dispatch without any config file needs no parser and proceeds"
+
+run_case dispatch-tools-parser-crash env \
   HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
   CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/tools-ro.node" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort high --read-only
-expect_status 4 "read-only dispatch is blocked by external tools too"
-
-# A server explicitly disabled in config is not an exposure — but only when
-# `enabled = false` sits in the server/connector ROOT table.
-DISABLED_TOOLS_DIR="$TMP_ROOT/codex-home-tools-disabled"
-mkdir -p "$DISABLED_TOOLS_DIR"
-write_lines "$DISABLED_TOOLS_DIR/config.toml" \
-  '[mcp_servers.filewriter]' \
-  'command = "definitely-not-run"' \
-  'enabled = false'
-run_case dispatch-external-tools-disabled env \
-  HOME="$HOME_DIR" CODEX_HOME="$DISABLED_TOOLS_DIR" \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/tools-disabled.node" PATH="$TEST_PATH" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/tools-crash.node" \
+  PATH="$CRASH_PYTHON_BIN:$NO_PYTHON_BIN" \
   bash "$DISPATCH" --prompt selftest --effort high
-expect_status 0 "dispatch does not block on a server disabled with enabled=false"
-
-# Per-tool `enabled = false` in a NESTED table must not hide the connector:
-# its other tools remain callable and the exposure stands.
-PARTIAL_TOOLS_DIR="$TMP_ROOT/codex-home-tools-partial"
-mkdir -p "$PARTIAL_TOOLS_DIR"
-write_lines "$PARTIAL_TOOLS_DIR/config.toml" \
-  '[apps.connector_a.tools.disabled_tool]' \
-  'enabled = false' \
-  '[apps.connector_a.tools.enabled_tool]' \
-  'approval_mode = "approve"'
-run_case dispatch-external-tools-partial env \
-  HOME="$HOME_DIR" CODEX_HOME="$PARTIAL_TOOLS_DIR" \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/tools-partial.node" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort high
-expect_status 4 "dispatch still blocks when only one tool of a connector is disabled"
-expect_output "[apps.connector_a]" \
-  "dispatch lists the connector whose other tools remain callable"
-
-# Legal TOML shapes beyond column-zero section headers must trip the scan:
-# indented headers, top-level dotted keys, and inline tables all define
-# enabled servers that the CLI honors.
-VARIANT_TOOLS_DIR="$TMP_ROOT/codex-home-tools-variants"
-mkdir -p "$VARIANT_TOOLS_DIR"
-write_lines "$VARIANT_TOOLS_DIR/config.toml" \
-  '  [mcp_servers.demo]' \
-  '  command = "printf"'
-run_case dispatch-tools-indented env \
-  HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/tools-indented.node" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort high
-expect_status 4 "dispatch blocks on an indented server table header"
-
-write_lines "$VARIANT_TOOLS_DIR/config.toml" \
-  'mcp_servers.demo.command = "printf"'
-run_case dispatch-tools-dotted env \
-  HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/tools-dotted.node" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort high
-expect_status 4 "dispatch blocks on a top-level dotted-key server definition"
-expect_output "[mcp_servers.demo]" \
-  "dispatch names the dotted-key server"
-
-write_lines "$VARIANT_TOOLS_DIR/config.toml" \
-  'mcp_servers = { demo = { command = "printf" } }'
-run_case dispatch-tools-inline env \
-  HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/tools-inline.node" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort high
-expect_status 4 "dispatch blocks on an inline-table server definition"
-
-write_lines "$VARIANT_TOOLS_DIR/config.toml" \
-  'mcp_servers.demo.command = "printf"' \
-  'mcp_servers.demo.enabled = false'
-run_case dispatch-tools-dotted-disabled env \
-  HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/tools-dotted-disabled.node" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort high
-expect_status 0 "dispatch does not block on a dotted-key server disabled at its root"
+expect_status 4 "dispatch fails closed when the TOML parser itself crashes"
+expect_output "cannot verify the Codex config" \
+  "dispatch reports the parser crash as unverifiable"
 
 # The prompt must reach the companion as ONE argument behind a `--`
 # terminator: the companion re-splits a lone trailing argument, so a prompt
@@ -311,7 +431,7 @@ expect_status 0 "dispatch does not block on a dotted-key server disabled at its 
 INJECTION_PROMPT='Investigate this. Do not use --write and only report.'
 INJECTION_NODE_LOG="$TMP_ROOT/injection.node"
 run_case dispatch-prompt-injection env \
-  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" \
+  HOME="$HOME_DIR" CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 CODEX_HOME="$CONFIG_DIR" \
   CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
   SELFTEST_NODE_LOG="$INJECTION_NODE_LOG" PATH="$TEST_PATH" \
   bash "$DISPATCH" --read-only --prompt "$INJECTION_PROMPT" --effort high
@@ -322,7 +442,7 @@ expect_file_line "$INJECTION_NODE_LOG" "$INJECTION_PROMPT" \
   "dispatch keeps the prompt as a single untampered argument"
 
 run_case dispatch-extra-rejected env \
-  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" \
+  HOME="$HOME_DIR" CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 CODEX_HOME="$CONFIG_DIR" \
   CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
   SELFTEST_NODE_LOG="$TMP_ROOT/extra.node" PATH="$TEST_PATH" \
   bash "$DISPATCH" --prompt selftest --effort high -- --write
@@ -359,7 +479,7 @@ CLAUDE_PLUGIN_JSON="$(printf \
   "$CLAUDE_LOCAL_ROOT" "$CLAUDE_MANAGED_ROOT")"
 CLAUDE_NODE_LOG="$TMP_ROOT/claude-list.node"
 run_case dispatch-claude-list env \
-  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" CODEX_LOOP_COMPANION="" \
+  HOME="$HOME_DIR" CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 CODEX_HOME="$CONFIG_DIR" CODEX_LOOP_COMPANION="" \
   SELFTEST_CLAUDE_JSON="$CLAUDE_PLUGIN_JSON" SELFTEST_NODE_LOG="$CLAUDE_NODE_LOG" \
   PATH="$CLAUDE_BIN:$NO_CLAUDE_PATH" \
   bash "$DISPATCH" --prompt selftest --effort low
@@ -386,7 +506,7 @@ printf '{"plugins":{"codex@openai-codex":[{"scope":"user","enabled":true,"instal
   > "$HOME_DIR/.claude/plugins/installed_plugins.json"
 ACTIVE_NODE_LOG="$TMP_ROOT/active.node"
 run_case dispatch-active env \
-  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" CODEX_LOOP_COMPANION="" \
+  HOME="$HOME_DIR" CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 CODEX_HOME="$CONFIG_DIR" CODEX_LOOP_COMPANION="" \
   SELFTEST_NODE_LOG="$ACTIVE_NODE_LOG" PATH="$NO_CLAUDE_PATH" \
   bash "$DISPATCH" --prompt selftest --effort low
 expect_status 0 "dispatch falls through cleanly when the Claude CLI is absent"
@@ -402,7 +522,7 @@ write_lines "$MARKET_COMPANION" '// --effort <low|high>'
 write_lines "$MARKET_HOME/.claude/plugins/installed_plugins.json" '{not valid json'
 MARKET_NODE_LOG="$TMP_ROOT/market.node"
 run_case dispatch-marketplace env \
-  HOME="$MARKET_HOME" CODEX_HOME="$CONFIG_DIR" CODEX_LOOP_COMPANION="" \
+  HOME="$MARKET_HOME" CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 CODEX_HOME="$CONFIG_DIR" CODEX_LOOP_COMPANION="" \
   SELFTEST_NODE_LOG="$MARKET_NODE_LOG" PATH="$NO_CLAUDE_PATH" \
   bash "$DISPATCH" --prompt selftest --effort low
 expect_status 0 "dispatch reaches marketplace fallback when cache is missing"
@@ -616,6 +736,15 @@ run_case gate-signal-exit bash "$GATE" \
   bash -c 'printf '\''FAILED tests/test_widget.py::test_value - AssertionError: old detail\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 137'
 expect_status 137 "gate keeps an abnormal exit code even when failures match baseline"
 expect_output "abnormal runner exit (137)" "gate explains the abnormal-exit rejection"
+
+# The verdict reads through the descriptor the command wrote: a log path
+# swapped mid-run — even for green-looking content — is not judged.
+SWAP_LOG="$TMP_ROOT/gate-swap.log"
+run_case gate-log-swap bash "$GATE" --log "$SWAP_LOG" -- \
+  bash -c "rm -f '$SWAP_LOG'; printf '=========================== 1 passed in 0.01s ===========================\n' > '$SWAP_LOG'"
+expect_status 1 "gate rejects a log replaced during the run"
+expect_output "log file was replaced during the run" \
+  "gate explains the mid-run log swap"
 
 run_case gate-pytest-message-change bash "$GATE" \
   --log "$TMP_ROOT/gate-pytest-message-change.log" --baseline "$PYTEST_BASELINE" -- \

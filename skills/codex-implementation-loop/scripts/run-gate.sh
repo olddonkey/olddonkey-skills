@@ -134,17 +134,21 @@ if [[ -n "$BASELINE" ]]; then
   fi
 fi
 
-# The log must be THIS run's output. Refuse symlinked logs, and create or
-# truncate the file before running the command: if that fails, the command
-# would never start yet a previous run's content would still be parsed —
-# and a stale log matching the baseline would report green for a run that
-# never happened.
+# The log must be THIS run's output, written through a descriptor held for
+# the whole run — never re-opened by path after a check. The post-open -L
+# re-check closes the create-side race: a symlink swapped in before the
+# open is still visible afterwards, and once fd 9 is bound, later path
+# swaps cannot redirect the command's output.
 if [[ -L "$LOG" ]]; then
   echo "error: --log must not be a symlink: $LOG" >&2
   exit 2
 fi
-if ! { : > "$LOG"; } 2>/dev/null; then
+if ! { exec 9> "$LOG"; } 2>/dev/null; then
   echo "error: cannot create or truncate log: $LOG" >&2
+  exit 2
+fi
+if [[ -L "$LOG" ]]; then
+  echo "error: --log was replaced by a symlink: $LOG" >&2
   exit 2
 fi
 
@@ -332,16 +336,27 @@ if [[ -n "$BASELINE" && -f "$BASELINE" ]]; then
 fi
 
 START=$SECONDS
-# Output goes to a file, never through a pipe, so $? is the suite's own.
-"$@" > "$LOG" 2>&1
+# Output goes to the held descriptor, never through a pipe or a fresh
+# path-based open, so $? is the suite's own and the destination cannot be
+# swapped mid-run.
+"$@" >&9 2>&1
 STATUS=$?
 ELAPSED=$((SECONDS - START))
 
 echo "=== gate finished in ${ELAPSED}s with exit code ${STATUS} ==="
 
+# Re-open the log for reading and prove it is the same file the command
+# wrote: comparing two HELD descriptors has no check-to-use window, so a
+# log path swapped mid-run — even for green-looking content — is caught
+# here, and parsing reads through the verified descriptor.
+if ! { exec 8< "$LOG"; } 2>/dev/null || ! [[ /dev/fd/8 -ef /dev/fd/9 ]]; then
+  echo "RESULT: gate RED — log file was replaced during the run; refusing to judge it"
+  exit 1
+fi
+
 # An unparsed log must never be judged: an empty parse view would hide a
 # failed summary behind a masked exit code, so normalization failure is red.
-if ! strip_ansi "$LOG" "$PARSE_LOG"; then
+if ! strip_ansi /dev/fd/8 "$PARSE_LOG"; then
   echo "RESULT: gate RED — log normalization failed; refusing to judge unparsed output"
   exit 1
 fi

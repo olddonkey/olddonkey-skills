@@ -248,17 +248,32 @@ CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
 # tools injected by other config layers. Its silence is NOT proof of
 # isolation, and prompt-level prohibitions are a second layer, never the
 # boundary.
-# Prefer a real TOML parser (tomllib, python 3.11+): a regex scan misses
-# legal TOML shapes — indented table headers, top-level dotted keys, inline
-# tables. When tomllib is unavailable the awk fallback covers those shapes
-# line-wise; either way an unparseable or ambiguous config counts as
-# exposure, never as silence. `enabled = false` is honored only at the
-# server/connector root: the schema also allows per-tool `enabled`, and one
-# disabled tool must not hide a connector whose other tools stay callable.
-external_tool_sections() { # $1=config path
+# The scan uses a REAL TOML parser (tomllib, python 3.11+) and nothing
+# else: regex scanning of TOML is unsound — legal shapes like indented
+# headers, dotted keys with whitespace around the dots, and inline tables
+# all evade line patterns. When no parser is available, or the parser
+# itself fails, the config is UNVERIFIABLE and the dispatch fails closed;
+# a config that parses but doesn't type-check (unparseable content) is
+# reported as exposure. `enabled = false` is honored only at the
+# server/connector root: the schema also allows per-tool `enabled`, and
+# one disabled tool must not hide a connector whose other tools stay
+# callable.
+# Find any python that ships tomllib — the default python3 may predate 3.11
+# while a versioned interpreter sits right next to it.
+TOML_PYTHON=""
+for TOML_CANDIDATE in python3 python3.13 python3.12 python3.11; do
+  if command -v "$TOML_CANDIDATE" >/dev/null 2>&1 && \
+     "$TOML_CANDIDATE" -c 'import tomllib' 2>/dev/null; then
+    TOML_PYTHON="$TOML_CANDIDATE"
+    break
+  fi
+done
+
+scan_config_tools() { # $1=config path; prints identities; rc 3 = cannot verify
   [[ -f "$1" ]] || return 0
-  if command -v python3 >/dev/null 2>&1 && python3 -c 'import tomllib' 2>/dev/null; then
-    python3 - "$1" 2>/dev/null <<'PY' || true
+  [[ -n "$TOML_PYTHON" ]] || return 3
+  local scanned=""
+  if ! scanned="$("$TOML_PYTHON" - "$1" 2>/dev/null <<'PY'
 import sys
 import tomllib
 
@@ -278,54 +293,32 @@ for family in ("mcp_servers", "apps"):
             continue
         print(f"[{family}.{name}]")
 PY
-    return 0
+)"; then
+    return 3
   fi
-  LC_ALL=C awk '
-    {
-      line = $0
-      sub(/^[[:space:]]+/, "", line)
-    }
-    line ~ /^\[(mcp_servers|apps)[].]/ {
-      section = line
-      sub(/^\[/, "", section)
-      sub(/\].*$/, "", section)
-      depth = split(section, segments, ".")
-      identity = segments[1]
-      if (segments[2] != "") identity = segments[1] "." segments[2]
-      current = identity
-      current_is_root = (depth == 2) ? 1 : 0
-      if (!(identity in seen)) { seen[identity] = 1; order[++count] = identity }
-      next
-    }
-    line ~ /^\[/ { current = ""; current_is_root = 0; next }
-    line ~ /^(mcp_servers|apps)\.[^[:space:]=.]+/ && line ~ /=/ {
-      keypath = line
-      sub(/[[:space:]]*=.*$/, "", keypath)
-      depth = split(keypath, segments, ".")
-      identity = segments[1] "." segments[2]
-      if (!(identity in seen)) { seen[identity] = 1; order[++count] = identity }
-      if (depth == 3 && segments[3] == "enabled" &&
-          line ~ /=[[:space:]]*false[[:space:]]*$/) disabled[identity] = 1
-      next
-    }
-    line ~ /^(mcp_servers|apps)[[:space:]]*=/ {
-      family = line
-      sub(/[[:space:]]*=.*$/, "", family)
-      if (!(family in seen)) { seen[family] = 1; order[++count] = family }
-      next
-    }
-    current != "" && current_is_root &&
-      line ~ /^enabled[[:space:]]*=[[:space:]]*false/ {
-      disabled[current] = 1
-    }
-    END {
-      for (i = 1; i <= count; i++) {
-        if (!(order[i] in disabled)) print "[" order[i] "]"
-      }
-    }
-  ' "$1" 2>/dev/null || true
+  [[ -z "$scanned" ]] || printf '%s\n' "$scanned"
+  return 0
 }
-EXTERNAL_TOOLS="$(external_tool_sections "$CONFIG"; external_tool_sections "$PWD/.codex/config.toml")"
+
+EXTERNAL_TOOLS=""
+TOOL_SCAN_FAILED=0
+NEWLINE=$'\n'
+for TOOL_CONFIG in "$CONFIG" "$PWD/.codex/config.toml"; do
+  if TOOL_SCAN_OUTPUT="$(scan_config_tools "$TOOL_CONFIG")"; then
+    [[ -z "$TOOL_SCAN_OUTPUT" ]] || \
+      EXTERNAL_TOOLS="${EXTERNAL_TOOLS}${EXTERNAL_TOOLS:+$NEWLINE}$TOOL_SCAN_OUTPUT"
+  else
+    TOOL_SCAN_FAILED=1
+  fi
+done
+if [[ $TOOL_SCAN_FAILED -eq 1 && "${CODEX_LOOP_ALLOW_EXTERNAL_TOOLS:-0}" != "1" ]]; then
+  echo "error: dispatch blocked — cannot verify the Codex config for external tools." >&2
+  echo "The scan needs python3 with tomllib (3.11+); regex scanning of TOML is unsound," >&2
+  echo "so an unverifiable config fails closed rather than passing unchecked." >&2
+  echo "Install a python3 that provides tomllib, or export" >&2
+  echo "CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 to acknowledge the unverified exposure once." >&2
+  exit 4
+fi
 if [[ -n "$EXTERNAL_TOOLS" ]]; then
   if [[ "${CODEX_LOOP_ALLOW_EXTERNAL_TOOLS:-0}" != "1" ]]; then
     echo "error: dispatch blocked — Codex config enables external tools that the exec sandbox does NOT cover (in any mode, including read-only):" >&2
