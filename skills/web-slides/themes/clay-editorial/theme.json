@@ -1,0 +1,27 @@
+{
+  "id": "clay-editorial",
+  "name": "Clay Editorial",
+  "nameZh": "陶土编辑风",
+  "description": "Calm premium editorial. Warm ivory canvas, a clay/terracotta accent, refined Fraunces serif display over clean Inter body, generous whitespace, soft-rounded cards. Restrained and trustworthy — reads like a modern research lab or thoughtful product site.",
+  "descriptionZh": "克制的高级编辑风：暖象牙底 + 陶土色（clay #CC785C）强调色 + 精炼 Fraunces 衬线标题 + 干净 Inter 正文 + 大留白 + 柔角卡片。克制、可信，像现代研究机构 / 思想型产品官网。",
+  "mood": [
+    "light",
+    "editorial",
+    "premium",
+    "calm",
+    "trustworthy",
+    "restrained"
+  ],
+  "bestFor": [
+    "项目复盘（project retro）",
+    "AI / 研究分享",
+    "产品 keynote / 严肃汇报",
+    "思想型 / 信息驱动内容"
+  ],
+  "preview": {
+    "shell": "#e6e1d3",
+    "surface": "#f0eee6",
+    "text": "#1a1915",
+    "accent": "#cc785c"
+  }
+}

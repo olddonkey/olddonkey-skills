@@ -7,8 +7,15 @@
 #
 # Usage:
 #   codex-dispatch.sh --prompt-file PATH [--read-only|--investigate] [--background]
-#                     [--model MODEL] [--effort LEVEL] [--resume] [-- EXTRA...]
+#                     [--model MODEL] [--effort LEVEL] [--resume]
 #   codex-dispatch.sh --prompt "short inline prompt" [...]
+#
+# The prompt is always passed to the companion behind a `--` argument
+# terminator: the companion re-splits a lone trailing argument shell-style,
+# so without the terminator a prompt merely MENTIONING --write would become
+# a real write flag. For the same reason there is deliberately no
+# passthrough for extra companion arguments — privilege, workspace, and
+# resume flags must come from this script's own interface.
 #
 # Run from the ROOT of the target repo: the companion operates on the
 # invoking directory, so a dispatch from the wrong place silently points
@@ -42,7 +49,6 @@ PROMPT=""
 RESUME=0
 READ_ONLY=0
 BACKGROUND=0
-EXTRA=()
 
 # Fallback snapshot (companion 1.0.6). The live list is read from the
 # installed companion below — the wrapper is the authority, not this file.
@@ -64,7 +70,6 @@ while [[ $# -gt 0 ]]; do
     --read-only|--investigate) READ_ONLY=1; shift ;;
     --background)  BACKGROUND=1; shift ;;
     -h|--help)     usage 0 ;;
-    --)            shift; EXTRA=("$@"); break ;;
     *)             echo "unknown argument: $1" >&2; usage 1 ;;
   esac
 done
@@ -243,38 +248,82 @@ CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
 # tools injected by other config layers. Its silence is NOT proof of
 # isolation, and prompt-level prohibitions are a second layer, never the
 # boundary.
-external_tool_sections() { # $1=config path
+# The scan uses a REAL TOML parser (tomllib, python 3.11+) and nothing
+# else: regex scanning of TOML is unsound — legal shapes like indented
+# headers, dotted keys with whitespace around the dots, and inline tables
+# all evade line patterns. When no parser is available, or the parser
+# itself fails, the config is UNVERIFIABLE and the dispatch fails closed;
+# a config that parses but doesn't type-check (unparseable content) is
+# reported as exposure. `enabled = false` is honored only at the
+# server/connector root: the schema also allows per-tool `enabled`, and
+# one disabled tool must not hide a connector whose other tools stay
+# callable.
+# Find any python that ships tomllib — the default python3 may predate 3.11
+# while a versioned interpreter sits right next to it.
+TOML_PYTHON=""
+for TOML_CANDIDATE in python3 python3.13 python3.12 python3.11; do
+  if command -v "$TOML_CANDIDATE" >/dev/null 2>&1 && \
+     "$TOML_CANDIDATE" -c 'import tomllib' 2>/dev/null; then
+    TOML_PYTHON="$TOML_CANDIDATE"
+    break
+  fi
+done
+
+scan_config_tools() { # $1=config path; prints identities; rc 3 = cannot verify
   [[ -f "$1" ]] || return 0
-  LC_ALL=C awk '
-    /^\[(mcp_servers|apps)[].]/ {
-      section = $0
-      sub(/^\[/, "", section)
-      sub(/\].*$/, "", section)
-      depth = split(section, segments, ".")
-      identity = segments[1]
-      if (segments[2] != "") identity = segments[1] "." segments[2]
-      current = identity
-      # `enabled = false` counts only in the server/connector ROOT table:
-      # the schema also allows per-tool `enabled` in nested tables, and one
-      # disabled tool must not hide a connector whose other tools remain
-      # callable.
-      current_is_root = (depth == 2) ? 1 : 0
-      if (!(identity in seen)) { seen[identity] = 1; order[++count] = identity }
-      next
-    }
-    /^\[/ { current = ""; current_is_root = 0; next }
-    current != "" && current_is_root &&
-      /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*false/ {
-      disabled[current] = 1
-    }
-    END {
-      for (i = 1; i <= count; i++) {
-        if (!(order[i] in disabled)) print "[" order[i] "]"
-      }
-    }
-  ' "$1" 2>/dev/null || true
+  [[ -n "$TOML_PYTHON" ]] || return 3
+  local scanned=""
+  if ! scanned="$("$TOML_PYTHON" - "$1" 2>/dev/null <<'PY'
+import sys
+import tomllib
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    print("(unparseable Codex config - treated as exposure)")
+    raise SystemExit(0)
+
+for family in ("mcp_servers", "apps"):
+    table = data.get(family)
+    if not isinstance(table, dict):
+        continue
+    for name, entry in table.items():
+        if isinstance(entry, dict) and entry.get("enabled") is False:
+            continue
+        print(f"[{family}.{name}]")
+PY
+)"; then
+    return 3
+  fi
+  [[ -z "$scanned" ]] || printf '%s\n' "$scanned"
+  return 0
 }
-EXTERNAL_TOOLS="$(external_tool_sections "$CONFIG"; external_tool_sections "$PWD/.codex/config.toml")"
+
+EXTERNAL_TOOLS=""
+TOOL_SCAN_FAILED=0
+NEWLINE=$'\n'
+for TOOL_CONFIG in "$CONFIG" "$PWD/.codex/config.toml"; do
+  if TOOL_SCAN_OUTPUT="$(scan_config_tools "$TOOL_CONFIG")"; then
+    [[ -z "$TOOL_SCAN_OUTPUT" ]] || \
+      EXTERNAL_TOOLS="${EXTERNAL_TOOLS}${EXTERNAL_TOOLS:+$NEWLINE}$TOOL_SCAN_OUTPUT"
+  else
+    TOOL_SCAN_FAILED=1
+  fi
+done
+if [[ $TOOL_SCAN_FAILED -eq 1 ]]; then
+  if [[ "${CODEX_LOOP_ALLOW_EXTERNAL_TOOLS:-0}" != "1" ]]; then
+    echo "error: dispatch blocked — cannot verify the Codex config for external tools." >&2
+    echo "The scan needs python3 with tomllib (3.11+); regex scanning of TOML is unsound," >&2
+    echo "so an unverifiable config fails closed rather than passing unchecked." >&2
+    echo "Install a python3 that provides tomllib, or export" >&2
+    echo "CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 to acknowledge the unverified exposure once." >&2
+    exit 4
+  fi
+  # A long-lived acknowledgment must not become silence: every dispatch on
+  # an unverified config says so, since nothing else will print it.
+  echo "note  : Codex config could not be verified; proceeding under explicit acknowledgment" >&2
+fi
 if [[ -n "$EXTERNAL_TOOLS" ]]; then
   if [[ "${CODEX_LOOP_ALLOW_EXTERNAL_TOOLS:-0}" != "1" ]]; then
     echo "error: dispatch blocked — Codex config enables external tools that the exec sandbox does NOT cover (in any mode, including read-only):" >&2
@@ -301,7 +350,6 @@ ARGS=(task)
 [[ -n "$MODEL"  ]] && ARGS+=(--model "$MODEL")
 [[ -n "$EFFORT" ]] && ARGS+=(--effort "$EFFORT")
 [[ $RESUME -eq 1 ]] && ARGS+=(--resume-last)
-[[ ${#EXTRA[@]} -gt 0 ]] && ARGS+=("${EXTRA[@]}")
 
 # Read a key only from the TOP-LEVEL region of a TOML config (above the
 # first [section]). A plain grep would happily return a key that lives
@@ -358,4 +406,7 @@ else
 fi
 echo "resume: $RESUME  background: $BACKGROUND" >&2
 
-exec node "$COMPANION" "${ARGS[@]}" "$PROMPT"
+# The `--` terminator is load-bearing: it guarantees the companion sees at
+# least two trailing arguments and treats everything after it as literal
+# positional text, so tokens inside the prompt can never parse as flags.
+exec node "$COMPANION" "${ARGS[@]}" -- "$PROMPT"

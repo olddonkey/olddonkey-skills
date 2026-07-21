@@ -1,0 +1,226 @@
+/*
+ * Presenter console — what the speaker sees in the `?presenter` window.
+ * Theme-INDEPENDENT dark chrome (its own surface, NOT the slide theme) so it
+ * is unmistakably "the console, not the deck" and stays legible regardless of
+ * which theme the slides use. This window is never shared in the call.
+ */
+.pv-root {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 18px;
+  background: #0b0d11;
+  color: #e9eaee;
+  font-family: ui-sans-serif, system-ui, -apple-system, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+}
+
+/* ── Top bar ── */
+.pv-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 0 0 auto;
+}
+.pv-loc {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #f4f4f5;
+  text-transform: uppercase;
+}
+.pv-pos {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #9aa1ac;
+  font-variant-numeric: tabular-nums;
+}
+.pv-pos-sep {
+  opacity: 0.4;
+}
+.pv-pos-global {
+  color: #6b7280;
+}
+.pv-timer {
+  font-variant-numeric: tabular-nums;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #d6f5e3;
+  padding: 4px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+.pv-timer:hover {
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* ── Main row: live preview | notes ── */
+.pv-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  /* notes are the point — give them the wider column so 口播稿 wraps to fewer
+     lines and fits without scrolling; the preview is the secondary aid. */
+  grid-template-columns: minmax(0, 46fr) minmax(0, 54fr);
+  gap: 16px;
+}
+
+.pv-stage {
+  position: relative;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pv-preview-click {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: block;
+  width: 100%;
+  cursor: pointer;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* the measured box the slide is scaled to "contain" inside */
+.pv-preview-box {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  background: #05070a;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.pv-preview-fitter {
+  position: relative;
+}
+/* the scaled 1920×1080 slide — frozen (no clicks reach the real chapter) */
+.pv-preview-frame {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+  cursor: pointer; /* overridden visual; clicks handled by .pv-preview-click */
+  pointer-events: none;
+  box-shadow: none;
+  /* The wrapping <button> defaults to text-align:center, which would cascade
+     into the slide and center content that should inherit left-alignment like
+     the real stage. Reset it so the preview matches the audience view. */
+  text-align: left;
+}
+
+/* ── Notes column ──
+ * Content-sized stacking, NOT a greedy 1fr/auto grid: each note sizes to its
+ * own content (capped + scrollable), so a SHORT current note no longer hogs
+ * all the height and starve the NEXT note to a collapsed sliver. Leftover space
+ * pools at the bottom. */
+.pv-notes {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pv-note-now,
+.pv-note-next {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 0 1 auto; /* size to content; shrink (and scroll) only if over the cap */
+}
+.pv-note-now {
+  /* The current note is the priority: take as much room as it needs (up to
+     most of the column) so it shows fully and rarely scrolls. flex 0 0 auto
+     keeps a long NEXT from shrinking it. */
+  flex: 0 0 auto;
+  max-height: 85%;
+}
+.pv-tag {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #7f8794;
+  margin-bottom: 8px;
+}
+.pv-tag-next {
+  color: #6b7280;
+}
+.pv-note-body {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  font-size: 18px;
+  line-height: 1.5;
+  color: #f3f4f6;
+  white-space: pre-wrap;
+}
+.pv-note-next {
+  border-top: 1px dashed rgba(255, 255, 255, 0.14);
+  padding-top: 12px;
+  max-height: 20%; /* just a glance at what's next; scrolls if the note is long */
+}
+.pv-note-next-body {
+  overflow-y: auto;
+  font-size: 15px;
+  line-height: 1.5;
+  color: #aeb4bf;
+  white-space: pre-wrap;
+}
+.pv-note-empty {
+  color: #5b626d;
+  font-style: italic;
+}
+
+/* ── Footer ── */
+.pv-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pv-btn {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #d7dae0;
+  padding: 6px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+.pv-btn:hover {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.05);
+}
+.pv-foot-hint {
+  margin-left: auto;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+}
+
+/* scrollbars — quiet */
+.pv-note-body::-webkit-scrollbar,
+.pv-note-next-body::-webkit-scrollbar {
+  width: 8px;
+}
+.pv-note-body::-webkit-scrollbar-thumb,
+.pv-note-next-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+}

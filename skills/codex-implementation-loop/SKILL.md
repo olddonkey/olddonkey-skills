@@ -69,7 +69,7 @@ The prompt is the whole spec: **why** (evidence, file:line), **exactly what to c
 
 Environment constraints to include verbatim-ish in every dispatch:
 
-- Codex executes on the same host (companion pins sandbox: `workspace-write` for implement, `read-only` otherwise) and shares your CPU/RAM/disk. **The sandbox bounds files and shell only, in every mode** — MCP servers and app connectors run outside it and can reach external services, so even a read-only investigation can mutate remote state through an auto-approved tool. The dispatch script stops any dispatch while it can see such tools in the local Codex config, until the user acknowledges the exposure once (`CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1`). That scan is a best-effort tripwire, not a boundary — server-side-enabled Apps are invisible to it — and prompt-level prohibitions are a second layer, never the boundary; full isolation requires disabling the tools in Codex itself.
+- Codex executes on the same host (companion pins sandbox: `workspace-write` for implement, `read-only` otherwise) and shares your CPU/RAM/disk. **The sandbox bounds files and shell only, in every mode** — MCP servers and app connectors run outside it and can reach external services, so even a read-only investigation can mutate remote state through an auto-approved tool. The dispatch script stops any dispatch while it can see such tools in the local Codex config, until the user acknowledges the exposure once (`CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1`). The scan requires a real TOML parser (python3 with `tomllib`); without one the config is unverifiable and the dispatch fails closed rather than guessing. Even then it is a tripwire, not a boundary — server-side-enabled Apps are invisible to it — and prompt-level prohibitions are a second layer, never the boundary; full isolation requires disabling the tools in Codex itself.
 - Its `.git` is effectively read-only — changes stay in the working tree; you commit and publish.
 - No full test suite by default — focused subset or nothing; you own the gate. Ask it to report files changed, tests added, subset run.
 
@@ -116,6 +116,10 @@ Run the whole suite yourself via the bundled helper — piping through `tail` ma
 ## 6. Publish
 
 Go exactly as far as the stop point says. **Check the branch before pushing** (`git status -sb`) — other tools quietly move checkouts, and a blind push lands commits on whatever is checked out; with the unit branch created at dispatch time this is confirmation, not rescue. Write commits/PRs so an absent reader understands *why*, with real gate numbers; match the repo's existing conventions. Merge only under recorded authorization (non-negotiable #2).
+
+**Bind the gate to the commit that ships — commit first, gate the commit.** A gate certifies one commit, and gating the working tree *before* committing proves nothing about what lands: a commit hook can rewrite or re-stage content, so tree A gets gated while commit B ships. Order: create the candidate commit → record its SHA (`git rev-parse HEAD`) → run the final gate on that committed state → confirm HEAD still equals the recorded SHA and the tree is clean → push that same SHA.
+
+**What merges is not what you gated.** Record the **base SHA alongside the head SHA**: a plain merge, squash, or rebase-merge all produce a commit that is neither, and a base that moved after gating contributes code the gate never saw. Before merging, verify the remote head still equals the gated SHA and the base still equals the recorded one; if either moved, satisfy one of these before landing — update head onto the current base and re-gate (keeping base fixed until the merge), gate the platform's synthetic merge commit (merge-queue/CI on the merge result, not the branch tip), or construct the merge locally and gate that tree. Otherwise what lands is ungated: re-review and re-gate.
 
 ## 7. Record and continue
 

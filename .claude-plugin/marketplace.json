@@ -4,14 +4,23 @@
     "name": "olddonkey"
   },
   "metadata": {
-    "description": "Agent skills distilled from real-world usage. First up: codex-implementation-loop — delegate implementation to Codex while keeping review, test-gating, and shipping judgment in Claude's hands.",
-    "version": "0.1.0"
+    "description": "Agent skills distilled from real-world usage: codex-implementation-loop — delegate implementation to Codex while keeping review, test-gating, and shipping judgment in Claude's hands; web-slides — click-driven 16:9 HTML slide decks with a presenter view for live presenting.",
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "codex-implementation-loop",
       "description": "A review-gated implementation loop: dispatch coding units to Codex (codex-companion runtime), review the diff, iterate on the same thread, gate on the full test suite, then ship as a PR. Encodes hard-won environment constraints (read-only git, no full-suite runs, stuck-job handling) and seven user-configurable dials.",
       "source": "./skills/codex-implementation-loop",
+      "strict": false,
+      "skills": [
+        "./"
+      ]
+    },
+    {
+      "name": "web-slides",
+      "description": "Turn material, outlines, or talking points into click-driven 16:9 HTML slide decks for live presenting — cinematic, anti-AI aesthetic, 24 built-in themes, per-step speaker notes, and a presenter view (press P: speaker notes + live slide preview + timer in a separate window, synced via BroadcastChannel — share only the slide window to hide notes from the audience). Ships a Vite + React + TypeScript scaffold. Derived from ConardLi's garden-skills (MIT).",
+      "source": "./skills/web-slides",
       "strict": false,
       "skills": [
         "./"

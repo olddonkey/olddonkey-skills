@@ -134,6 +134,30 @@ if [[ -n "$BASELINE" ]]; then
   fi
 fi
 
+# The log must be THIS run's output, written through a descriptor held for
+# the whole run — never re-opened by path after a check.
+#
+# Creation is unlink-then-exclusive-create: `rm -f` removes a stale file or
+# a symlink itself (never its target), and `noclobber` makes the open
+# O_CREAT|O_EXCL, which fails rather than following a symlink swapped in
+# after the unlink. A plain `>` redirect would follow such a symlink and
+# truncate the victim before any check could notice, so the exclusive
+# create protects the filesystem, not just the verdict.
+if [[ -L "$LOG" ]]; then
+  echo "error: --log must not be a symlink: $LOG" >&2
+  exit 2
+fi
+rm -f "$LOG" 2>/dev/null
+# noclobber is process-wide, so restore it immediately: later redirections
+# deliberately overwrite existing mktemp files.
+set -o noclobber
+if ! { exec 9> "$LOG"; } 2>/dev/null; then
+  set +o noclobber
+  echo "error: cannot exclusively create log (racing writer or unwritable path?): $LOG" >&2
+  exit 2
+fi
+set +o noclobber
+
 echo "gate: $*" >&2
 echo "log:  $LOG" >&2
 if [[ $STRICT -eq 1 ]]; then
@@ -318,16 +342,27 @@ if [[ -n "$BASELINE" && -f "$BASELINE" ]]; then
 fi
 
 START=$SECONDS
-# Output goes to a file, never through a pipe, so $? is the suite's own.
-"$@" > "$LOG" 2>&1
+# Output goes to the held descriptor, never through a pipe or a fresh
+# path-based open, so $? is the suite's own and the destination cannot be
+# swapped mid-run.
+"$@" >&9 2>&1
 STATUS=$?
 ELAPSED=$((SECONDS - START))
 
 echo "=== gate finished in ${ELAPSED}s with exit code ${STATUS} ==="
 
+# Re-open the log for reading and prove it is the same file the command
+# wrote: comparing two HELD descriptors has no check-to-use window, so a
+# log path swapped mid-run — even for green-looking content — is caught
+# here, and parsing reads through the verified descriptor.
+if ! { exec 8< "$LOG"; } 2>/dev/null || ! [[ /dev/fd/8 -ef /dev/fd/9 ]]; then
+  echo "RESULT: gate RED — log file was replaced during the run; refusing to judge it"
+  exit 1
+fi
+
 # An unparsed log must never be judged: an empty parse view would hide a
 # failed summary behind a masked exit code, so normalization failure is red.
-if ! strip_ansi "$LOG" "$PARSE_LOG"; then
+if ! strip_ansi /dev/fd/8 "$PARSE_LOG"; then
   echo "RESULT: gate RED — log normalization failed; refusing to judge unparsed output"
   exit 1
 fi
@@ -445,6 +480,12 @@ if ! tests_ran "$PARSE_LOG"; then
   echo "RESULT: gate RED — failures parsed but no completed tests were reported"
 elif [[ $BASELINE_EXISTS_AT_START -eq 0 || -n "$NEW_FAILURES" ]]; then
   echo "RESULT: gate RED — do not publish until resolved or explained"
+elif [[ $STATUS -ne 1 ]]; then
+  # Only the runner's own "tests failed" status (1 for pytest and unittest)
+  # may be offset by a baseline. Signals (137), not-executable (126/127),
+  # and pytest's interrupt/usage/no-tests codes (2-5) mean the run itself
+  # broke — a matching failure list proves nothing about it.
+  echo "RESULT: gate RED — abnormal runner exit ($STATUS); signals, crashes, and interrupts never baseline away"
 else
   echo "RESULT: gate green (failures match baseline — no new failures)"
   exit 0
