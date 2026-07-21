@@ -228,6 +228,67 @@ if [[ -n "$EFFORT" && " $VALID_EFFORTS " != *" $EFFORT "* ]]; then
   exit 2
 fi
 
+CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
+
+# MCP servers and app connectors run OUTSIDE the exec sandbox in EVERY mode:
+# `workspace-write` and `read-only` bound files and shell, not tool calls
+# that reach external services — a read-only investigation can still mutate
+# remote state through an auto-approved tool. The companion (checked against
+# 1.0.6) has no per-dispatch switch to disable them, so any dispatch stops
+# until the user acknowledges the exposure once for this environment.
+#
+# Detection is a best-effort tripwire over the LOCAL config layers, not a
+# boundary: it dedupes nested tables to one entry per server/connector and
+# honors `enabled = false`, but it cannot see Apps enabled server-side or
+# tools injected by other config layers. Its silence is NOT proof of
+# isolation, and prompt-level prohibitions are a second layer, never the
+# boundary.
+external_tool_sections() { # $1=config path
+  [[ -f "$1" ]] || return 0
+  LC_ALL=C awk '
+    /^\[(mcp_servers|apps)[].]/ {
+      section = $0
+      sub(/^\[/, "", section)
+      sub(/\].*$/, "", section)
+      depth = split(section, segments, ".")
+      identity = segments[1]
+      if (segments[2] != "") identity = segments[1] "." segments[2]
+      current = identity
+      # `enabled = false` counts only in the server/connector ROOT table:
+      # the schema also allows per-tool `enabled` in nested tables, and one
+      # disabled tool must not hide a connector whose other tools remain
+      # callable.
+      current_is_root = (depth == 2) ? 1 : 0
+      if (!(identity in seen)) { seen[identity] = 1; order[++count] = identity }
+      next
+    }
+    /^\[/ { current = ""; current_is_root = 0; next }
+    current != "" && current_is_root &&
+      /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*false/ {
+      disabled[current] = 1
+    }
+    END {
+      for (i = 1; i <= count; i++) {
+        if (!(order[i] in disabled)) print "[" order[i] "]"
+      }
+    }
+  ' "$1" 2>/dev/null || true
+}
+EXTERNAL_TOOLS="$(external_tool_sections "$CONFIG"; external_tool_sections "$PWD/.codex/config.toml")"
+if [[ -n "$EXTERNAL_TOOLS" ]]; then
+  if [[ "${CODEX_LOOP_ALLOW_EXTERNAL_TOOLS:-0}" != "1" ]]; then
+    echo "error: dispatch blocked — Codex config enables external tools that the exec sandbox does NOT cover (in any mode, including read-only):" >&2
+    printf '%s\n' "$EXTERNAL_TOOLS" | LC_ALL=C sed 's/^/  /' >&2
+    echo "Tool calls reach external services regardless of the filesystem sandbox." >&2
+    echo "This scan covers local config layers only — server-side-enabled Apps are invisible" >&2
+    echo "to it, so passing this check is not proof of isolation." >&2
+    echo "Export CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 to acknowledge the exposure once for this" >&2
+    echo "environment, or disable those tools in the Codex config while running the loop." >&2
+    exit 4
+  fi
+  echo "note  : external tools enabled in Codex config (outside the sandbox, all modes)" >&2
+fi
+
 ARGS=(task)
 # Write access is what makes this an implementation run. Withholding it is
 # an explicit mode, not a fallback — say which one is in effect so a
@@ -242,13 +303,36 @@ ARGS=(task)
 [[ $RESUME -eq 1 ]] && ARGS+=(--resume-last)
 [[ ${#EXTRA[@]} -gt 0 ]] && ARGS+=("${EXTRA[@]}")
 
-CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
+# Read a key only from the TOP-LEVEL region of a TOML config (above the
+# first [section]). A plain grep would happily return a key that lives
+# inside some [section] table (a profile or server block) and display a
+# value that is not in effect.
+top_level_value() { # $1=config path $2=key
+  [[ -f "$1" ]] || return 0
+  LC_ALL=C awk -v key="$2" '
+    /^[[:space:]]*\[/ { exit }
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      sub(/^[^=]*=[[:space:]]*/, "")
+      sub(/[[:space:]]+#.*$/, "")
+      gsub(/["[:space:]]/, "")
+      print
+      exit
+    }
+  ' "$1" 2>/dev/null || true
+}
+
 describe() { # $1=label $2=chosen value $3=config key
+  local project_value="" global_value=""
   if [[ -n "$2" ]]; then
     echo "$1: $2 (explicit)"
-  elif [[ -f "$CONFIG" ]] && grep -qE "^[[:space:]]*$3[[:space:]]*=" "$CONFIG"; then
-    echo "$1: $(grep -E "^[[:space:]]*$3[[:space:]]*=" "$CONFIG" \
-      | head -1 | cut -d= -f2- | tr -d ' \"' || true) (from config.toml; profiles/overrides not resolved)"
+    return
+  fi
+  project_value="$(top_level_value "$PWD/.codex/config.toml" "$3")"
+  global_value="$(top_level_value "$CONFIG" "$3")"
+  if [[ -n "$project_value" ]]; then
+    echo "$1: $project_value (project .codex/config.toml top-level; other config layers not resolved)"
+  elif [[ -n "$global_value" ]]; then
+    echo "$1: $global_value (config.toml top-level; other config layers not resolved)"
   else
     echo "$1: <Codex CLI default>"
   fi
@@ -263,6 +347,9 @@ command -v codex >/dev/null 2>&1 && echo "codex  : $(codex --version 2>/dev/null
 describe "model " "$MODEL"  "model" >&2
 describe "effort" "$EFFORT" "model_reasoning_effort" >&2
 # Tier has no per-task flag — always inherited — so show what will apply.
+# Profile/overlay mechanics have changed across Codex CLI versions; rather
+# than guess which scheme is installed, the labels above say plainly that
+# only top-level keys are read and the CLI's own resolution is authoritative.
 describe "tier  " ""        "service_tier" >&2
 if [[ $READ_ONLY -eq 1 ]]; then
   echo "mode  : READ-ONLY (no file writes; nothing to review/gate/publish)" >&2

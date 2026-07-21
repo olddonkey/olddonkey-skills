@@ -18,7 +18,7 @@ How resolution works, which shapes the choice:
 - **Pass a flag** to override for this task only. Never edit their global config to force a setting — that changes their own Codex use outside this loop.
 - **`ultra` and `max` efforts are real but flag-rejected.** The wrapper accepts only `none|minimal|low|medium|high|xhigh`; the higher two exist only as `model_reasoning_effort` in config.toml. So the way to run at max is to *omit* `--effort` and let config supply it. If the user asks for max, don't pass it — explain this and inherit.
 - **Model names are passed through to the CLI as-is** — nothing here maintains a model list, so new Codex models work the day they ship; availability depends on the user's account. Aliases may exist in the companion (as of 1.0.6, `spark` → `gpt-5.3-codex-spark`). **Model names age fast; never recommend one from memory.** When unsure what the user has or what's current, read `~/.codex/config.toml` first, then ask.
-- **Service tier is a third speed lever, separate from model and effort.** Codex supports priority routing (**Fast**) and cheaper-but-slower **flex**; support varies by model. Same model, same reasoning — different queue: model trades capability, effort trades thinking depth, tier trades routing speed/cost. The user picks it with the **`/fast` slash command in the codex TUI**, which persists to `service_tier` in `~/.codex/config.toml`; editing the config key directly works too. Canonical values per the official schema are `priority` / `flex` / `default`, with legacy `fast` still accepted — and `fast` is what the TUI currently writes, so expect either spelling when reading a config. The companion has no per-task tier flag, so every dispatch inherits whatever the config says — the dispatch script prints the inherited tier so it's visible. It belongs to the kickoff question like effort does; a mid-loop tier change is a conditions change worth noting, not something to do silently.
+- **Service tier is a third speed lever, separate from model and effort.** Codex supports priority routing (**Fast**) and cheaper-but-slower **flex**; support varies by model. Same model, same reasoning — different queue: model trades capability, effort trades thinking depth, tier trades routing speed/cost. The user picks it with the **`/fast` slash command in the codex TUI**, which persists to `service_tier` in `~/.codex/config.toml`; editing the config key directly works too. The accepted value set has shifted across CLI versions — `fast`, `flex`, `priority`, and `default` have all appeared, the TUI currently writes `fast`, and spellings may be remapped at the request layer — so **treat the installed CLI's own config schema as authoritative, not any fixed list here**, and expect any of those spellings when reading a config. The companion has no per-task tier flag, so every dispatch inherits whatever the config says — the dispatch script prints the inherited tier so it's visible. It belongs to the kickoff question like effort does; a mid-loop tier change is a conditions change worth noting, not something to do silently. Note the dispatch summary reads **top-level** config keys only (from the project's `.codex/config.toml` first, then the global one); profile/overlay mechanics have changed across CLI versions, so deeper layers are deliberately not resolved — the installed CLI's own resolution is authoritative.
 - **A "missing" model usually means a stale CLI, not a wrong name.** New models require a recent `codex` CLI. Before concluding a model or flag is unavailable, check `codex --version` (the dispatch script prints it on every run). The safe update path is **`codex update`** — the CLI's own updater works regardless of how it was installed. Don't reinstall through a different channel (e.g. npm on top of a standalone install): two skewed copies of `codex` on one machine is a real failure mode, where a model "doesn't exist" until the copy actually being used gets updated. The CLI is the user's environment — get their OK before updating, and update between units rather than mid-unit so a version change doesn't muddy attribution.
 
 Reasonable way to pick, if the user wants a recommendation: raise effort for work where a subtle mistake is expensive to catch downstream — anything touching correctness boundaries, concurrency, or migrations — and lower it for mechanical, well-specified edits where the spec leaves little room for judgment. Model choice usually follows whatever they're already running; the interesting dial is effort.
@@ -36,8 +36,22 @@ node <companion> cancel <job-id>   # stop one
 
 Judge progress by the event stream, not the clock. Codex being quiet for a couple of minutes is normal; a job that has produced no new events for 15–20 minutes, or is visibly re-running the same failing command, is stuck. Cancel it, read what it was attempting, and fix the cause — usually an ambiguous spec or a missing environment constraint — or split the unit. Don't just re-dispatch the same prompt at the same problem.
 
-After killing a job, **also kill the test processes it spawned** — orphaned runners keep eating the machine long after the parent dies, and they're easy to miss because the job looks gone. Find them by repo path:
+After killing a job, **also kill the test processes it spawned** — orphaned runners keep eating the machine long after the parent dies, and they're easy to miss because the job looks gone. Don't filter `pgrep -fl` output by repo path: argv rarely contains it (`python -m pytest` says nothing about where it runs). Match each candidate's **working directory** instead:
+
+Compare canonicalized paths with a path boundary — a bare prefix match would also catch siblings like `<repo-dir>-copy` and kill another repository's runner:
 
 ```bash
-pgrep -fl 'unittest|pytest' | grep <repo-dir>    # then kill those PIDs
+repo="$(cd <repo-dir> && pwd -P)"
+# macOS — cwd via lsof:
+for pid in $(pgrep -f 'unittest|pytest'); do
+  cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+  [[ "$cwd" == "$repo" || "$cwd" == "$repo"/* ]] && echo "$pid"
+done
+# Linux — cwd via /proc:
+for pid in $(pgrep -f 'unittest|pytest'); do
+  cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)"
+  [[ "$cwd" == "$repo" || "$cwd" == "$repo"/* ]] && echo "$pid"
+done
+# then kill the listed PIDs (kill the whole process group if the companion
+# reported one — orphans respawned by a runner wrapper escape single-PID kills)
 ```

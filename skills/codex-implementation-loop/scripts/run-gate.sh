@@ -10,31 +10,46 @@
 # captures the true status, and prints a summary plus any failure headers.
 #
 # Usage:
-#   run-gate.sh [--log PATH] [--baseline PATH] -- <test command...>
+#   run-gate.sh [--strict] [--log PATH] [--baseline PATH] -- <test command...>
+#
+# Modes (--strict and --baseline are mutually exclusive):
+#   (default)   pass-through — works with ANY runner. The suite's exit code is
+#               the verdict, with one override: a recognized unittest/pytest
+#               summary reporting failures against exit 0 forces red. This is
+#               the WEAKEST mode (empty output and zero-test runs pass); use
+#               it only for runners the parser does not understand.
+#   --strict    zero failures, enforced — unittest/pytest only. Requires a
+#               recognized runner verdict, executed tests (skipped-only and
+#               zero-test runs are red), and no parsed failure lines at all.
+#   --baseline  no NEW failures vs the baseline log — unittest/pytest only;
+#               skipped-only, empty, or unparseable runs fail closed.
 #
 # Example:
-#   run-gate.sh --log /tmp/gate.log -- python -m unittest discover -s tests
+#   run-gate.sh --strict --log /tmp/gate.log -- python -m unittest discover -s tests
 #
 # Run it as a background job for long suites; read the log when it lands.
-#
-# Exit: without --baseline, the suite's exit code unless an exit-zero runner
-# reports failures in its own summary. With --baseline, 0 when the suite passes
-# or all parsed failures match the baseline and tests ran.
 
 set -uo pipefail
 
 LOG=""
 BASELINE=""
+STRICT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --log)      LOG="${2:?--log needs a path}"; shift 2 ;;
     --baseline) BASELINE="${2:?--baseline needs a path}"; shift 2 ;;
-    -h|--help)  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --strict)   STRICT=1; shift ;;
+    -h|--help)  awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"; exit 0 ;;
     --)         shift; break ;;
     *)          echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ $STRICT -eq 1 && -n "$BASELINE" ]]; then
+  echo "error: --strict and --baseline are mutually exclusive; pick one policy" >&2
+  exit 2
+fi
 
 [[ $# -gt 0 ]] || { echo "need a test command after --" >&2; exit 2; }
 # The file mktemp creates IS the log — appending a suffix would orphan it.
@@ -121,6 +136,13 @@ fi
 
 echo "gate: $*" >&2
 echo "log:  $LOG" >&2
+if [[ $STRICT -eq 1 ]]; then
+  echo "mode: strict" >&2
+elif [[ -n "$BASELINE" ]]; then
+  echo "mode: baseline" >&2
+else
+  echo "mode: pass-through (exit code only — weakest; use --strict for unittest/pytest)" >&2
+fi
 
 # pytest emits its formal summary either fenced (`=== 1 failed in 0.1s ===`)
 # or, under -q, as a bare bottom line (`1 failed in 0.1s`). pytest_summary
@@ -218,6 +240,9 @@ extract_failures() { # $1=log path
   ' "$1" 2>/dev/null
 }
 
+# A unittest verdict is complete only when the `Ran N tests` line has its
+# paired OK/FAILED result line — a bare count line is a truncated or masked
+# run and must not count as evidence.
 tests_ran() { # $1=stripped log path
   LC_ALL=C awk "$RUNNER_VERDICT_AWK"'
     END {
@@ -226,7 +251,8 @@ tests_ran() { # $1=stripped log path
           last_summary ~ /[1-9][0-9]*[[:space:]]+(subtests[[:space:]]+)?(passed|failed|xfailed|xpassed)([^[:alpha:]]|$)/) {
         ran = 1
       }
-      if (last_runner == "unittest" && (unit_total - unit_skipped) > 0) ran = 1
+      if (last_runner == "unittest" && unit_result != "" &&
+          (unit_total - unit_skipped) > 0) ran = 1
       exit(ran ? 0 : 1)
     }
   ' "$1" 2>/dev/null
@@ -246,7 +272,7 @@ zero_tests_reported() { # $1=stripped log path
 supported_runner_summary() { # $1=stripped log path
   LC_ALL=C awk "$RUNNER_VERDICT_AWK"'
     END {
-      if (last_runner == "unittest") recognized = 1
+      if (last_runner == "unittest" && unit_result != "") recognized = 1
       if (last_runner == "pytest" &&
           (last_summary ~ /^no tests ran([^[:alpha:]]|$)/ ||
            last_summary ~ /[0-9]+[[:space:]]+(subtests[[:space:]]+)?(passed|failed|skipped|deselected|xfailed|xpassed|error|errors|warning|warnings)([^[:alpha:]]|$)/)) {
@@ -346,10 +372,34 @@ if [[ $STATUS -eq 0 && $FAILED_SUMMARY -eq 1 ]]; then
   exit 1
 fi
 
-# With no baseline, otherwise retain the suite's pass-through status.
+# --strict: zero tolerance on a recognized runner. Everything baseline mode
+# fails closed on, strict fails closed on too — plus any parsed failure line
+# at all, even when the final summary is clean.
+if [[ $STRICT -eq 1 ]]; then
+  if [[ $STATUS -ne 0 ]]; then
+    echo "RESULT: gate RED — do not publish until resolved or explained"
+    exit "$STATUS"
+  fi
+  if ! supported_runner_summary "$PARSE_LOG"; then
+    echo "RESULT: gate RED — strict needs a recognized unittest/pytest verdict; use pass-through for other runners"
+    exit 1
+  fi
+  if zero_tests_reported "$PARSE_LOG" || ! tests_ran "$PARSE_LOG"; then
+    echo "RESULT: gate RED — no executed tests — skipped-only or zero-test run"
+    exit 1
+  fi
+  if [[ $FAILURES -gt 0 ]]; then
+    echo "RESULT: gate RED — failure lines present despite exit 0"
+    exit 1
+  fi
+  echo "RESULT: gate green"
+  exit 0
+fi
+
+# With no policy flag, retain the suite's pass-through status.
 if [[ -z "$BASELINE" ]]; then
   if [[ $STATUS -eq 0 ]]; then
-    echo "RESULT: gate green"
+    echo "RESULT: gate green (pass-through: exit code only)"
   else
     echo "RESULT: gate RED — do not publish until resolved or explained"
   fi
