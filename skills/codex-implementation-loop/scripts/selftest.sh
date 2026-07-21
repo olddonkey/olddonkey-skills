@@ -160,8 +160,61 @@ expect_first_line "$OVERRIDE_NODE_LOG" "$LIMITED_COMPANION" \
   "dispatch sends the explicit override to node"
 expect_output "companion: $LIMITED_COMPANION (explicit override)" \
   "dispatch reports explicit override resolution"
-expect_output "model : config-model (from config.toml; profiles/overrides not resolved)" \
+expect_output "model : config-model (config.toml top-level; active profile overrides not resolved)" \
   "dispatch reads and qualifies the CODEX_HOME config display"
+
+# Keys inside [profiles.*] tables are not top-level config and must not be
+# displayed as the effective value; the active profile is disclosed instead.
+PROFILE_CONFIG_DIR="$TMP_ROOT/codex-home-profile"
+mkdir -p "$PROFILE_CONFIG_DIR"
+write_lines "$PROFILE_CONFIG_DIR/config.toml" \
+  'profile = "speedy"' \
+  '[profiles.speedy]' \
+  'model = "profile-model"'
+run_case dispatch-profile-table env \
+  HOME="$HOME_DIR" CODEX_HOME="$PROFILE_CONFIG_DIR" \
+  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/profile-table.node" PATH="$TEST_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort high
+expect_status 0 "dispatch runs with a profile-only config"
+expect_output "model : <Codex CLI default>" \
+  "dispatch does not display a profile-table key as effective config"
+expect_output "profile: speedy active in config.toml" \
+  "dispatch discloses the active profile"
+
+# MCP servers / app connectors run outside the workspace-write sandbox, so an
+# implement dispatch fails closed until the exposure is acknowledged once.
+TOOLS_CONFIG_DIR="$TMP_ROOT/codex-home-tools"
+mkdir -p "$TOOLS_CONFIG_DIR"
+write_lines "$TOOLS_CONFIG_DIR/config.toml" \
+  'model = "config-model"' \
+  '[mcp_servers.filewriter]' \
+  'command = "definitely-not-run"'
+run_case dispatch-external-tools-blocked env \
+  HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
+  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/tools-blocked.node" PATH="$TEST_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort high
+expect_status 4 "dispatch fails closed when Codex config enables external tools"
+expect_output "[mcp_servers.filewriter]" \
+  "dispatch names the enabled external tool section"
+
+run_case dispatch-external-tools-acknowledged env \
+  HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
+  CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 \
+  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/tools-ack.node" PATH="$TEST_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort high
+expect_status 0 "dispatch proceeds after explicit external-tools acknowledgment"
+expect_output "note  : external tools enabled in Codex config" \
+  "dispatch still discloses acknowledged external tools"
+
+run_case dispatch-external-tools-readonly env \
+  HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
+  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/tools-ro.node" PATH="$TEST_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort high --read-only
+expect_status 0 "read-only dispatch is not blocked by external tools"
 
 # The Claude CLI view is preferred and resolves enabled entries with
 # managed > local > project > user precedence, independent of JSON list order.
@@ -624,6 +677,51 @@ run_case gate-invalid-byte-pass env LC_ALL="$UTF8_LOCALE" bash "$GATE" \
 expect_status 0 "baseline gate still recognizes a passing summary in a byte-poisoned log"
 expect_output "RESULT: gate green" \
   "gate does not false-red on invalid bytes in a passing run"
+
+# --strict is the real zero-failure mode: recognized verdict, executed tests,
+# and no failure lines. Plain no-flag mode stays a documented pass-through.
+run_case gate-strict-baseline-conflict bash "$GATE" --strict \
+  --log "$TMP_ROOT/gate-strict-conflict.log" --baseline "$EMPTY_BASELINE" -- bash -c ':'
+expect_status 2 "gate rejects --strict combined with --baseline"
+expect_output "mutually exclusive" "gate explains the strict/baseline conflict"
+
+run_case gate-strict-pass bash "$GATE" --strict \
+  --log "$TMP_ROOT/gate-strict-pass.log" -- \
+  bash -c 'printf '\''Ran 2 tests in 0.001s\nOK\n'\'''
+expect_status 0 "strict gate passes a real unittest success"
+expect_output "RESULT: gate green" "strict gate reports green for executed passing tests"
+
+run_case gate-strict-pytest-pass bash "$GATE" --strict \
+  --log "$TMP_ROOT/gate-strict-pytest-pass.log" -- \
+  bash -c 'printf '\''=========================== 2 passed in 0.10s ===========================\n'\'''
+expect_status 0 "strict gate passes a fenced pytest success"
+
+run_case gate-strict-empty bash "$GATE" --strict \
+  --log "$TMP_ROOT/gate-strict-empty.log" -- bash -c ':'
+expect_status 1 "strict gate rejects exit-zero empty output"
+expect_output "strict needs a recognized unittest/pytest verdict" \
+  "strict gate explains the missing runner verdict"
+
+run_case gate-strict-zero-tests bash "$GATE" --strict \
+  --log "$TMP_ROOT/gate-strict-zero.log" -- \
+  bash -c 'printf '\''Ran 0 tests in 0.000s\nOK\n'\'''
+expect_status 1 "strict gate rejects a zero-test OK run"
+expect_output "RESULT: gate RED — no executed tests — skipped-only or zero-test run" \
+  "strict gate explains the zero-test rejection"
+
+run_case gate-strict-failure-line bash "$GATE" --strict \
+  --log "$TMP_ROOT/gate-strict-failure-line.log" -- \
+  bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n=========================== 2 passed in 0.10s ===========================\n'\'''
+expect_status 1 "strict gate rejects stray failure lines even when the final summary is clean"
+expect_output "RESULT: gate RED — failure lines present despite exit 0" \
+  "strict gate explains the failure-line rejection"
+
+run_case gate-strict-red bash "$GATE" --strict \
+  --log "$TMP_ROOT/gate-strict-red.log" -- \
+  bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
+expect_status 1 "strict gate passes the failing exit code through"
+expect_output "RESULT: gate RED — do not publish until resolved or explained" \
+  "strict gate reports red for a failing suite"
 
 CRASH_BASELINE="$TMP_ROOT/crash-baseline.log"
 write_lines "$CRASH_BASELINE" 'ImportError: same crash text'

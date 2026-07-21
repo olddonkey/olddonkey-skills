@@ -228,6 +228,33 @@ if [[ -n "$EFFORT" && " $VALID_EFFORTS " != *" $EFFORT "* ]]; then
   exit 2
 fi
 
+CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
+
+# MCP servers and app connectors configured for Codex run OUTSIDE the exec
+# sandbox: `workspace-write` bounds files and shell, not tool calls that
+# reach external services. The companion (checked against 1.0.6) has no
+# per-dispatch switch to disable them, so an implement dispatch on a config
+# with external tools fails closed until the user acknowledges the exposure
+# once for this environment. Prompt-level prohibitions are a second layer,
+# never the boundary.
+external_tool_sections() { # $1=config path
+  [[ -f "$1" ]] || return 0
+  LC_ALL=C grep -E '^\[(mcp_servers|apps)([].])' "$1" 2>/dev/null | head -8 || true
+}
+EXTERNAL_TOOLS="$(external_tool_sections "$CONFIG"; external_tool_sections "$PWD/.codex/config.toml")"
+if [[ -n "$EXTERNAL_TOOLS" ]]; then
+  if [[ $READ_ONLY -eq 0 && "${CODEX_LOOP_ALLOW_EXTERNAL_TOOLS:-0}" != "1" ]]; then
+    echo "error: implement dispatch blocked — Codex config enables external tools that the workspace-write sandbox does NOT cover:" >&2
+    printf '%s\n' "$EXTERNAL_TOOLS" | sed 's/^/  /' >&2
+    echo "These can produce side effects beyond the working tree (MCP servers, app connectors)." >&2
+    echo "Either export CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 to acknowledge this once for the" >&2
+    echo "environment, or disable those sections in the Codex config while running the loop." >&2
+    echo "(read-only dispatches are not blocked)" >&2
+    exit 4
+  fi
+  echo "note  : external tools enabled in Codex config (outside the sandbox boundary)" >&2
+fi
+
 ARGS=(task)
 # Write access is what makes this an implementation run. Withholding it is
 # an explicit mode, not a fallback — say which one is in effect so a
@@ -242,13 +269,35 @@ ARGS=(task)
 [[ $RESUME -eq 1 ]] && ARGS+=(--resume-last)
 [[ ${#EXTRA[@]} -gt 0 ]] && ARGS+=("${EXTRA[@]}")
 
-CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
+# Read a key only from the TOP-LEVEL region of a TOML config (above the
+# first [section]). A plain grep would happily return a key that lives in
+# an inactive [profiles.*] table and display a value that is not in effect.
+top_level_value() { # $1=config path $2=key
+  [[ -f "$1" ]] || return 0
+  LC_ALL=C awk -v key="$2" '
+    /^[[:space:]]*\[/ { exit }
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      sub(/^[^=]*=[[:space:]]*/, "")
+      sub(/[[:space:]]+#.*$/, "")
+      gsub(/["[:space:]]/, "")
+      print
+      exit
+    }
+  ' "$1" 2>/dev/null || true
+}
+
 describe() { # $1=label $2=chosen value $3=config key
+  local project_value="" global_value=""
   if [[ -n "$2" ]]; then
     echo "$1: $2 (explicit)"
-  elif [[ -f "$CONFIG" ]] && grep -qE "^[[:space:]]*$3[[:space:]]*=" "$CONFIG"; then
-    echo "$1: $(grep -E "^[[:space:]]*$3[[:space:]]*=" "$CONFIG" \
-      | head -1 | cut -d= -f2- | tr -d ' \"' || true) (from config.toml; profiles/overrides not resolved)"
+    return
+  fi
+  project_value="$(top_level_value "$PWD/.codex/config.toml" "$3")"
+  global_value="$(top_level_value "$CONFIG" "$3")"
+  if [[ -n "$project_value" ]]; then
+    echo "$1: $project_value (project .codex/config.toml top-level; profiles not resolved)"
+  elif [[ -n "$global_value" ]]; then
+    echo "$1: $global_value (config.toml top-level; active profile overrides not resolved)"
   else
     echo "$1: <Codex CLI default>"
   fi
@@ -264,6 +313,11 @@ describe "model " "$MODEL"  "model" >&2
 describe "effort" "$EFFORT" "model_reasoning_effort" >&2
 # Tier has no per-task flag — always inherited — so show what will apply.
 describe "tier  " ""        "service_tier" >&2
+# An active profile rewrites any of the above at resolution time; disclose it
+# rather than pretending the top-level values are the whole story.
+ACTIVE_PROFILE="$(top_level_value "$CONFIG" "profile")"
+[[ -z "$ACTIVE_PROFILE" ]] || \
+  echo "profile: $ACTIVE_PROFILE active in config.toml — its overrides apply but are not shown above" >&2
 if [[ $READ_ONLY -eq 1 ]]; then
   echo "mode  : READ-ONLY (no file writes; nothing to review/gate/publish)" >&2
 else
