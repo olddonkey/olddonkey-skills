@@ -19,6 +19,19 @@
 
 **Codex 负责实现并跑聚焦测试；Claude 亲自审查真实 diff、跑全量门禁，只发布自己敢签名的改动。**
 
+## Skills 一览
+
+| Skill | 做什么 |
+|---|---|
+| [`codex-implementation-loop`](./skills/codex-implementation-loop) | 带审查门禁的实现循环：把编码单元派给 Codex，审查 diff，跑全量测试门禁，以 PR 交付。 |
+| [`web-slides`](./skills/web-slides) | 把素材 / 提纲做成点击驱动的 16:9 HTML 幻灯片，用于现场放映 —— 内置 24 套主题 + 反 AI 味设计方法论 + 演讲者窗口（按 `P`：独立窗口显示口播稿 + 实时预览 + 计时器，投屏只共享主 slide 窗口即可对观众隐藏口播稿）。由 ConardLi 的 [garden-skills](https://github.com/ConardLi/garden-skills)（MIT）改造而来。 |
+
+安装 `web-slides`：
+
+```text
+/plugin install web-slides@olddonkey-skills
+```
+
 ## 快速开始
 
 ### 1. 安装

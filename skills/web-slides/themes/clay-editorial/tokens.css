@@ -1,0 +1,62 @@
+/* ─────────────────────────────────────────────────────────────────────
+ * Theme · clay-editorial
+ *   Calm premium editorial. Warm ivory canvas (#F0EEE6), a clay /
+ *   terracotta accent (#CC785C), refined non-italic Fraunces serif
+ *   display over a clean Inter body, generous whitespace, soft-rounded
+ *   cards. Restrained and trustworthy — reads like a modern research
+ *   lab or thoughtful product site, not a vintage zine.
+ *
+ *   Derived from vintage-editorial, then calmed:
+ *     • accent          — warm clay #CC785C
+ *     • surface         — warm ivory #F0EEE6 (+ lighter raised cards)
+ *     • hero numbers     — Fraunces, NORMAL (not italic), weight 400 (calm)
+ *     • decoration       — busy circle/line/dot overlay REMOVED;
+ *                          only a whisper-soft warm vignette for paper depth
+ *     • padding          — generous 140×100 (spacious, unhurried)
+ *     • motion           — calm, smooth, unhurried
+ * ───────────────────────────────────────────────────────────────────── */
+:root {
+  /* ─── palette ─── */
+  --shell:        #f0eee6;             /* = surface — seamless full-bleed, no visible letterbox */
+  --surface:      #f0eee6;             /* warm ivory — the stage */
+  --surface-2:    #fbfaf5;             /* raised cards — lighter ivory */
+  --surface-3:    #e9e4d6;             /* deepest inset panel */
+  --text:         #1a1915;             /* warm near-black */
+  --text-2:       #423e34;             /* dark warm gray — body / subhead */
+  --text-mute:    #6b6456;             /* mid warm gray — labels / meta */
+  --text-faint:   #938c7a;             /* faint warm gray — hints */
+  --rule:         #d4cdbb;             /* warm hairline */
+  --accent:       #cc785c;             /* clay / terracotta */
+  --accent-soft:  rgba(204, 120, 92, 0.10);
+  --accent-glow:  rgba(204, 120, 92, 0.30);
+
+  /* ─── fonts: refined serif display + clean grotesque body ─── */
+  --font-display-cn: "Noto Serif SC", "Source Han Serif SC", serif;
+  --font-display-en: "Fraunces", "Source Serif 4", "Playfair Display", Georgia, serif;
+  --font-body:       "Inter", "Noto Sans SC", -apple-system, system-ui, sans-serif;
+  --font-mono:       "JetBrains Mono", "IBM Plex Mono", "SF Mono", ui-monospace, monospace;
+  --font-features:   "tnum", "ss01";
+
+  /* ─── motion: calm, smooth, unhurried ─── */
+  --dur-base:       560ms;
+  --dur-slow:       900ms;
+  --dur-cinematic:  1300ms;
+
+  /* ─── design identity: calm premium editorial ─── */
+  --r-card:        12px;               /* soft-refined rounded cards */
+  --r-stage:       0;
+  --rule-w:        1px;
+  --rule-style:    solid;
+  --hero-num-font:    var(--font-display-en);
+  --hero-num-style:   normal;          /* calm, not italic */
+  --hero-num-weight:  400;             /* refined, not chunky */
+  --hero-num-track:   -0.02em;
+  --stage-pad-x:   140px;              /* generous editorial whitespace */
+  --stage-pad-y:   100px;
+  --card-shadow:
+    0 1px 0 var(--rule),
+    0 14px 36px rgba(70, 50, 30, 0.07);
+  --shadow-stage:  none;               /* no card edge — stage blends into shell */
+
+  /* ─── decoration: none — flat ivory so stage + letterbox read as one field ─── */
+}

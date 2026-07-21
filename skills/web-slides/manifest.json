@@ -1,0 +1,16 @@
+{
+  "name": "web-slides",
+  "version": "1.0.0",
+  "category": "Slides / Presentation",
+  "description": "Turn material, outlines, or talking points into click-driven 16:9 HTML slide decks for live presenting — cinematic, anti-AI aesthetic, 24 theme tokens, per-step speaker notes (press N). No narration script, no audio, no video recording. Ships a Vite + React + TypeScript scaffold, a (chapter, step) cursor model, hard collaboration checkpoints, and a theme-token architecture. Good for talks, keynotes, product demos, pitch decks, teaching, and interview project retros.",
+  "derivedFrom": "web-video-presentation (ConardLi/garden-skills)",
+  "homepage": "https://github.com/ConardLi/garden-skills/tree/main/skills/web-video-presentation",
+  "compat": [
+    "claude-code",
+    "claude-ai",
+    "cursor",
+    "codex-cli",
+    "gemini-cli",
+    "opencode"
+  ]
+}

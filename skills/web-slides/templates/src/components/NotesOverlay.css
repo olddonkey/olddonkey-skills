@@ -1,0 +1,73 @@
+/*
+ * Presenter notes overlay. Intentionally theme-INDEPENDENT chrome — a dark
+ * glass panel that stays legible on top of any theme. Only the presenter
+ * sees it (toggled with "N"); it is never part of the slide itself.
+ */
+.notes-overlay {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 1000;
+  max-width: min(560px, 44vw);
+  padding: 14px 16px 12px;
+  background: rgba(12, 14, 18, 0.92);
+  color: #f4f4f5;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  font-family: ui-sans-serif, system-ui, -apple-system, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+.notes-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #9ca3af;
+}
+
+.notes-step {
+  font-variant-numeric: tabular-nums;
+}
+
+.notes-body {
+  font-size: 16px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.notes-empty {
+  color: #6b7280;
+  font-style: italic;
+}
+
+.notes-next {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.14);
+  font-size: 13px;
+  line-height: 1.5;
+  color: #b6bcc6;
+}
+
+.notes-next-label {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #8b93a1;
+}
+
+.notes-hint {
+  margin-top: 8px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-align: right;
+  color: #6b7280;
+}

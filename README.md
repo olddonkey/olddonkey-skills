@@ -19,6 +19,19 @@ The featured skill, [`codex-implementation-loop`](./skills/codex-implementation-
 
 **Codex implements and runs focused tests. Claude reviews the real diff, runs the full gate, and ships only what it would sign its name to.**
 
+## Skills
+
+| Skill | What it does |
+|---|---|
+| [`codex-implementation-loop`](./skills/codex-implementation-loop) | Review-gated implementation loop: dispatch coding units to Codex, review the diff, gate on the full test suite, ship as a PR. |
+| [`web-slides`](./skills/web-slides) | Turn material or outlines into click-driven 16:9 HTML slide decks for live presenting — 24 built-in themes, anti-AI design methodology, and a presenter view (press `P`: speaker notes + live preview + timer in a separate window, so screen-sharing the slide window hides your notes). Derived from ConardLi's [garden-skills](https://github.com/ConardLi/garden-skills) (MIT). Docs are currently in Chinese. |
+
+Install `web-slides`:
+
+```text
+/plugin install web-slides@olddonkey-skills
+```
+
 ## Quick start
 
 ### 1. Install
