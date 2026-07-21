@@ -135,22 +135,28 @@ if [[ -n "$BASELINE" ]]; then
 fi
 
 # The log must be THIS run's output, written through a descriptor held for
-# the whole run — never re-opened by path after a check. The post-open -L
-# re-check closes the create-side race: a symlink swapped in before the
-# open is still visible afterwards, and once fd 9 is bound, later path
-# swaps cannot redirect the command's output.
+# the whole run — never re-opened by path after a check.
+#
+# Creation is unlink-then-exclusive-create: `rm -f` removes a stale file or
+# a symlink itself (never its target), and `noclobber` makes the open
+# O_CREAT|O_EXCL, which fails rather than following a symlink swapped in
+# after the unlink. A plain `>` redirect would follow such a symlink and
+# truncate the victim before any check could notice, so the exclusive
+# create protects the filesystem, not just the verdict.
 if [[ -L "$LOG" ]]; then
   echo "error: --log must not be a symlink: $LOG" >&2
   exit 2
 fi
+rm -f "$LOG" 2>/dev/null
+# noclobber is process-wide, so restore it immediately: later redirections
+# deliberately overwrite existing mktemp files.
+set -o noclobber
 if ! { exec 9> "$LOG"; } 2>/dev/null; then
-  echo "error: cannot create or truncate log: $LOG" >&2
+  set +o noclobber
+  echo "error: cannot exclusively create log (racing writer or unwritable path?): $LOG" >&2
   exit 2
 fi
-if [[ -L "$LOG" ]]; then
-  echo "error: --log was replaced by a symlink: $LOG" >&2
-  exit 2
-fi
+set +o noclobber
 
 echo "gate: $*" >&2
 echo "log:  $LOG" >&2

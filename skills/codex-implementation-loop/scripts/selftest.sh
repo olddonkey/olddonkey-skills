@@ -405,6 +405,9 @@ run_case dispatch-tools-noverify-ack env \
   SELFTEST_NODE_LOG="$TMP_ROOT/tools-noverify-ack.node" PATH="$NO_PYTHON_BIN" \
   bash "$DISPATCH" --prompt selftest --effort high
 expect_status 0 "dispatch proceeds on an unverifiable config after acknowledgment"
+# A standing acknowledgment must never become silence.
+expect_output "note  : Codex config could not be verified; proceeding under explicit acknowledgment" \
+  "dispatch warns on every unverified-but-acknowledged dispatch"
 
 EMPTY_CODEX_HOME="$TMP_ROOT/codex-home-empty"
 mkdir -p "$EMPTY_CODEX_HOME"
@@ -709,25 +712,32 @@ expect_status 1 "baseline gate rejects exit-zero failures even when they match b
 expect_output "RESULT: gate RED — runner summary reports failures but exit code is 0" \
   "baseline gate applies the shared summary/exit consistency check"
 
-# The log is created fresh for THIS run: an unwritable log aborts before the
-# command starts (stale content must never match a baseline on behalf of a
-# command that never ran), and symlinked logs are refused outright.
-STALE_LOG="$TMP_ROOT/gate-stale.log"
-write_lines "$STALE_LOG" \
+# The log is created fresh for THIS run: an uncreatable log aborts before
+# the command starts (stale content must never match a baseline on behalf
+# of a command that never ran).
+UNWRITABLE_DIR="$TMP_ROOT/gate-readonly-dir"
+mkdir -p "$UNWRITABLE_DIR"
+write_lines "$UNWRITABLE_DIR/stale.log" \
   'FAILED tests/test_widget.py::test_value - AssertionError: old detail' \
   '=========================== 1 failed in 0.01s ==========================='
-chmod 444 "$STALE_LOG"
+chmod 555 "$UNWRITABLE_DIR"
 run_case gate-unwritable-log bash "$GATE" \
-  --log "$STALE_LOG" --baseline "$PYTEST_BASELINE" -- bash -c 'exit 1'
-expect_status 2 "gate refuses an unwritable log instead of parsing its stale content"
-expect_output "cannot create or truncate log" "gate explains the unwritable log"
-chmod 644 "$STALE_LOG"
+  --log "$UNWRITABLE_DIR/stale.log" --baseline "$PYTEST_BASELINE" -- bash -c 'exit 1'
+expect_status 2 "gate refuses an uncreatable log instead of parsing its stale content"
+expect_output "cannot exclusively create log" "gate explains the uncreatable log"
+chmod 755 "$UNWRITABLE_DIR"
 
+# Symlinked logs are refused, and the exclusive create means the link's
+# TARGET is never truncated — a plain redirect would have emptied it.
+SYMLINK_TARGET="$TMP_ROOT/gate-symlink-target.log"
 SYMLINK_LOG="$TMP_ROOT/gate-symlink.log"
-ln -s "$TMP_ROOT/gate-symlink-target.log" "$SYMLINK_LOG"
+write_lines "$SYMLINK_TARGET" 'precious pre-existing content'
+ln -s "$SYMLINK_TARGET" "$SYMLINK_LOG"
 run_case gate-symlink-log bash "$GATE" --log "$SYMLINK_LOG" -- bash -c ':'
 expect_status 2 "gate refuses a symlinked log"
 expect_output "must not be a symlink" "gate explains the symlink rejection"
+expect_file_line "$SYMLINK_TARGET" "precious pre-existing content" \
+  "gate leaves a symlink target untruncated"
 
 # Only the runner's own tests-failed status (1) may be offset by a baseline;
 # signals, crashes, and interrupts never baseline away.

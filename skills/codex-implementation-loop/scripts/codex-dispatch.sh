@@ -311,13 +311,18 @@ for TOOL_CONFIG in "$CONFIG" "$PWD/.codex/config.toml"; do
     TOOL_SCAN_FAILED=1
   fi
 done
-if [[ $TOOL_SCAN_FAILED -eq 1 && "${CODEX_LOOP_ALLOW_EXTERNAL_TOOLS:-0}" != "1" ]]; then
-  echo "error: dispatch blocked — cannot verify the Codex config for external tools." >&2
-  echo "The scan needs python3 with tomllib (3.11+); regex scanning of TOML is unsound," >&2
-  echo "so an unverifiable config fails closed rather than passing unchecked." >&2
-  echo "Install a python3 that provides tomllib, or export" >&2
-  echo "CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 to acknowledge the unverified exposure once." >&2
-  exit 4
+if [[ $TOOL_SCAN_FAILED -eq 1 ]]; then
+  if [[ "${CODEX_LOOP_ALLOW_EXTERNAL_TOOLS:-0}" != "1" ]]; then
+    echo "error: dispatch blocked — cannot verify the Codex config for external tools." >&2
+    echo "The scan needs python3 with tomllib (3.11+); regex scanning of TOML is unsound," >&2
+    echo "so an unverifiable config fails closed rather than passing unchecked." >&2
+    echo "Install a python3 that provides tomllib, or export" >&2
+    echo "CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 to acknowledge the unverified exposure once." >&2
+    exit 4
+  fi
+  # A long-lived acknowledgment must not become silence: every dispatch on
+  # an unverified config says so, since nothing else will print it.
+  echo "note  : Codex config could not be verified; proceeding under explicit acknowledgment" >&2
 fi
 if [[ -n "$EXTERNAL_TOOLS" ]]; then
   if [[ "${CODEX_LOOP_ALLOW_EXTERNAL_TOOLS:-0}" != "1" ]]; then
