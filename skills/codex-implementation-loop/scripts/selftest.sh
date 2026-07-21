@@ -605,6 +605,26 @@ expect_status 1 "plain gate sees a color-wrapped failed summary through the ANSI
 expect_output "FAILED t.py::test_x [AssertionError]" \
   "gate extracts fingerprints from color-wrapped failure lines"
 
+# Logs are arbitrary bytes. In a UTF-8 locale an invalid byte used to abort
+# sed with an empty parse view, hiding a masked failure — parsing must be
+# bytewise regardless of the ambient locale. Force a UTF-8 locale when the
+# host offers one so the regression actually exercises that environment.
+UTF8_LOCALE="$(locale -a 2>/dev/null | LC_ALL=C grep -i -m1 -E '^(en_US|C)\.utf-?8$' || true)"
+[[ -n "$UTF8_LOCALE" ]] || UTF8_LOCALE=C
+run_case gate-invalid-byte-masked env LC_ALL="$UTF8_LOCALE" bash "$GATE" \
+  --log "$TMP_ROOT/gate-invalid-byte-masked.log" -- \
+  bash -c 'printf '\''\377\nFAILED t.py::test_x - AssertionError: boom\n=========================== 1 failed in 0.01s ===========================\n'\'''
+expect_status 1 "gate parses a log containing invalid UTF-8 bytes bytewise ($UTF8_LOCALE)"
+expect_output "RESULT: gate RED — runner summary reports failures but exit code is 0" \
+  "gate stays fail-closed on a masked failure in a byte-poisoned log"
+
+run_case gate-invalid-byte-pass env LC_ALL="$UTF8_LOCALE" bash "$GATE" \
+  --log "$TMP_ROOT/gate-invalid-byte-pass.log" --baseline "$EMPTY_BASELINE" -- \
+  bash -c 'printf '\''\377 binary noise\n=========================== 1 passed in 0.01s ===========================\n'\'''
+expect_status 0 "baseline gate still recognizes a passing summary in a byte-poisoned log"
+expect_output "RESULT: gate green" \
+  "gate does not false-red on invalid bytes in a passing run"
+
 CRASH_BASELINE="$TMP_ROOT/crash-baseline.log"
 write_lines "$CRASH_BASELINE" 'ImportError: same crash text'
 run_case gate-crash bash "$GATE" \

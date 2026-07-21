@@ -44,12 +44,18 @@ done
 # runners (`pytest --color=yes`) wrap their summary lines in CSI sequences
 # that would otherwise defeat every anchored pattern. The log on disk keeps
 # the original bytes.
+#
+# Every parser runs under LC_ALL=C: test logs are arbitrary bytes, and in a
+# UTF-8 locale one invalid byte makes sed/awk/grep abort or misread — an
+# empty parse view would then hide a failed summary behind a masked exit
+# code. Bytewise processing is the only locale that can't be poisoned by
+# log content. strip_ansi failures are checked by callers and fail closed.
 PARSE_LOG="$(mktemp -t gate-parse.XXXXXX)" || exit 2
 BASELINE_PARSE="$(mktemp -t gate-parse.XXXXXX)" || exit 2
 trap 'rm -f "$PARSE_LOG" "$BASELINE_PARSE"' EXIT
 ANSI_ESC="$(printf '\033')"
 strip_ansi() { # $1=source path, $2=destination path
-  sed "s/${ANSI_ESC}\\[[0-9;]*[A-Za-z]//g" "$1" > "$2" 2>/dev/null
+  LC_ALL=C sed "s/${ANSI_ESC}\\[[0-9;]*[A-Za-z]//g" "$1" > "$2"
 }
 
 normalize_path() { # $1=path; the file itself need not exist
@@ -176,7 +182,7 @@ RUNNER_VERDICT_AWK='
 # while the parent FAILED line stays constant, so SUBFAILED lines carry the
 # real identity and must be fingerprinted too.
 extract_failures() { # $1=log path
-  awk '
+  LC_ALL=C awk '
     /^FAIL: / || /^ERROR: / { print; next }
     /^FAILED \(/ || /^ERROR \(/ { next }
     /^FAILED / || /^ERROR / || /^SUBFAILED/ {
@@ -213,7 +219,7 @@ extract_failures() { # $1=log path
 }
 
 tests_ran() { # $1=stripped log path
-  awk "$RUNNER_VERDICT_AWK"'
+  LC_ALL=C awk "$RUNNER_VERDICT_AWK"'
     END {
       if (last_runner == "pytest" &&
           last_summary !~ /^no tests ran([^[:alpha:]]|$)/ &&
@@ -227,7 +233,7 @@ tests_ran() { # $1=stripped log path
 }
 
 zero_tests_reported() { # $1=stripped log path
-  awk "$RUNNER_VERDICT_AWK"'
+  LC_ALL=C awk "$RUNNER_VERDICT_AWK"'
     END {
       if (last_runner == "unittest" && unit_total == 0) zero = 1
       if (last_runner == "pytest" &&
@@ -238,7 +244,7 @@ zero_tests_reported() { # $1=stripped log path
 }
 
 supported_runner_summary() { # $1=stripped log path
-  awk "$RUNNER_VERDICT_AWK"'
+  LC_ALL=C awk "$RUNNER_VERDICT_AWK"'
     END {
       if (last_runner == "unittest") recognized = 1
       if (last_runner == "pytest" &&
@@ -255,7 +261,7 @@ supported_runner_summary() { # $1=stripped log path
 # verdict contradict an exit-zero run. Earlier blocks belong to inner runs or
 # application output, never to this run's verdict.
 failed_summary_present() { # $1=stripped log path
-  awk "$RUNNER_VERDICT_AWK"'
+  LC_ALL=C awk "$RUNNER_VERDICT_AWK"'
     END {
       if (last_runner == "unittest" &&
           unit_result ~ /^(FAILED|ERROR)[[:space:]]+\(/) failed = 1
@@ -278,8 +284,11 @@ BASELINE_EXISTS_AT_START=0
 BASELINE_FAILURES_AT_START=""
 if [[ -n "$BASELINE" && -f "$BASELINE" ]]; then
   BASELINE_EXISTS_AT_START=1
-  strip_ansi "$BASELINE" "$BASELINE_PARSE"
-  BASELINE_FAILURES_AT_START="$(extract_failures "$BASELINE_PARSE" | sort -u || true)"
+  if ! strip_ansi "$BASELINE" "$BASELINE_PARSE"; then
+    echo "error: could not normalize baseline for parsing: $BASELINE" >&2
+    exit 2
+  fi
+  BASELINE_FAILURES_AT_START="$(extract_failures "$BASELINE_PARSE" | LC_ALL=C sort -u || true)"
 fi
 
 START=$SECONDS
@@ -290,10 +299,15 @@ ELAPSED=$((SECONDS - START))
 
 echo "=== gate finished in ${ELAPSED}s with exit code ${STATUS} ==="
 
-strip_ansi "$LOG" "$PARSE_LOG"
+# An unparsed log must never be judged: an empty parse view would hide a
+# failed summary behind a masked exit code, so normalization failure is red.
+if ! strip_ansi "$LOG" "$PARSE_LOG"; then
+  echo "RESULT: gate RED — log normalization failed; refusing to judge unparsed output"
+  exit 1
+fi
 
 # Surface the shapes most runners use for their summary line.
-grep -E '^(Ran [0-9]+ |OK\b|FAILED\b|ERROR\b|SUBFAILED\b|=+ .*(passed|failed|no tests ran).* =+|(no tests ran|[0-9]+ [a-z]+( [a-z]+)?(, [0-9]+ [a-z]+( [a-z]+)?)*) in [0-9]+(\.[0-9]+)?s)' "$PARSE_LOG" | tail -5
+LC_ALL=C grep -aE '^(Ran [0-9]+ |OK\b|FAILED\b|ERROR\b|SUBFAILED\b|=+ .*(passed|failed|no tests ran).* =+|(no tests ran|[0-9]+ [a-z]+( [a-z]+)?(, [0-9]+ [a-z]+( [a-z]+)?)*) in [0-9]+(\.[0-9]+)?s)' "$PARSE_LOG" | tail -5
 
 CURRENT_FAILURES="$(extract_failures "$PARSE_LOG" || true)"
 FAILED_SUMMARY=0
@@ -308,7 +322,7 @@ if [[ -n "$CURRENT_FAILURES" ]]; then
 fi
 if [[ $FAILURES -gt 0 ]]; then
   echo "--- ${FAILURES} failure/error header(s) ---"
-  awk 'NR <= 40' <<< "$CURRENT_FAILURES"
+  LC_ALL=C awk 'NR <= 40' <<< "$CURRENT_FAILURES"
 fi
 
 # A gate is only meaningful against a baseline: the bar is "no NEW
@@ -317,9 +331,9 @@ fi
 NEW_FAILURES=""
 if [[ -n "$BASELINE" && $BASELINE_EXISTS_AT_START -eq 1 ]]; then
   echo "--- failures not present in baseline ($BASELINE) ---"
-  NEW_FAILURES="$(comm -13 \
-    <(printf '%s\n' "$BASELINE_FAILURES_AT_START" | sort -u) \
-    <(printf '%s\n' "$CURRENT_FAILURES"           | sort -u) \
+  NEW_FAILURES="$(LC_ALL=C comm -13 \
+    <(printf '%s\n' "$BASELINE_FAILURES_AT_START" | LC_ALL=C sort -u) \
+    <(printf '%s\n' "$CURRENT_FAILURES"           | LC_ALL=C sort -u) \
     || true)"
   [[ -z "$NEW_FAILURES" ]] || printf '%s\n' "$NEW_FAILURES"
 elif [[ -n "$BASELINE" ]]; then
