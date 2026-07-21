@@ -70,6 +70,14 @@ expect_first_line() { # $1=file $2=expected $3=description
   fi
 }
 
+expect_file_line() { # $1=file $2=exact line $3=description
+  if [[ -f "$1" ]] && LC_ALL=C grep -qxF -- "$2" "$1"; then
+    pass "$3"
+  else
+    fail "$3 (no exact line '$2' in $1)"
+  fi
+}
+
 run_case() { # $1=name, remaining args=command
   local name="$1"
   shift
@@ -251,6 +259,76 @@ run_case dispatch-external-tools-partial env \
 expect_status 4 "dispatch still blocks when only one tool of a connector is disabled"
 expect_output "[apps.connector_a]" \
   "dispatch lists the connector whose other tools remain callable"
+
+# Legal TOML shapes beyond column-zero section headers must trip the scan:
+# indented headers, top-level dotted keys, and inline tables all define
+# enabled servers that the CLI honors.
+VARIANT_TOOLS_DIR="$TMP_ROOT/codex-home-tools-variants"
+mkdir -p "$VARIANT_TOOLS_DIR"
+write_lines "$VARIANT_TOOLS_DIR/config.toml" \
+  '  [mcp_servers.demo]' \
+  '  command = "printf"'
+run_case dispatch-tools-indented env \
+  HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
+  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/tools-indented.node" PATH="$TEST_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort high
+expect_status 4 "dispatch blocks on an indented server table header"
+
+write_lines "$VARIANT_TOOLS_DIR/config.toml" \
+  'mcp_servers.demo.command = "printf"'
+run_case dispatch-tools-dotted env \
+  HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
+  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/tools-dotted.node" PATH="$TEST_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort high
+expect_status 4 "dispatch blocks on a top-level dotted-key server definition"
+expect_output "[mcp_servers.demo]" \
+  "dispatch names the dotted-key server"
+
+write_lines "$VARIANT_TOOLS_DIR/config.toml" \
+  'mcp_servers = { demo = { command = "printf" } }'
+run_case dispatch-tools-inline env \
+  HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
+  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/tools-inline.node" PATH="$TEST_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort high
+expect_status 4 "dispatch blocks on an inline-table server definition"
+
+write_lines "$VARIANT_TOOLS_DIR/config.toml" \
+  'mcp_servers.demo.command = "printf"' \
+  'mcp_servers.demo.enabled = false'
+run_case dispatch-tools-dotted-disabled env \
+  HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
+  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/tools-dotted-disabled.node" PATH="$TEST_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort high
+expect_status 0 "dispatch does not block on a dotted-key server disabled at its root"
+
+# The prompt must reach the companion as ONE argument behind a `--`
+# terminator: the companion re-splits a lone trailing argument, so a prompt
+# that merely MENTIONS --write would otherwise become a real write flag.
+INJECTION_PROMPT='Investigate this. Do not use --write and only report.'
+INJECTION_NODE_LOG="$TMP_ROOT/injection.node"
+run_case dispatch-prompt-injection env \
+  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" \
+  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+  SELFTEST_NODE_LOG="$INJECTION_NODE_LOG" PATH="$TEST_PATH" \
+  bash "$DISPATCH" --read-only --prompt "$INJECTION_PROMPT" --effort high
+expect_status 0 "read-only dispatch accepts a prompt that mentions --write"
+expect_file_line "$INJECTION_NODE_LOG" "--" \
+  "dispatch passes an argument terminator before the prompt"
+expect_file_line "$INJECTION_NODE_LOG" "$INJECTION_PROMPT" \
+  "dispatch keeps the prompt as a single untampered argument"
+
+run_case dispatch-extra-rejected env \
+  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" \
+  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/extra.node" PATH="$TEST_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort high -- --write
+expect_status 1 "dispatch rejects passthrough arguments after --"
+expect_output "unknown argument: --" \
+  "dispatch reports the removed passthrough separator as unknown"
 
 # The Claude CLI view is preferred and resolves enabled entries with
 # managed > local > project > user precedence, independent of JSON list order.
@@ -477,14 +555,14 @@ expect_output "FAIL: test_new (tests.Case.test_new)" \
 
 run_case gate-unittest-match bash "$GATE" \
   --log "$TMP_ROOT/gate-unittest-match.log" --baseline "$UNIT_BASELINE" -- \
-  bash -c 'printf '\''FAIL: test_known (tests.Case.test_known)\nRan 1 test in 0.001s\nFAILED (failures=1)\n'\''; exit 7'
+  bash -c 'printf '\''FAIL: test_known (tests.Case.test_known)\nRan 1 test in 0.001s\nFAILED (failures=1)\n'\''; exit 1'
 expect_status 0 "gate exits zero when unittest failures match baseline"
 expect_output "RESULT: gate green (failures match baseline — no new failures)" \
   "gate reports baseline-clean unittest failures"
 
 run_case gate-unittest-mixed bash "$GATE" \
   --log "$TMP_ROOT/gate-unittest-mixed.log" --baseline "$UNIT_BASELINE" -- \
-  bash -c 'printf '\''FAIL: test_known (tests.Case.test_known)\nRan 3 tests in 0.001s\nFAILED (failures=1, skipped=2)\n'\''; exit 7'
+  bash -c 'printf '\''FAIL: test_known (tests.Case.test_known)\nRan 3 tests in 0.001s\nFAILED (failures=1, skipped=2)\n'\''; exit 1'
 expect_status 0 "gate accepts a known unittest failure when one test executed and two skipped"
 expect_output "RESULT: gate green (failures match baseline — no new failures)" \
   "gate counts only non-skipped unittest tests as executed"
@@ -510,6 +588,34 @@ run_case gate-baseline-masked-known bash "$GATE" \
 expect_status 1 "baseline gate rejects exit-zero failures even when they match baseline"
 expect_output "RESULT: gate RED — runner summary reports failures but exit code is 0" \
   "baseline gate applies the shared summary/exit consistency check"
+
+# The log is created fresh for THIS run: an unwritable log aborts before the
+# command starts (stale content must never match a baseline on behalf of a
+# command that never ran), and symlinked logs are refused outright.
+STALE_LOG="$TMP_ROOT/gate-stale.log"
+write_lines "$STALE_LOG" \
+  'FAILED tests/test_widget.py::test_value - AssertionError: old detail' \
+  '=========================== 1 failed in 0.01s ==========================='
+chmod 444 "$STALE_LOG"
+run_case gate-unwritable-log bash "$GATE" \
+  --log "$STALE_LOG" --baseline "$PYTEST_BASELINE" -- bash -c 'exit 1'
+expect_status 2 "gate refuses an unwritable log instead of parsing its stale content"
+expect_output "cannot create or truncate log" "gate explains the unwritable log"
+chmod 644 "$STALE_LOG"
+
+SYMLINK_LOG="$TMP_ROOT/gate-symlink.log"
+ln -s "$TMP_ROOT/gate-symlink-target.log" "$SYMLINK_LOG"
+run_case gate-symlink-log bash "$GATE" --log "$SYMLINK_LOG" -- bash -c ':'
+expect_status 2 "gate refuses a symlinked log"
+expect_output "must not be a symlink" "gate explains the symlink rejection"
+
+# Only the runner's own tests-failed status (1) may be offset by a baseline;
+# signals, crashes, and interrupts never baseline away.
+run_case gate-signal-exit bash "$GATE" \
+  --log "$TMP_ROOT/gate-signal.log" --baseline "$PYTEST_BASELINE" -- \
+  bash -c 'printf '\''FAILED tests/test_widget.py::test_value - AssertionError: old detail\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 137'
+expect_status 137 "gate keeps an abnormal exit code even when failures match baseline"
+expect_output "abnormal runner exit (137)" "gate explains the abnormal-exit rejection"
 
 run_case gate-pytest-message-change bash "$GATE" \
   --log "$TMP_ROOT/gate-pytest-message-change.log" --baseline "$PYTEST_BASELINE" -- \

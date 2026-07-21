@@ -134,6 +134,20 @@ if [[ -n "$BASELINE" ]]; then
   fi
 fi
 
+# The log must be THIS run's output. Refuse symlinked logs, and create or
+# truncate the file before running the command: if that fails, the command
+# would never start yet a previous run's content would still be parsed —
+# and a stale log matching the baseline would report green for a run that
+# never happened.
+if [[ -L "$LOG" ]]; then
+  echo "error: --log must not be a symlink: $LOG" >&2
+  exit 2
+fi
+if ! { : > "$LOG"; } 2>/dev/null; then
+  echo "error: cannot create or truncate log: $LOG" >&2
+  exit 2
+fi
+
 echo "gate: $*" >&2
 echo "log:  $LOG" >&2
 if [[ $STRICT -eq 1 ]]; then
@@ -445,6 +459,12 @@ if ! tests_ran "$PARSE_LOG"; then
   echo "RESULT: gate RED — failures parsed but no completed tests were reported"
 elif [[ $BASELINE_EXISTS_AT_START -eq 0 || -n "$NEW_FAILURES" ]]; then
   echo "RESULT: gate RED — do not publish until resolved or explained"
+elif [[ $STATUS -ne 1 ]]; then
+  # Only the runner's own "tests failed" status (1 for pytest and unittest)
+  # may be offset by a baseline. Signals (137), not-executable (126/127),
+  # and pytest's interrupt/usage/no-tests codes (2-5) mean the run itself
+  # broke — a matching failure list proves nothing about it.
+  echo "RESULT: gate RED — abnormal runner exit ($STATUS); signals, crashes, and interrupts never baseline away"
 else
   echo "RESULT: gate green (failures match baseline — no new failures)"
   exit 0

@@ -7,8 +7,15 @@
 #
 # Usage:
 #   codex-dispatch.sh --prompt-file PATH [--read-only|--investigate] [--background]
-#                     [--model MODEL] [--effort LEVEL] [--resume] [-- EXTRA...]
+#                     [--model MODEL] [--effort LEVEL] [--resume]
 #   codex-dispatch.sh --prompt "short inline prompt" [...]
+#
+# The prompt is always passed to the companion behind a `--` argument
+# terminator: the companion re-splits a lone trailing argument shell-style,
+# so without the terminator a prompt merely MENTIONING --write would become
+# a real write flag. For the same reason there is deliberately no
+# passthrough for extra companion arguments — privilege, workspace, and
+# resume flags must come from this script's own interface.
 #
 # Run from the ROOT of the target repo: the companion operates on the
 # invoking directory, so a dispatch from the wrong place silently points
@@ -42,7 +49,6 @@ PROMPT=""
 RESUME=0
 READ_ONLY=0
 BACKGROUND=0
-EXTRA=()
 
 # Fallback snapshot (companion 1.0.6). The live list is read from the
 # installed companion below — the wrapper is the authority, not this file.
@@ -64,7 +70,6 @@ while [[ $# -gt 0 ]]; do
     --read-only|--investigate) READ_ONLY=1; shift ;;
     --background)  BACKGROUND=1; shift ;;
     -h|--help)     usage 0 ;;
-    --)            shift; EXTRA=("$@"); break ;;
     *)             echo "unknown argument: $1" >&2; usage 1 ;;
   esac
 done
@@ -243,28 +248,74 @@ CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
 # tools injected by other config layers. Its silence is NOT proof of
 # isolation, and prompt-level prohibitions are a second layer, never the
 # boundary.
+# Prefer a real TOML parser (tomllib, python 3.11+): a regex scan misses
+# legal TOML shapes — indented table headers, top-level dotted keys, inline
+# tables. When tomllib is unavailable the awk fallback covers those shapes
+# line-wise; either way an unparseable or ambiguous config counts as
+# exposure, never as silence. `enabled = false` is honored only at the
+# server/connector root: the schema also allows per-tool `enabled`, and one
+# disabled tool must not hide a connector whose other tools stay callable.
 external_tool_sections() { # $1=config path
   [[ -f "$1" ]] || return 0
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import tomllib' 2>/dev/null; then
+    python3 - "$1" 2>/dev/null <<'PY' || true
+import sys
+import tomllib
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        data = tomllib.load(handle)
+except Exception:
+    print("(unparseable Codex config - treated as exposure)")
+    raise SystemExit(0)
+
+for family in ("mcp_servers", "apps"):
+    table = data.get(family)
+    if not isinstance(table, dict):
+        continue
+    for name, entry in table.items():
+        if isinstance(entry, dict) and entry.get("enabled") is False:
+            continue
+        print(f"[{family}.{name}]")
+PY
+    return 0
+  fi
   LC_ALL=C awk '
-    /^\[(mcp_servers|apps)[].]/ {
-      section = $0
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+    }
+    line ~ /^\[(mcp_servers|apps)[].]/ {
+      section = line
       sub(/^\[/, "", section)
       sub(/\].*$/, "", section)
       depth = split(section, segments, ".")
       identity = segments[1]
       if (segments[2] != "") identity = segments[1] "." segments[2]
       current = identity
-      # `enabled = false` counts only in the server/connector ROOT table:
-      # the schema also allows per-tool `enabled` in nested tables, and one
-      # disabled tool must not hide a connector whose other tools remain
-      # callable.
       current_is_root = (depth == 2) ? 1 : 0
       if (!(identity in seen)) { seen[identity] = 1; order[++count] = identity }
       next
     }
-    /^\[/ { current = ""; current_is_root = 0; next }
+    line ~ /^\[/ { current = ""; current_is_root = 0; next }
+    line ~ /^(mcp_servers|apps)\.[^[:space:]=.]+/ && line ~ /=/ {
+      keypath = line
+      sub(/[[:space:]]*=.*$/, "", keypath)
+      depth = split(keypath, segments, ".")
+      identity = segments[1] "." segments[2]
+      if (!(identity in seen)) { seen[identity] = 1; order[++count] = identity }
+      if (depth == 3 && segments[3] == "enabled" &&
+          line ~ /=[[:space:]]*false[[:space:]]*$/) disabled[identity] = 1
+      next
+    }
+    line ~ /^(mcp_servers|apps)[[:space:]]*=/ {
+      family = line
+      sub(/[[:space:]]*=.*$/, "", family)
+      if (!(family in seen)) { seen[family] = 1; order[++count] = family }
+      next
+    }
     current != "" && current_is_root &&
-      /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*false/ {
+      line ~ /^enabled[[:space:]]*=[[:space:]]*false/ {
       disabled[current] = 1
     }
     END {
@@ -301,7 +352,6 @@ ARGS=(task)
 [[ -n "$MODEL"  ]] && ARGS+=(--model "$MODEL")
 [[ -n "$EFFORT" ]] && ARGS+=(--effort "$EFFORT")
 [[ $RESUME -eq 1 ]] && ARGS+=(--resume-last)
-[[ ${#EXTRA[@]} -gt 0 ]] && ARGS+=("${EXTRA[@]}")
 
 # Read a key only from the TOP-LEVEL region of a TOML config (above the
 # first [section]). A plain grep would happily return a key that lives
@@ -358,4 +408,7 @@ else
 fi
 echo "resume: $RESUME  background: $BACKGROUND" >&2
 
-exec node "$COMPANION" "${ARGS[@]}" "$PROMPT"
+# The `--` terminator is load-bearing: it guarantees the companion sees at
+# least two trailing arguments and treats everything after it as literal
+# positional text, so tokens inside the prompt can never parse as flags.
+exec node "$COMPANION" "${ARGS[@]}" -- "$PROMPT"
