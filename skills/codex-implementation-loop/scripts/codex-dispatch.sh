@@ -250,15 +250,21 @@ external_tool_sections() { # $1=config path
       section = $0
       sub(/^\[/, "", section)
       sub(/\].*$/, "", section)
-      split(section, segments, ".")
+      depth = split(section, segments, ".")
       identity = segments[1]
       if (segments[2] != "") identity = segments[1] "." segments[2]
       current = identity
+      # `enabled = false` counts only in the server/connector ROOT table:
+      # the schema also allows per-tool `enabled` in nested tables, and one
+      # disabled tool must not hide a connector whose other tools remain
+      # callable.
+      current_is_root = (depth == 2) ? 1 : 0
       if (!(identity in seen)) { seen[identity] = 1; order[++count] = identity }
       next
     }
-    /^\[/ { current = ""; next }
-    current != "" && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*false/ {
+    /^\[/ { current = ""; current_is_root = 0; next }
+    current != "" && current_is_root &&
+      /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*false/ {
       disabled[current] = 1
     }
     END {

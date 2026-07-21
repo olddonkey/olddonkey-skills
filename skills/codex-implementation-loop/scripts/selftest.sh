@@ -219,7 +219,8 @@ run_case dispatch-external-tools-readonly env \
   bash "$DISPATCH" --prompt selftest --effort high --read-only
 expect_status 4 "read-only dispatch is blocked by external tools too"
 
-# A server explicitly disabled in config is not an exposure.
+# A server explicitly disabled in config is not an exposure — but only when
+# `enabled = false` sits in the server/connector ROOT table.
 DISABLED_TOOLS_DIR="$TMP_ROOT/codex-home-tools-disabled"
 mkdir -p "$DISABLED_TOOLS_DIR"
 write_lines "$DISABLED_TOOLS_DIR/config.toml" \
@@ -232,6 +233,24 @@ run_case dispatch-external-tools-disabled env \
   SELFTEST_NODE_LOG="$TMP_ROOT/tools-disabled.node" PATH="$TEST_PATH" \
   bash "$DISPATCH" --prompt selftest --effort high
 expect_status 0 "dispatch does not block on a server disabled with enabled=false"
+
+# Per-tool `enabled = false` in a NESTED table must not hide the connector:
+# its other tools remain callable and the exposure stands.
+PARTIAL_TOOLS_DIR="$TMP_ROOT/codex-home-tools-partial"
+mkdir -p "$PARTIAL_TOOLS_DIR"
+write_lines "$PARTIAL_TOOLS_DIR/config.toml" \
+  '[apps.connector_a.tools.disabled_tool]' \
+  'enabled = false' \
+  '[apps.connector_a.tools.enabled_tool]' \
+  'approval_mode = "approve"'
+run_case dispatch-external-tools-partial env \
+  HOME="$HOME_DIR" CODEX_HOME="$PARTIAL_TOOLS_DIR" \
+  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
+  SELFTEST_NODE_LOG="$TMP_ROOT/tools-partial.node" PATH="$TEST_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort high
+expect_status 4 "dispatch still blocks when only one tool of a connector is disabled"
+expect_output "[apps.connector_a]" \
+  "dispatch lists the connector whose other tools remain callable"
 
 # The Claude CLI view is preferred and resolves enabled entries with
 # managed > local > project > user precedence, independent of JSON list order.
