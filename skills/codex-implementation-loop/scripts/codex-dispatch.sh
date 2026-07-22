@@ -2,8 +2,8 @@
 # Dispatch an implementation task to Codex via the codex-companion runtime.
 #
 # Locates the active installed companion (with cache fallbacks) so you don't
-# rediscover the path when plugin versions change, and rejects the invalid
-# --effort value that the wrapper silently refuses.
+# rediscover the path when plugin versions change, and validates effort
+# choices against either the companion or a top-level config-only assertion.
 #
 # Usage:
 #   codex-dispatch.sh --prompt-file PATH [--read-only|--investigate] [--background]
@@ -28,11 +28,12 @@
 #
 # Model and effort are deliberately NOT defaulted here. When neither flag
 # is passed, nothing is forwarded and the Codex CLI falls back to the
-# user's own ~/.codex/config.toml — which is both the most respectful
-# default and the only way to reach efforts the wrapper flag rejects
-# (ultra, max). Set CODEX_LOOP_MODEL / CODEX_LOOP_EFFORT to give one
-# project a standing preference without editing this script or the
-# user's global config.
+# user's own config layers. Config-only efforts (currently ultra and max)
+# can instead be named as assertions: the script checks the project-local,
+# then global, top-level config value and inherits it without forwarding an
+# unsupported --effort flag. Set CODEX_LOOP_MODEL / CODEX_LOOP_EFFORT to give
+# one project a standing preference without editing this script or the user's
+# config; config-only effort values still assert rather than override it.
 #
 # Prefer --prompt-file: dispatch prompts are long, and shell-escaping a
 # multi-paragraph prompt is a reliable way to corrupt it.
@@ -53,6 +54,11 @@ BACKGROUND=0
 # Fallback snapshot (companion 1.0.6). The live list is read from the
 # installed companion below — the wrapper is the authority, not this file.
 VALID_EFFORTS="none minimal low medium high xhigh"
+
+# Snapshot of real Codex levels that companion 1.0.6 cannot accept as flags.
+# There is no runtime source for this list, so it may rot as the companion
+# evolves. The detected companion enum below takes precedence when they overlap.
+CONFIG_ONLY_EFFORTS="ultra max"
 
 usage() {
   # Print the whole header comment block, however long it grows.
@@ -220,20 +226,143 @@ DETECTED_EFFORTS="$(grep -oE -- '--effort <[a-z|]+>' "$COMPANION" 2>/dev/null \
                     || true)"
 [[ -n "$DETECTED_EFFORTS" ]] && VALID_EFFORTS="$DETECTED_EFFORTS"
 
-# `ultra` and `max` are real Codex efforts but (as of 1.0.6) reachable only
-# via model_reasoning_effort in config.toml — passing either as a flag fails
-# the whole dispatch. Omit --effort to inherit whatever the user configured.
+# A live companion-accepted value remains a normal forwarded override. Only a
+# value outside that enum may resolve through the config-only snapshot. Trim and
+# fold case for those assertions so `Max` and `  MAX  ` mean the same thing.
+CONFIG_ONLY_EFFORT=""
 if [[ -n "$EFFORT" && " $VALID_EFFORTS " != *" $EFFORT "* ]]; then
-  echo "invalid --effort '$EFFORT'; this companion accepts: $VALID_EFFORTS" >&2
-  if [[ "$EFFORT" == "max" || "$EFFORT" == "ultra" ]]; then
-    echo "note: '$EFFORT' exists, but only as model_reasoning_effort in ~/.codex/config.toml." >&2
-    echo "      To use it, omit --effort so the CLI inherits the user's config." >&2
-    echo "      Don't edit their global config to force it — that changes their own Codex use." >&2
+  NORMALIZED_EFFORT="$(printf '%s\n' "$EFFORT" \
+    | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  if [[ " $CONFIG_ONLY_EFFORTS " == *" $NORMALIZED_EFFORT "* ]]; then
+    CONFIG_ONLY_EFFORT="$NORMALIZED_EFFORT"
+  else
+    echo "invalid --effort '$EFFORT'; this companion accepts: $VALID_EFFORTS" >&2
+    exit 2
   fi
-  exit 2
 fi
 
 CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
+PROJECT_CONFIG="$PWD/.codex/config.toml"
+
+# Both config-only effort assertions and the external-tools scan below require
+# a real TOML parser. Find a versioned interpreter when the default python3 is
+# older than 3.11; neither check falls back to regex scanning.
+TOML_PYTHON=""
+for TOML_CANDIDATE in python3 python3.13 python3.12 python3.11; do
+  if command -v "$TOML_CANDIDATE" >/dev/null 2>&1 && \
+     "$TOML_CANDIDATE" -c 'import tomllib' 2>/dev/null; then
+    TOML_PYTHON="$TOML_CANDIDATE"
+    break
+  fi
+done
+
+config_effort_failure() { # $1=what was found, or why it could not be determined
+  echo "error: requested config-only effort '$CONFIG_ONLY_EFFORT', but $1." >&2
+  echo "remedy: ensure python3 with tomllib (3.11+) is available, then inspect the" >&2
+  echo "        top-level config layers in precedence order:" >&2
+  echo "        project: $PROJECT_CONFIG" >&2
+  echo "        global : $CONFIG" >&2
+  echo "        The first model_reasoning_effort found must be:" >&2
+  echo "        model_reasoning_effort = \"$CONFIG_ONLY_EFFORT\"" >&2
+  echo "        Retry after editing it yourself; this wrapper will not change your config." >&2
+  exit 2
+}
+
+CONFIG_EFFORT_LAYER=""
+if [[ -n "$CONFIG_ONLY_EFFORT" ]]; then
+  # An absent project file is normal and falls through to the global config.
+  # Preserve the specific missing-file failure even when no TOML parser exists.
+  if [[ ! -e "$PROJECT_CONFIG" && ! -e "$CONFIG" ]]; then
+    config_effort_failure "the configured effort could not be determined: $CONFIG does not exist"
+  fi
+  if [[ -e "$PROJECT_CONFIG" && ! -f "$PROJECT_CONFIG" ]]; then
+    config_effort_failure "the configured effort could not be determined: $PROJECT_CONFIG is not a regular file"
+  fi
+  if [[ ! -e "$PROJECT_CONFIG" && -e "$CONFIG" && ! -f "$CONFIG" ]]; then
+    config_effort_failure "the configured effort could not be determined: $CONFIG is not a regular file"
+  fi
+  if [[ -z "$TOML_PYTHON" ]]; then
+    config_effort_failure "the configured effort could not be determined: python3 with tomllib (3.11+) is unavailable"
+  fi
+
+  CONFIG_EFFORT_DETAIL=""
+  if ! CONFIG_EFFORT_DETAIL="$("$TOML_PYTHON" - \
+      "$PROJECT_CONFIG" "$CONFIG" "$CONFIG_ONLY_EFFORT" 2>/dev/null <<'PY'
+import os
+import sys
+import tomllib
+
+project_path, global_path, requested = sys.argv[1:]
+key = "model_reasoning_effort"
+
+
+def fail(message):
+    print(message)
+    raise SystemExit(1)
+
+
+def load_config(path, *, required):
+    if not os.path.exists(path):
+        if required:
+            fail(f"the configured effort could not be determined: {path} does not exist")
+        return None
+    if not os.path.isfile(path):
+        fail(f"the configured effort could not be determined: {path} is not a regular file")
+    try:
+        with open(path, "rb") as handle:
+            return tomllib.load(handle)
+    except tomllib.TOMLDecodeError:
+        fail(f"the configured effort could not be determined: {path} is not valid TOML")
+    except OSError:
+        fail(f"the configured effort could not be determined: {path} could not be read")
+    except Exception:
+        fail(
+            "the configured effort could not be determined: "
+            f"the TOML parser failed while reading {path}"
+        )
+
+
+def assert_value(data, path):
+    actual = data[key]
+    if not isinstance(actual, str) or actual.strip().lower() != requested:
+        fail(f"{path} has top-level {key} = {actual!r}")
+
+
+project_data = load_config(project_path, required=False)
+if project_data is not None and key in project_data:
+    assert_value(project_data, project_path)
+    # The project key wins, but an existing lower-precedence file must still be
+    # readable, valid TOML before this fail-closed assertion can pass.
+    load_config(global_path, required=False)
+    print("project")
+    raise SystemExit(0)
+
+global_data = load_config(global_path, required=True)
+if key in global_data:
+    assert_value(global_data, global_path)
+    print("global")
+    raise SystemExit(0)
+
+if project_data is None:
+    missing_detail = global_path
+else:
+    missing_detail = f"both {project_path} and {global_path}"
+fail(
+    "the configured effort could not be determined: "
+    f"top-level {key} is absent in {missing_detail}"
+)
+PY
+)"; then
+    [[ -n "$CONFIG_EFFORT_DETAIL" ]] || \
+      CONFIG_EFFORT_DETAIL="the configured effort could not be determined: the TOML parser failed while resolving $PROJECT_CONFIG before $CONFIG"
+    config_effort_failure "$CONFIG_EFFORT_DETAIL"
+  fi
+  case "$CONFIG_EFFORT_DETAIL" in
+    project|global) CONFIG_EFFORT_LAYER="$CONFIG_EFFORT_DETAIL" ;;
+    *) config_effort_failure "the configured effort could not be determined: the TOML parser returned an unknown config layer" ;;
+  esac
+fi
 
 # MCP servers and app connectors run OUTSIDE the exec sandbox in EVERY mode:
 # `workspace-write` and `read-only` bound files and shell, not tool calls
@@ -258,17 +387,6 @@ CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
 # server/connector root: the schema also allows per-tool `enabled`, and
 # one disabled tool must not hide a connector whose other tools stay
 # callable.
-# Find any python that ships tomllib — the default python3 may predate 3.11
-# while a versioned interpreter sits right next to it.
-TOML_PYTHON=""
-for TOML_CANDIDATE in python3 python3.13 python3.12 python3.11; do
-  if command -v "$TOML_CANDIDATE" >/dev/null 2>&1 && \
-     "$TOML_CANDIDATE" -c 'import tomllib' 2>/dev/null; then
-    TOML_PYTHON="$TOML_CANDIDATE"
-    break
-  fi
-done
-
 scan_config_tools() { # $1=config path; prints identities; rc 3 = cannot verify
   [[ -f "$1" ]] || return 0
   [[ -n "$TOML_PYTHON" ]] || return 3
@@ -348,7 +466,7 @@ ARGS=(task)
 # Codex CLI so it resolves from the user's config rather than a default
 # invented here.
 [[ -n "$MODEL"  ]] && ARGS+=(--model "$MODEL")
-[[ -n "$EFFORT" ]] && ARGS+=(--effort "$EFFORT")
+[[ -n "$EFFORT" && -z "$CONFIG_ONLY_EFFORT" ]] && ARGS+=(--effort "$EFFORT")
 [[ $RESUME -eq 1 ]] && ARGS+=(--resume-last)
 
 # Read a key only from the TOP-LEVEL region of a TOML config (above the
@@ -393,7 +511,16 @@ echo "workspace: $(pwd)" >&2
 # installs is invisible unless someone prints what's actually running.
 command -v codex >/dev/null 2>&1 && echo "codex  : $(codex --version 2>/dev/null || echo '?')" >&2
 describe "model " "$MODEL"  "model" >&2
-describe "effort" "$EFFORT" "model_reasoning_effort" >&2
+if [[ -n "$CONFIG_ONLY_EFFORT" ]]; then
+  if [[ "$CONFIG_EFFORT_LAYER" == "project" ]]; then
+    CONFIG_EFFORT_LABEL="project .codex/config.toml"
+  else
+    CONFIG_EFFORT_LABEL="config.toml"
+  fi
+  echo "effort: $CONFIG_ONLY_EFFORT (assertion matched $CONFIG_EFFORT_LABEL top-level; other config layers not resolved)" >&2
+else
+  describe "effort" "$EFFORT" "model_reasoning_effort" >&2
+fi
 # Tier has no per-task flag — always inherited — so show what will apply.
 # Profile/overlay mechanics have changed across Codex CLI versions; rather
 # than guess which scheme is installed, the labels above say plainly that

@@ -78,6 +78,22 @@ expect_file_line() { # $1=file $2=exact line $3=description
   fi
 }
 
+expect_no_file_line() { # $1=file $2=exact line $3=description
+  if [[ -f "$1" ]] && LC_ALL=C grep -qxF -- "$2" "$1"; then
+    fail "$3 (unexpected exact line '$2' in $1)"
+  else
+    pass "$3"
+  fi
+}
+
+expect_missing_file() { # $1=file $2=description
+  if [[ -e "$1" ]]; then
+    fail "$2 (unexpected file: $1)"
+  else
+    pass "$2"
+  fi
+}
+
 skip_checks() { # $@=descriptions; marked skipped so counts stay stable
   local description
   for description in "$@"; do
@@ -95,6 +111,12 @@ run_case() { # $1=name, remaining args=command
   else
     CASE_STATUS=$?
   fi
+}
+
+run_case_in_dir() { # $1=name $2=working directory, remaining args=command
+  local name="$1" directory="$2"
+  shift 2
+  run_case "$name" bash -c 'cd "$1" && shift && exec "$@"' _ "$directory" "$@"
 }
 
 write_lines() { # $1=path, remaining args=lines
@@ -137,9 +159,13 @@ NO_CLAUDE_PATH="$NO_CLAUDE_BIN"
 
 NO_USAGE_COMPANION="$TMP_ROOT/no-usage/codex-companion.mjs"
 LIMITED_COMPANION="$TMP_ROOT/override/codex-companion.mjs"
-mkdir -p "$(dirname "$NO_USAGE_COMPANION")" "$(dirname "$LIMITED_COMPANION")"
+STANDARD_COMPANION="$TMP_ROOT/standard/codex-companion.mjs"
+mkdir -p "$(dirname "$NO_USAGE_COMPANION")" \
+  "$(dirname "$LIMITED_COMPANION")" "$(dirname "$STANDARD_COMPANION")"
 write_lines "$NO_USAGE_COMPANION" '// companion fixture without an effort usage string'
 write_lines "$LIMITED_COMPANION" '// usage: --effort <low|high>'
+write_lines "$STANDARD_COMPANION" \
+  '// usage: --effort <none|minimal|low|medium|high|xhigh>'
 
 # The external-tools scan needs a python3 with tomllib. Find one so the
 # detection-verdict cases run on any machine; without one they are skipped
@@ -182,6 +208,250 @@ write_lines "$CRASH_PYTHON_BIN/python3" \
   '[[ "${1:-}" == "-c" ]] && exit 0' \
   'exit 9'
 chmod +x "$CRASH_PYTHON_BIN/python3"
+
+# Config-only levels are assertions, not companion flags. The project-local
+# top-level key wins, with the global top-level key as fallback; every
+# unverifiable or mismatched outcome stops before node. All configs live under
+# TMP_ROOT so these checks never inspect or change the developer's real config.
+MAX_CONFIG_DIR="$TMP_ROOT/codex-home-effort-max"
+MISMATCH_CONFIG_DIR="$TMP_ROOT/codex-home-effort-mismatch"
+ABSENT_CONFIG_DIR="$TMP_ROOT/codex-home-effort-absent"
+MALFORMED_CONFIG_DIR="$TMP_ROOT/codex-home-effort-malformed"
+VARIANT_CONFIG_DIR="$TMP_ROOT/codex-home-effort-variant"
+MISSING_CONFIG_DIR="$TMP_ROOT/codex-home-effort-missing"
+REGRESSION_CONFIG_DIR="$TMP_ROOT/codex-home-effort-regression"
+PROJECT_MATCH_DIR="$TMP_ROOT/project-effort-match"
+PROJECT_MISMATCH_DIR="$TMP_ROOT/project-effort-mismatch"
+PROJECT_ABSENT_DIR="$TMP_ROOT/project-effort-absent"
+mkdir -p "$MAX_CONFIG_DIR" "$MISMATCH_CONFIG_DIR" "$ABSENT_CONFIG_DIR" \
+  "$MALFORMED_CONFIG_DIR" "$VARIANT_CONFIG_DIR" "$MISSING_CONFIG_DIR" \
+  "$REGRESSION_CONFIG_DIR" "$PROJECT_MATCH_DIR/.codex" \
+  "$PROJECT_MISMATCH_DIR/.codex" "$PROJECT_ABSENT_DIR"
+write_lines "$MAX_CONFIG_DIR/config.toml" 'model_reasoning_effort = "max"'
+write_lines "$MISMATCH_CONFIG_DIR/config.toml" 'model_reasoning_effort = "medium"'
+write_lines "$ABSENT_CONFIG_DIR/config.toml" 'model = "config-model"'
+write_lines "$MALFORMED_CONFIG_DIR/config.toml" 'model_reasoning_effort = "max'
+write_lines "$VARIANT_CONFIG_DIR/config.toml" 'model_reasoning_effort = "  mAx  "'
+write_lines "$PROJECT_MATCH_DIR/.codex/config.toml" 'model_reasoning_effort = "max"'
+write_lines "$PROJECT_MISMATCH_DIR/.codex/config.toml" 'model_reasoning_effort = "low"'
+
+if [[ -n "$TOML_PYTHON" ]]; then
+  MAX_NODE_LOG="$TMP_ROOT/effort-max.node"
+  run_case dispatch-effort-max env \
+    HOME="$HOME_DIR" CODEX_HOME="$MAX_CONFIG_DIR" \
+    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+    SELFTEST_NODE_LOG="$MAX_NODE_LOG" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort max
+  expect_status 0 "config-only max dispatch proceeds when config matches"
+  expect_first_line "$MAX_NODE_LOG" "$STANDARD_COMPANION" \
+    "config-only max dispatch reaches node"
+  expect_no_file_line "$MAX_NODE_LOG" "--effort" \
+    "config-only max is not forwarded to the companion"
+  expect_output "effort: max (assertion matched config.toml top-level; other config layers not resolved)" \
+    "config-only max summary qualifies the matched global top-level assertion"
+  expect_no_output "inherited from config.toml; verified" \
+    "config-only max summary does not claim unqualified verification"
+
+  PROJECT_MATCH_NODE_LOG="$TMP_ROOT/effort-project-match.node"
+  run_case_in_dir dispatch-effort-project-match "$PROJECT_MATCH_DIR" env \
+    HOME="$HOME_DIR" CODEX_HOME="$MISMATCH_CONFIG_DIR" \
+    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+    SELFTEST_NODE_LOG="$PROJECT_MATCH_NODE_LOG" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort max
+  expect_status 0 "matching project config-only effort takes precedence over global mismatch"
+  expect_first_line "$PROJECT_MATCH_NODE_LOG" "$STANDARD_COMPANION" \
+    "matching project config-only effort reaches node"
+  expect_no_file_line "$PROJECT_MATCH_NODE_LOG" "--effort" \
+    "matching project config-only effort is not forwarded"
+  expect_output "effort: max (assertion matched project .codex/config.toml top-level; other config layers not resolved)" \
+    "project config-only summary qualifies the matched project top-level assertion"
+
+  PROJECT_MISMATCH_NODE_LOG="$TMP_ROOT/effort-project-mismatch.node"
+  run_case_in_dir dispatch-effort-project-mismatch "$PROJECT_MISMATCH_DIR" env \
+    HOME="$HOME_DIR" CODEX_HOME="$MAX_CONFIG_DIR" \
+    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+    SELFTEST_NODE_LOG="$PROJECT_MISMATCH_NODE_LOG" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort max
+  expect_status 2 "project config-only mismatch fails despite matching global config"
+  expect_output "project-effort-mismatch/.codex/config.toml has top-level model_reasoning_effort = 'low'" \
+    "project config-only mismatch identifies the winning project value"
+  expect_missing_file "$PROJECT_MISMATCH_NODE_LOG" \
+    "project config-only mismatch dispatches nothing"
+
+  PROJECT_ABSENT_NODE_LOG="$TMP_ROOT/effort-project-absent.node"
+  run_case_in_dir dispatch-effort-project-absent "$PROJECT_ABSENT_DIR" env \
+    HOME="$HOME_DIR" CODEX_HOME="$MAX_CONFIG_DIR" \
+    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+    SELFTEST_NODE_LOG="$PROJECT_ABSENT_NODE_LOG" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort max
+  expect_status 0 "absent project config falls through to matching global effort"
+  expect_first_line "$PROJECT_ABSENT_NODE_LOG" "$STANDARD_COMPANION" \
+    "global fallback after absent project config reaches node"
+  expect_no_file_line "$PROJECT_ABSENT_NODE_LOG" "--effort" \
+    "global fallback config-only effort is not forwarded"
+  expect_output "effort: max (assertion matched config.toml top-level; other config layers not resolved)" \
+    "global fallback summary qualifies the matched global top-level assertion"
+
+  MISMATCH_NODE_LOG="$TMP_ROOT/effort-mismatch.node"
+  run_case dispatch-effort-mismatch env \
+    HOME="$HOME_DIR" CODEX_HOME="$MISMATCH_CONFIG_DIR" \
+    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+    SELFTEST_NODE_LOG="$MISMATCH_NODE_LOG" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort max
+  expect_status 2 "config-only max fails closed when config says medium"
+  expect_output "requested config-only effort 'max'" \
+    "config-only mismatch names the requested level"
+  expect_output "model_reasoning_effort = 'medium'" \
+    "config-only mismatch names the actual level"
+  expect_missing_file "$MISMATCH_NODE_LOG" \
+    "config-only mismatch dispatches nothing"
+
+  ABSENT_NODE_LOG="$TMP_ROOT/effort-absent.node"
+  run_case dispatch-effort-absent env \
+    HOME="$HOME_DIR" CODEX_HOME="$ABSENT_CONFIG_DIR" \
+    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+    SELFTEST_NODE_LOG="$ABSENT_NODE_LOG" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort max
+  expect_status 2 "config-only max fails closed when the config key is absent"
+  expect_output "top-level model_reasoning_effort is absent" \
+    "config-only absent-key failure identifies what could not be determined"
+  expect_missing_file "$ABSENT_NODE_LOG" \
+    "config-only absent-key failure dispatches nothing"
+
+  MALFORMED_NODE_LOG="$TMP_ROOT/effort-malformed.node"
+  run_case dispatch-effort-malformed env \
+    HOME="$HOME_DIR" CODEX_HOME="$MALFORMED_CONFIG_DIR" \
+    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+    SELFTEST_NODE_LOG="$MALFORMED_NODE_LOG" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort max
+  expect_status 2 "config-only max fails closed on malformed TOML"
+  expect_output "is not valid TOML" \
+    "config-only malformed failure identifies the parse problem"
+  expect_missing_file "$MALFORMED_NODE_LOG" \
+    "config-only malformed failure dispatches nothing"
+
+  SPACED_MAX_NODE_LOG="$TMP_ROOT/effort-spaced-max.node"
+  run_case dispatch-effort-spaced-max env \
+    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_CONFIG_DIR" \
+    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+    SELFTEST_NODE_LOG="$SPACED_MAX_NODE_LOG" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort '  MAX  '
+  expect_status 0 "config-only effort trims and folds case on flag and config"
+  expect_no_file_line "$SPACED_MAX_NODE_LOG" "--effort" \
+    "normalized config-only effort is not forwarded"
+  expect_output "effort: max (assertion matched config.toml top-level; other config layers not resolved)" \
+    "normalized config-only effort reports the canonical global assertion"
+
+  MIXED_MAX_NODE_LOG="$TMP_ROOT/effort-mixed-max.node"
+  run_case dispatch-effort-mixed-max env \
+    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_CONFIG_DIR" \
+    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+    SELFTEST_NODE_LOG="$MIXED_MAX_NODE_LOG" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest --effort Max
+  expect_status 0 "config-only mixed-case Max resolves like max"
+  expect_no_file_line "$MIXED_MAX_NODE_LOG" "--effort" \
+    "mixed-case config-only effort is not forwarded"
+
+  ENV_MAX_NODE_LOG="$TMP_ROOT/effort-env-max.node"
+  run_case dispatch-effort-env-max env \
+    HOME="$HOME_DIR" CODEX_HOME="$MAX_CONFIG_DIR" CODEX_LOOP_EFFORT=max \
+    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+    SELFTEST_NODE_LOG="$ENV_MAX_NODE_LOG" PATH="$TOOLS_PATH" \
+    bash "$DISPATCH" --prompt selftest
+  expect_status 0 "CODEX_LOOP_EFFORT=max uses the config-only assertion path"
+  expect_no_file_line "$ENV_MAX_NODE_LOG" "--effort" \
+    "config-only effort from the environment is not forwarded"
+  expect_output "effort: max (assertion matched config.toml top-level; other config layers not resolved)" \
+    "config-only environment summary reports the matched global assertion"
+else
+  skip_checks \
+    "config-only max dispatch proceeds when config matches" \
+    "config-only max dispatch reaches node" \
+    "config-only max is not forwarded to the companion" \
+    "config-only max summary qualifies the matched global top-level assertion" \
+    "config-only max summary does not claim unqualified verification" \
+    "matching project config-only effort takes precedence over global mismatch" \
+    "matching project config-only effort reaches node" \
+    "matching project config-only effort is not forwarded" \
+    "project config-only summary qualifies the matched project top-level assertion" \
+    "project config-only mismatch fails despite matching global config" \
+    "project config-only mismatch identifies the winning project value" \
+    "project config-only mismatch dispatches nothing" \
+    "absent project config falls through to matching global effort" \
+    "global fallback after absent project config reaches node" \
+    "global fallback config-only effort is not forwarded" \
+    "global fallback summary qualifies the matched global top-level assertion" \
+    "config-only max fails closed when config says medium" \
+    "config-only mismatch names the requested level" \
+    "config-only mismatch names the actual level" \
+    "config-only mismatch dispatches nothing" \
+    "config-only max fails closed when the config key is absent" \
+    "config-only absent-key failure identifies what could not be determined" \
+    "config-only absent-key failure dispatches nothing" \
+    "config-only max fails closed on malformed TOML" \
+    "config-only malformed failure identifies the parse problem" \
+    "config-only malformed failure dispatches nothing" \
+    "config-only effort trims and folds case on flag and config" \
+    "normalized config-only effort is not forwarded" \
+    "normalized config-only effort reports the canonical global assertion" \
+    "config-only mixed-case Max resolves like max" \
+    "mixed-case config-only effort is not forwarded" \
+    "CODEX_LOOP_EFFORT=max uses the config-only assertion path" \
+    "config-only effort from the environment is not forwarded" \
+    "config-only environment summary reports the matched global assertion"
+fi
+
+MISSING_NODE_LOG="$TMP_ROOT/effort-missing.node"
+run_case dispatch-effort-missing env \
+  HOME="$HOME_DIR" CODEX_HOME="$MISSING_CONFIG_DIR" \
+  CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+  SELFTEST_NODE_LOG="$MISSING_NODE_LOG" PATH="$TOOLS_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort max
+expect_status 2 "config-only max fails closed when config.toml is missing"
+expect_output "requested config-only effort 'max'" \
+  "config-only missing-file failure names the requested level"
+expect_output "$MISSING_CONFIG_DIR/config.toml does not exist" \
+  "config-only missing-file failure identifies the missing config"
+expect_missing_file "$MISSING_NODE_LOG" \
+  "config-only missing-file failure dispatches nothing"
+
+NO_PARSER_NODE_LOG="$TMP_ROOT/effort-no-parser.node"
+run_case dispatch-effort-no-parser env \
+  HOME="$HOME_DIR" CODEX_HOME="$MAX_CONFIG_DIR" \
+  CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+  SELFTEST_NODE_LOG="$NO_PARSER_NODE_LOG" PATH="$NO_PYTHON_BIN" \
+  bash "$DISPATCH" --prompt selftest --effort max
+expect_status 2 "config-only max fails closed without a TOML parser"
+expect_output "python3 with tomllib (3.11+) is unavailable" \
+  "config-only no-parser failure explains what could not be determined"
+expect_missing_file "$NO_PARSER_NODE_LOG" \
+  "config-only no-parser failure dispatches nothing"
+
+XHIGH_NODE_LOG="$TMP_ROOT/effort-xhigh.node"
+run_case dispatch-effort-xhigh env \
+  HOME="$HOME_DIR" CODEX_HOME="$REGRESSION_CONFIG_DIR" \
+  CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+  SELFTEST_NODE_LOG="$XHIGH_NODE_LOG" PATH="$TEST_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort xhigh
+expect_status 0 "companion-accepted xhigh still dispatches"
+expect_file_line "$XHIGH_NODE_LOG" "--effort" \
+  "companion-accepted xhigh still forwards the effort flag"
+expect_file_line "$XHIGH_NODE_LOG" "xhigh" \
+  "companion-accepted xhigh still forwards its value"
+expect_output "effort: xhigh (explicit)" \
+  "companion-accepted xhigh is still reported as explicit"
+
+BOGUS_NODE_LOG="$TMP_ROOT/effort-bogus.node"
+run_case dispatch-effort-bogus env \
+  HOME="$HOME_DIR" CODEX_HOME="$REGRESSION_CONFIG_DIR" \
+  CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
+  SELFTEST_NODE_LOG="$BOGUS_NODE_LOG" PATH="$TEST_PATH" \
+  bash "$DISPATCH" --prompt selftest --effort bogus
+expect_status 2 "unknown effort bogus is still rejected"
+expect_output "invalid --effort 'bogus'; this companion accepts:" \
+  "unknown effort bogus keeps the invalid-effort diagnostic"
+expect_missing_file "$BOGUS_NODE_LOG" \
+  "unknown effort bogus dispatches nothing"
 
 # A grep miss must use the built-in effort snapshot, not terminate under -e.
 run_case dispatch-snapshot env \
