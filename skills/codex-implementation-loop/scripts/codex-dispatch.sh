@@ -429,31 +429,31 @@ for TOOL_CONFIG in "$CONFIG" "$PWD/.codex/config.toml"; do
     TOOL_SCAN_FAILED=1
   fi
 done
+# Disclose by default, refuse only on request. A check that blocks every
+# dispatch on a normal developer machine gets silenced wholesale, which
+# costs more than it protects — so the finding is surfaced every run and
+# `CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1` is there for repos where an external
+# side effect is genuinely unacceptable.
+BLOCK_EXTERNAL_TOOLS="${CODEX_LOOP_BLOCK_EXTERNAL_TOOLS:-0}"
 if [[ $TOOL_SCAN_FAILED -eq 1 ]]; then
-  if [[ "${CODEX_LOOP_ALLOW_EXTERNAL_TOOLS:-0}" != "1" ]]; then
-    echo "error: dispatch blocked — cannot verify the Codex config for external tools." >&2
-    echo "The scan needs python3 with tomllib (3.11+); regex scanning of TOML is unsound," >&2
-    echo "so an unverifiable config fails closed rather than passing unchecked." >&2
-    echo "Install a python3 that provides tomllib, or export" >&2
-    echo "CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 to acknowledge the unverified exposure once." >&2
+  if [[ "$BLOCK_EXTERNAL_TOOLS" == "1" ]]; then
+    echo "error: dispatch blocked (CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1) — cannot verify the Codex config." >&2
+    echo "The scan needs python3 with tomllib (3.11+); regex scanning of TOML is unsound." >&2
     exit 4
   fi
-  # A long-lived acknowledgment must not become silence: every dispatch on
-  # an unverified config says so, since nothing else will print it.
-  echo "note  : Codex config could not be verified; proceeding under explicit acknowledgment" >&2
+  echo "warn  : Codex config not verified (needs python3 with tomllib) — external tools unchecked" >&2
 fi
 if [[ -n "$EXTERNAL_TOOLS" ]]; then
-  if [[ "${CODEX_LOOP_ALLOW_EXTERNAL_TOOLS:-0}" != "1" ]]; then
-    echo "error: dispatch blocked — Codex config enables external tools that the exec sandbox does NOT cover (in any mode, including read-only):" >&2
-    printf '%s\n' "$EXTERNAL_TOOLS" | LC_ALL=C sed 's/^/  /' >&2
-    echo "Tool calls reach external services regardless of the filesystem sandbox." >&2
-    echo "This scan covers local config layers only — server-side-enabled Apps are invisible" >&2
-    echo "to it, so passing this check is not proof of isolation." >&2
-    echo "Export CODEX_LOOP_ALLOW_EXTERNAL_TOOLS=1 to acknowledge the exposure once for this" >&2
-    echo "environment, or disable those tools in the Codex config while running the loop." >&2
+  EXTERNAL_TOOL_LIST="$(printf '%s\n' "$EXTERNAL_TOOLS" \
+    | LC_ALL=C tr -d '[]' | LC_ALL=C paste -sd, - | LC_ALL=C sed 's/,/, /g')"
+  if [[ "$BLOCK_EXTERNAL_TOOLS" == "1" ]]; then
+    echo "error: dispatch blocked (CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1) — Codex config enables external tools:" >&2
+    echo "        $EXTERNAL_TOOL_LIST" >&2
+    echo "Disable them in the Codex config, or unset the variable to dispatch with a warning." >&2
     exit 4
   fi
-  echo "note  : external tools enabled in Codex config (outside the sandbox, all modes)" >&2
+  echo "warn  : external tools outside the sandbox: $EXTERNAL_TOOL_LIST" >&2
+  echo "        (prompt says not to use them; set CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 to refuse instead)" >&2
 fi
 
 ARGS=(task)
