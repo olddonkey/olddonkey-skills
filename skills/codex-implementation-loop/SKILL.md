@@ -31,7 +31,7 @@ The loop: **decompose → dispatch → review → iterate → gate → publish �
 
 Full rationale: [references/dials.md](references/dials.md). Compressed non-obvious parts:
 
-- `continuous` only fits stop=`merge` — anything earlier stacks unit 2 on unit 1's unmerged changes and breaks review attribution.
+- `continuous` fits stop=`merge` because **dependent** units otherwise stack on unit 1's unmerged changes and review attribution breaks. Independent units don't stack, so `pr` + `continuous` is a real option — the safer one for unattended runs.
 - **Fix lane drifts silently** — hand-fixing feels faster every time. `claude-trivial-ok` is a user-granted carve-out for mechanical one-liners only; logic always goes to Codex; the gate runs either way.
 - `deep` review = an independent subagent given the diff and repo but *not* your spec — for changes touching security, concurrency, migrations, auth, or money.
 - `skip` gate only for changes with no runtime surface. `read-only` dispatch is investigation — no diff, nothing to gate; useful as a first pass before an implement dispatch on gnarly problems.
@@ -41,7 +41,7 @@ Full rationale: [references/dials.md](references/dials.md). Compressed non-obvio
 Read the repo's calibration record first, then ask **one compact question** covering only what it doesn't already answer:
 
 1. **How far units travel** — the stop point. Needed before dispatch, not at publish: the unit branch is created at dispatch time, and asking at publish means the user waited through a whole dispatch/review/gate to be told you can't ship.
-2. **Whether to pause between units** — the cadence.
+2. **Whether to pause between units** — the cadence. If the user wants it left running unattended, say so here: it changes which answers are safe and adds a preflight (see Unattended runs).
 3. **Thinking level and speed** — effort and service tier, presenting the user's current `~/.codex/config.toml` values as the inherit option.
 
 The answers hold for the **entire invocation** — never re-ask per unit. A recorded calibration or standing preference ("always inherit, stop asking") suppresses the corresponding part; a fully recorded repo means no question at all. Everything else runs at its recommended default until something makes it worth raising.
@@ -135,12 +135,26 @@ Go exactly as far as the stop point says. **Check the branch before pushing** (`
 
 Note what landed and what's next somewhere durable (memory, progress doc, the plan) — a cross-session loop that isn't written down gets re-derived. Then take the next unit per the cadence dial.
 
+**After a unit lands, reset the ground before the next one**: sync the local base branch, branch the next unit from the *updated* base, and under `baseline` policy **regenerate the base-branch gate log** — the base it described no longer exists. A stale baseline is silently wrong in both directions: failures the new base introduced read as this unit's regressions, and a real regression can match a stale entry and pass.
+
 ## Stop and ask only when
 
 - **A human/manual ceiling** — credentials, policy, hardware only the user can provide; hand them a concrete checklist.
 - **A real design fork** — two defensible directions with materially different consequences; recommend, don't survey.
 - **Codex is stuck** — repeated failures, or tests unfixable without weakening them.
 - **A safety/correctness boundary would soften** — surface it even if the request implies it.
+
+## Unattended runs (overnight, nobody watching)
+
+Everything above assumes someone is there to answer; a run left going can't ask.
+
+**Preflight — before walking away.** All seven dials including `cadence=continuous`; the suite command and runtime; a freshly regenerated baseline log under `baseline` policy; and units specced far enough that none needs a design decision mid-run. Anything left unsettled becomes a parked unit.
+
+**Park, don't halt.** The four stop-and-ask cases above would otherwise spend the night on the first bad unit. Park instead: record what failed, what was tried, what you need from the user; leave the tree clean; take the next unit; report all parked units at the end. Only three things end the *run* — a ceiling blocking every remaining unit, broken gate infrastructure, or three consecutive units failing on one root cause (the premise is wrong, not the units).
+
+**Parking is the escape hatch, never weakening.** Widening the gate, skipping review, or hand-fixing to keep the night moving trades a caught bug for a shipped one — non-negotiables #1 and #4 hold as hard at 3am.
+
+**Stop point:** `pr` + `continuous` is the safer shape whenever units are independent — nothing stacks, and you wake to reviewable PRs. `merge` + `continuous` suits dependent units but lands every review miss in the trunk unwatched, so it needs non-negotiable #2's explicit authorization and makes the per-unit baseline regeneration in §7 mandatory. Rationale: [references/dials.md](references/dials.md).
 
 ## First-run calibration per repo
 
