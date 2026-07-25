@@ -85,6 +85,8 @@ The dispatch script prints a `warn` line naming any MCP servers or app connector
 
 Stuck jobs (no new events 15–20 min): cancel, read what it attempted, fix the prompt or split the unit — and kill orphaned test processes. Commands in [references/runtime.md](references/runtime.md).
 
+**Absence of events is ambiguous — the watcher itself can be the broken thing, and it fails looking exactly like a healthy one.** A watcher that latches "the newest job log" *after* dispatching latches the very log it was meant to follow, then waits forever for a newer one: zero events, indefinitely, indistinguishable from a job still working. Capture that marker **before** dispatching, or hardcode it. Two habits make the failure loud instead of silent: **no event within ~2 minutes of arming means suspect the watcher first**, and **never let the watcher be the only completion signal** — the dispatch invocation's own exit is the authoritative one, so watcher output is progress detail, not the thing you wait on.
+
 ## 3. Review the diff yourself
 
 Read the actual diff; the summary only says where to look. Check the whole tree (`git status --short`), not just files Codex mentioned. Recurring delegated-implementation failure modes, priority order — detail in [references/review-checklist.md](references/review-checklist.md):
@@ -121,7 +123,9 @@ Run the whole suite yourself via the bundled helper — piping through `tail` ma
 "${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log -- <test command>
 ```
 
-`baseline` policy = no new non-flake failures vs the base branch, decided mechanically (pytest identifiers include the exception class; skipped-only, empty, or unparseable runs fail closed). It proves *no new failure identifiers and that tests executed* — not that the full calibrated suite ran; check the reported count when it matters. On red, follow the on-red dial with capped attempts. Serial-vs-parallel, unreliable CI, no-suite repos, parser scope: [references/gate.md](references/gate.md).
+`baseline` policy = no new non-flake failures vs the base branch, decided mechanically (pytest identifiers include the exception class; skipped-only, empty, or unparseable runs fail closed). It proves *no new failure identifiers and that tests executed* — not that the full calibrated suite ran; check the reported count when it matters. **Triage red before applying the on-red dial — not every red is about your change.** Establish that the failure implicates the diff at all: does it happen *before* your code is loaded (a bootstrap failure names a missing env var, not a symbol)? is the failing package even in the deployed set? does it reproduce on the base branch untouched? Platform-injected environment you don't have locally, and tooling gaps, produce red that no amount of iterating on the unit will fix. Report those as environmental **with the evidence for why**, then run the deployable targets explicitly with the environment supplied — so the report states what actually passed instead of what you decided to overlook.
+
+On red that does implicate the diff, follow the on-red dial with capped attempts. Serial-vs-parallel, unreliable CI, no-suite repos, parser scope: [references/gate.md](references/gate.md).
 
 ## 6. Publish
 
