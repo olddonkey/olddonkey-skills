@@ -59,14 +59,27 @@ A unit = one coherent, reviewable change, roughly one PR. Settle the design **be
 # loads, making each command self-contained — no variable needs to survive
 # between Bash calls (env vars don't). In a non-substituting agent, replace it
 # manually with the skill's install directory.
-"${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt   # inherit config
+# State the intent settled at kickoff on EVERY dispatch — model names age, and
+# ambient config can change under you between one unit and the next.
 "${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
-    --model gpt-5.6-sol --effort xhigh    # explicit override (model names age)
+    --model gpt-5.6-sol --effort max      # model pins; max asserts against config
+"${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt   # inherit whatever config says
 ```
 
 **Dispatch through this script, never by calling the companion yourself.** Reaching past it into `codex-companion.mjs` looks equivalent and quietly gives up three things: the config-only effort assertion (§Runtime), the summary naming the model, effort and tier actually in force, and the external-tools scan. Observed cost of hand-rolling it for a whole run of units — every dispatch carried `--effort xhigh`, silently *overriding* a config that said `max`, and the CLI was meanwhile repointed at a different vendor's model through a local proxy without a single line of output saying so.
 
-That is the general shape, and it is worth stating as a rule of its own: **passing a flag is not automatically the safer choice.** A flag pins the value against ambient config drift, but only within what the flag can express — and the top effort settings are config-only, so passing *any* `--effort` guarantees you are below them. Read the config first, then decide **per knob** whether pinning or inheriting expresses the intent: model pins cleanly, effort pins only up to the companion-accepted set, tier cannot be pinned at all.
+**Name model and effort on every dispatch rather than inheriting silently.** Kickoff settles the intent once; each dispatch then states it, so config drift — or the CLI being repointed at another vendor's model, which is not hypothetical — cannot change what implements your units without saying so. The summary the script prints is the confirmation that the intent actually landed.
+
+How that intent is expressed differs per knob, and assuming a flag always pins is what makes this go wrong:
+
+| knob | expressing intent | if reality disagrees |
+| --- | --- | --- |
+| `--model` | a real pin | — |
+| `--effort` at companion-accepted levels | a real pin | **overrides a config set higher** |
+| `--effort max` (config-only levels) | an assertion — verifies config, then dispatches with no flag | **fails closed** rather than downgrading |
+| service tier | cannot be expressed at all | only visible in the printed summary |
+
+So **passing a flag is not automatically the safer choice**: the top effort settings are config-only, and passing *any* `--effort` below them guarantees you are below them. The config-only assertion is the stricter option precisely because it refuses to dispatch instead of quietly giving you less.
 
 Hygiene — each failure mode here is silent:
 
