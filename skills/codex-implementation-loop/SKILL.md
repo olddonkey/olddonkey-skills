@@ -87,6 +87,8 @@ Stuck jobs (no new events 15–20 min): cancel, read what it attempted, fix the 
 
 **Absence of events is ambiguous — the watcher itself can be the broken thing, and it fails looking exactly like a healthy one.** A watcher that latches "the newest job log" *after* dispatching latches the very log it was meant to follow, then waits forever for a newer one: zero events, indefinitely, indistinguishable from a job still working. Capture that marker **before** dispatching, or hardcode it. Two habits make the failure loud instead of silent: **no event within ~2 minutes of arming means suspect the watcher first**, and **never let the watcher be the only completion signal** — the dispatch invocation's own exit is the authoritative one, so watcher output is progress detail, not the thing you wait on.
 
+That last point also settles what the watcher should emit: **only the abnormal — a stall, a failed command, the watcher's own fault.** Since completion already arrives on its own, periodic "still working, N edits" pings carry no information you act on, and they are not free: each event is a conversation message that interrupts the user and leaves the exchange looking like it is waiting on them. A watcher that stays silent through a healthy run is working correctly.
+
 ## 3. Review the diff yourself
 
 Read the actual diff; the summary only says where to look. Check the whole tree (`git status --short`), not just files Codex mentioned. Recurring delegated-implementation failure modes, priority order — detail in [references/review-checklist.md](references/review-checklist.md):
