@@ -13,5 +13,14 @@ jobs:
           bash -n skills/codex-implementation-loop/scripts/codex-dispatch.sh
           bash -n skills/codex-implementation-loop/scripts/run-gate.sh
           bash -n skills/codex-implementation-loop/scripts/selftest.sh
+          bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh
+          bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
+      - name: Shared run-gate.sh must stay identical
+        run: |
+          diff -q \
+            skills/codex-implementation-loop/scripts/run-gate.sh \
+            cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh
       - name: Regression selftest
         run: bash skills/codex-implementation-loop/scripts/selftest.sh
+      - name: Cursor gate selftest
+        run: bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh

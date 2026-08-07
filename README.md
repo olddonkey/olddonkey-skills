@@ -13,9 +13,10 @@
 
 ---
 
-Two skills so far:
+Two Claude Code skills so far, plus a Cursor Plugin port of the implementation loop:
 
 - [`codex-implementation-loop`](#codex-implementation-loop) — delegate implementation to Codex without delegating judgment: Claude reviews the real diff, runs the full test gate, and ships only what it would sign its name to.
+- [`cursor-implementation-loop`](#cursor-implementation-loop) — Cursor Plugin port of `codex-implementation-loop`: the parent agent reviews, gates, and publishes; an implementer subagent writes code; `run-gate.sh` is shared verbatim.
 - [`web-slides`](#web-slides) — turn material or outlines into click-driven 16:9 HTML slide decks for live presenting, with 24 built-in themes and a presenter view that keeps speaker notes off the shared screen.
 
 ## Installation
@@ -52,6 +53,19 @@ ln -s ~/Documents/olddonkey-skills/skills/<skill-name> ~/.claude/skills/<skill-n
 ```
 
 If you created `~/.claude/skills` for the first time during an active Claude Code session, restart the session so the new top-level directory is discovered. If your agent does not follow symlinks in its skills directory, use the copy option and re-copy after `git pull`.
+
+### Cursor Plugin
+
+For Cursor, install [`cursor-implementation-loop`](#cursor-implementation-loop) as a local plugin (skills and agents together):
+
+```bash
+git clone https://github.com/olddonkey/olddonkey-skills
+ln -s "$(pwd)/olddonkey-skills/cursor-implementation-loop" \
+      ~/.cursor/plugins/local/cursor-implementation-loop
+# restart Cursor or run "Developer: Reload Window"
+```
+
+Team marketplaces (Teams/Enterprise) can import this repository directly: Dashboard → Plugins → Import from Repo. The Cursor marketplace manifest is [`.cursor-plugin/marketplace.json`](./.cursor-plugin/marketplace.json).
 
 ---
 
@@ -136,6 +150,18 @@ Model and effort inherit the user's Codex configuration unless explicitly overri
 - Other agents can reuse the workflow, but they need an adapter for their own dispatch runtime; `codex-dispatch.sh` currently discovers `codex-companion` inside Claude Code's plugin directories.
 - The scripts require Bash, Node.js, and common Unix command-line tools. They were developed on macOS.
 - Codex runs on the same checkout and machine-local environment as Claude Code. Its usage counts toward your ChatGPT or API limits; see [Codex pricing](https://developers.openai.com/codex/pricing).
+
+---
+
+## cursor-implementation-loop
+
+**Cursor Plugin port of [`codex-implementation-loop`](#codex-implementation-loop).**
+
+Same review-gated loop, adapted to Cursor's native subagents: the parent agent owns planning, diff review, the full test gate, and publication; a dedicated implementer subagent writes code. [`run-gate.sh`](./cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh) is shared verbatim with the Codex skill.
+
+Three Codex hard guarantees (read-only git for the implementer, fail-closed pre-dispatch checks, and per-dispatch model disclosure) have no native Cursor equivalent — they become procedure. Read [`references/cursor-runtime.md`](./cursor-implementation-loop/skills/cursor-implementation-loop/references/cursor-runtime.md) before relying on the loop unattended.
+
+Install and invoke details: [plugin README](./cursor-implementation-loop/README.md) · [`SKILL.md`](./cursor-implementation-loop/skills/cursor-implementation-loop/SKILL.md).
 
 ---
 

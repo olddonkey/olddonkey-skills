@@ -13,9 +13,10 @@
 
 ---
 
-目前包含两个 skill：
+目前包含两个 Claude Code skill，外加一个实现循环的 Cursor Plugin 移植版：
 
 - [`codex-implementation-loop`](#codex-implementation-loop) —— 把实现交给 Codex，但不把判断交出去：Claude 亲自审查真实 diff、跑全量测试门禁，只发布自己敢签名的改动。
+- [`cursor-implementation-loop`](#cursor-implementation-loop) —— `codex-implementation-loop` 的 Cursor Plugin 移植：父 agent 负责 review / 门禁 / 发布，implementer 子 agent 写代码；`run-gate.sh` 与 Codex 版逐字共享。
 - [`web-slides`](#web-slides) —— 把素材 / 提纲做成点击驱动的 16:9 HTML 幻灯片，用于现场放映；内置 24 套主题 + 演讲者窗口，投屏时口播稿对观众不可见。
 
 ## 安装
@@ -52,6 +53,19 @@ ln -s ~/Documents/olddonkey-skills/skills/<skill-name> ~/.claude/skills/<skill-n
 ```
 
 如果你在 Claude Code 会话运行期间第一次创建 `~/.claude/skills` 顶层目录，请重启会话，让新目录被发现。若你的 agent 不跟随 skills 目录里的软链接，请使用拷贝方式，并在 `git pull` 后重新拷贝。
+
+### Cursor Plugin
+
+在 Cursor 中，将 [`cursor-implementation-loop`](#cursor-implementation-loop) 安装为本地插件（skill 与 agents 一起安装）：
+
+```bash
+git clone https://github.com/olddonkey/olddonkey-skills
+ln -s "$(pwd)/olddonkey-skills/cursor-implementation-loop" \
+      ~/.cursor/plugins/local/cursor-implementation-loop
+# 重启 Cursor，或执行 "Developer: Reload Window"
+```
+
+Teams / Enterprise 可在 Dashboard → Plugins → Import from Repo 直接导入本仓库。Cursor marketplace 清单见 [`.cursor-plugin/marketplace.json`](./.cursor-plugin/marketplace.json)。
 
 ---
 
@@ -136,6 +150,18 @@ Skill 为首次运行准备了保守选择；只需要指定你想改变的部�
 - 其他 agent 可以复用这套工作流，但需要为自己的派发运行时编写适配层；`codex-dispatch.sh` 目前会在 Claude Code 的插件目录中寻找 `codex-companion`。
 - 脚本需要 Bash、Node.js 和常见 Unix 命令行工具；开发环境为 macOS。
 - Codex 与 Claude Code 使用同一份 checkout 和本机环境，其用量计入你的 ChatGPT 或 API 限额；详见 [Codex 定价](https://developers.openai.com/codex/pricing)。
+
+---
+
+## cursor-implementation-loop
+
+**[`codex-implementation-loop`](#codex-implementation-loop) 的 Cursor Plugin 移植版。**
+
+同一套 review-gated 循环，适配 Cursor 原生子 agent：父 agent 负责规划、diff review、全量测试门禁和发布；专用 implementer 子 agent 写代码。[`run-gate.sh`](./cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh) 与 Codex skill 逐字共享。
+
+Codex 侧的三项硬保证（implementer 只读 git、派发前 fail-closed 检查、每次派发披露 model）在 Cursor 没有原生等价物，因此改为流程约束。无人值守使用前请先阅读 [`references/cursor-runtime.md`](./cursor-implementation-loop/skills/cursor-implementation-loop/references/cursor-runtime.md)。
+
+安装与调用详见 [插件 README](./cursor-implementation-loop/README.md) · [`SKILL.md`](./cursor-implementation-loop/skills/cursor-implementation-loop/SKILL.md)。
 
 ---
 
