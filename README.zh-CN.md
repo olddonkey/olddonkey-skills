@@ -56,16 +56,33 @@ ln -s ~/Documents/olddonkey-skills/skills/<skill-name> ~/.claude/skills/<skill-n
 
 ### Cursor Plugin
 
-在 Cursor 中，将 [`cursor-implementation-loop`](#cursor-implementation-loop) 安装为本地插件（skill 与 agents 一起安装）：
+在 Cursor 中，将 [`cursor-implementation-loop`](#cursor-implementation-loop) 安装为本地插件（skill 与 agents 一起装）。个人电脑或临时 / 公司电脑都适用——只写你 home 目录：
 
 ```bash
 git clone https://github.com/olddonkey/olddonkey-skills
+mkdir -p ~/.cursor/plugins/local
 ln -s "$(pwd)/olddonkey-skills/cursor-implementation-loop" \
       ~/.cursor/plugins/local/cursor-implementation-loop
 # 重启 Cursor，或执行 "Developer: Reload Window"
 ```
 
-Teams / Enterprise 可在 Dashboard → Plugins → Import from Repo 直接导入本仓库。Cursor marketplace 清单见 [`.cursor-plugin/marketplace.json`](./.cursor-plugin/marketplace.json)。
+装完自检一次：
+
+```bash
+bash ~/.cursor/plugins/local/cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
+# 期望输出：selftest: PASS (122 checks)
+```
+
+若本地插件目录不可用，改用裸文件拷贝——两步都要做：
+
+```bash
+mkdir -p ~/.cursor/skills ~/.cursor/agents
+cp -R olddonkey-skills/cursor-implementation-loop/skills/cursor-implementation-loop \
+      ~/.cursor/skills/
+cp olddonkey-skills/cursor-implementation-loop/agents/*.md ~/.cursor/agents/
+```
+
+软链安装的卸载：`rm ~/.cursor/plugins/local/cursor-implementation-loop`，再删掉 clone。Teams / Enterprise 也可 Dashboard → Plugins → Import from Repo。清单见 [`.cursor-plugin/marketplace.json`](./.cursor-plugin/marketplace.json)。
 
 ---
 
@@ -157,11 +174,53 @@ Skill 为首次运行准备了保守选择；只需要指定你想改变的部�
 
 **[`codex-implementation-loop`](#codex-implementation-loop) 的 Cursor Plugin 移植版。**
 
-同一套 review-gated 循环，适配 Cursor 原生子 agent：父 agent 负责规划、diff review、全量测试门禁和发布；专用 implementer 子 agent 写代码。[`run-gate.sh`](./cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh) 与 Codex skill 逐字共享。
+同一套 review-gated 循环，适配 Cursor 原生子 agent：**父 agent** 负责规划、diff review、全量测试门禁和发布；专用 **implementer** 子 agent 写代码。[`run-gate.sh`](./cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh) 与 Codex skill 逐字共享。
 
 Codex 侧的三项硬保证（implementer 只读 git、派发前 fail-closed 检查、每次派发披露 model）在 Cursor 没有原生等价物，因此改为流程约束。无人值守使用前请先阅读 [`references/cursor-runtime.md`](./cursor-implementation-loop/skills/cursor-implementation-loop/references/cursor-runtime.md)。
 
-安装与调用详见 [插件 README](./cursor-implementation-loop/README.md) · [`SKILL.md`](./cursor-implementation-loop/skills/cursor-implementation-loop/SKILL.md)。
+### 怎么教 agent 用
+
+先完成 [Cursor Plugin](#cursor-plugin) 安装，在**目标仓库**里打开 Cursor，然后用自然语言或显式斜杠命令触发。父 agent 应加载 [`SKILL.md`](./cursor-implementation-loop/skills/cursor-implementation-loop/SKILL.md) 并按它执行——你不必把整套流程再说一遍。
+
+显式调用：
+
+```text
+/cursor-implementation-loop 按 docs/my-plan.md 逐单元推进。
+停在 PR；门禁用 baseline；review 深度 standard；进入下一单元前先确认。
+```
+
+自然语言（也会选中该 skill）：
+
+> 用 cursor-implementation-loop 实现 PLAN.md 的第 1 项。编码交给 implementer 子 agent；你亲自审查真实 diff、跑全量门禁，并开 PR。进入下一单元前先确认。
+
+第一次运行时，父 agent 会先问一个 kickoff 问题（停点、节奏、用哪个 implementer / model），再进入循环。建议在 `agents/loop-implementer.md` 里 pin 一个与父 agent 不同的 model——自带的 `model: inherit` 只是占位，等于放弃模型配对价值。
+
+### Agent 必须怎么做
+
+**拆单元 → 派发 → review → 迭代 → 测试门禁 → 发布 → 下一个**
+
+1. **父 agent** 把 plan / spec / TODO 拆成一个完整、可 review 的单元，派发前先定设计。
+2. **父 agent** 用完整 unit contract 前台派发 `loop-implementer`（为何改、改什么、跑哪些聚焦测试、不许碰什么）。implementer 不得碰 git，默认也不得跑全量测试套件。
+3. **父 agent** 阅读真实 diff 和整个工作树；implementer 的汇报只是主张，不是证据。问题通过**恢复同一个 agent** 送回迭代。
+4. **父 agent** 用 `scripts/run-gate.sh` 亲自跑全套测试，并按选定门禁策略判定。
+5. **父 agent** 停在配置好的边界：工作树、commit、PR，或经明确授权的 merge。禁止直推默认分支。
+
+review 或门禁发现的 bug 也要作为新单元交给 implementer——父 agent 不要为了「更快」偷偷手改。
+
+### 控制项（与 Codex skill 同一套 dial）
+
+| 控制项 | 常见首次选择 | 用途 |
+| --- | --- | --- |
+| 停点 | `pr` | 工作树、commit、PR，或授权后的 merge |
+| 派发模式 | `implement` | 实际实现或只读调查 |
+| 门禁策略 | `baseline` | 不新增非 flaky 失败、零失败，或对无运行时影响的改动跳过 |
+| 门禁变红 | `stop` | 停给用户，或有限次数迭代 |
+| Review 深度 | `standard` | light / standard / 独立 deep（`loop-independent-reviewer`） |
+| 节奏 | `confirm` | 单元间确认，或在发布策略允许时连续推进 |
+| 修复通道 | `implementer` | 修复默认走 implementer；可选允许琐碎机械一行改动 |
+| Implementer 模型 | 已 pin 的变体 | 由用户决定——不要静默假定 `inherit` |
+
+完整工作流：[插件 README](./cursor-implementation-loop/README.md) · [`SKILL.md`](./cursor-implementation-loop/skills/cursor-implementation-loop/SKILL.md) · [cursor-runtime.md](./cursor-implementation-loop/skills/cursor-implementation-loop/references/cursor-runtime.md)。
 
 ---
 
