@@ -56,16 +56,33 @@ If you created `~/.claude/skills` for the first time during an active Claude Cod
 
 ### Cursor Plugin
 
-For Cursor, install [`cursor-implementation-loop`](#cursor-implementation-loop) as a local plugin (skills and agents together):
+For Cursor, install [`cursor-implementation-loop`](#cursor-implementation-loop) as a local plugin (skills and agents together). Works on a personal machine or a temporary/company laptop — only writes under your home directory:
 
 ```bash
 git clone https://github.com/olddonkey/olddonkey-skills
+mkdir -p ~/.cursor/plugins/local
 ln -s "$(pwd)/olddonkey-skills/cursor-implementation-loop" \
       ~/.cursor/plugins/local/cursor-implementation-loop
 # restart Cursor or run "Developer: Reload Window"
 ```
 
-Team marketplaces (Teams/Enterprise) can import this repository directly: Dashboard → Plugins → Import from Repo. The Cursor marketplace manifest is [`.cursor-plugin/marketplace.json`](./.cursor-plugin/marketplace.json).
+Verify once:
+
+```bash
+bash ~/.cursor/plugins/local/cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
+# expect: selftest: PASS (122 checks)
+```
+
+If local plugins are blocked, copy bare files instead — both steps are required:
+
+```bash
+mkdir -p ~/.cursor/skills ~/.cursor/agents
+cp -R olddonkey-skills/cursor-implementation-loop/skills/cursor-implementation-loop \
+      ~/.cursor/skills/
+cp olddonkey-skills/cursor-implementation-loop/agents/*.md ~/.cursor/agents/
+```
+
+To uninstall a symlink install: `rm ~/.cursor/plugins/local/cursor-implementation-loop` and delete the clone. Team marketplaces (Teams/Enterprise) can also import this repository: Dashboard → Plugins → Import from Repo. Manifest: [`.cursor-plugin/marketplace.json`](./.cursor-plugin/marketplace.json).
 
 ---
 
@@ -157,11 +174,53 @@ Model and effort inherit the user's Codex configuration unless explicitly overri
 
 **Cursor Plugin port of [`codex-implementation-loop`](#codex-implementation-loop).**
 
-Same review-gated loop, adapted to Cursor's native subagents: the parent agent owns planning, diff review, the full test gate, and publication; a dedicated implementer subagent writes code. [`run-gate.sh`](./cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh) is shared verbatim with the Codex skill.
+Same review-gated loop, adapted to Cursor's native subagents: the **parent agent** owns planning, diff review, the full test gate, and publication; a dedicated **implementer** subagent writes code. [`run-gate.sh`](./cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh) is shared verbatim with the Codex skill.
 
 Three Codex hard guarantees (read-only git for the implementer, fail-closed pre-dispatch checks, and per-dispatch model disclosure) have no native Cursor equivalent — they become procedure. Read [`references/cursor-runtime.md`](./cursor-implementation-loop/skills/cursor-implementation-loop/references/cursor-runtime.md) before relying on the loop unattended.
 
-Install and invoke details: [plugin README](./cursor-implementation-loop/README.md) · [`SKILL.md`](./cursor-implementation-loop/skills/cursor-implementation-loop/SKILL.md).
+### Tell the agent how to use it
+
+Install the plugin (see [Cursor Plugin](#cursor-plugin)), open the **target repository** in Cursor, then ask in natural language or with an explicit slash command. The parent agent should load [`SKILL.md`](./cursor-implementation-loop/skills/cursor-implementation-loop/SKILL.md) and follow it — you do not need to restate the whole workflow.
+
+Explicit:
+
+```text
+/cursor-implementation-loop work through docs/my-plan.md unit by unit.
+Stop at a PR, baseline gate, standard review, confirm before the next unit.
+```
+
+Natural language (also selects the skill):
+
+> Use cursor-implementation-loop to implement item 1 in PLAN.md. Hand coding to the implementer subagent; you review the real diff, run the full gate yourself, and open a PR. Confirm before the next unit.
+
+On the first run the parent asks one kickoff question (stop point, cadence, which implementer / model), then loops. Prefer pinning a different model on `agents/loop-implementer.md` than the parent — `model: inherit` is only a placeholder and forfeits the pairing value.
+
+### What the agent must do
+
+**decompose → dispatch → review → iterate → gate → publish → next**
+
+1. **Parent** turns a plan/spec/TODO into one coherent, reviewable unit and settles design before dispatch.
+2. **Parent** dispatches `loop-implementer` as a foreground Task with a full unit contract (why, exact changes, focused tests, what not to touch). The implementer must not touch git and must not run the full suite by default.
+3. **Parent** reads the actual diff and whole working tree; the implementer's report is a claim, not evidence. Findings go back by **resuming the same agent**.
+4. **Parent** runs the full suite via `scripts/run-gate.sh` and judges under the chosen gate policy.
+5. **Parent** stops at the configured boundary: working tree, commit, PR, or an explicitly authorized merge. Never push straight to the default branch.
+
+Bug fixes found at review or at the gate are new units for the implementer — the parent should not quietly hand-edit "because it's faster."
+
+### Controls (same dials as the Codex skill)
+
+| Control | Typical first run | Purpose |
+| --- | --- | --- |
+| Stop point | `pr` | Working tree, commit, PR, or merge when authorized |
+| Dispatch mode | `implement` | Implementation run or read-only investigation |
+| Gate policy | `baseline` | No new non-flake failures, zero failures, or skip for non-runtime changes |
+| On gate red | `stop` | Stop for the user or iterate a bounded number of times |
+| Review depth | `standard` | Light, standard, or independent deep review (`loop-independent-reviewer`) |
+| Cadence | `confirm` | Confirm between units or continue when publish strategy allows |
+| Fix lane | `implementer` | Route fixes through the implementer; optional trivial one-liner carve-out |
+| Implementer model | pinned variant | User's call — never silently assume `inherit` |
+
+Full workflow: [plugin README](./cursor-implementation-loop/README.md) · [`SKILL.md`](./cursor-implementation-loop/skills/cursor-implementation-loop/SKILL.md) · [cursor-runtime.md](./cursor-implementation-loop/skills/cursor-implementation-loop/references/cursor-runtime.md).
 
 ---
 

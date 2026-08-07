@@ -68,13 +68,29 @@ implementer.
   `references/cursor-runtime.md` — read that file before relying on the
   loop unattended.
 
-## Invoke
+## Invoke / teach the agent
+
+Open the **target repo** in Cursor (after install), then either:
 
 ```text
-/cursor-implementation-loop work through docs/my-plan.md unit by unit
+/cursor-implementation-loop work through docs/my-plan.md unit by unit.
+Stop at a PR, baseline gate, standard review, confirm before the next unit.
 ```
 
-The skill asks one kickoff question (stop point, cadence, implementer
-choice), then loops. `disable-model-invocation` is intentionally not set —
-mentions of "hand this plan to the implementer" and similar phrasing let the
-agent select the skill on its own; invoke explicitly when in doubt.
+or natural language:
+
+> Use cursor-implementation-loop to implement item 1 in PLAN.md. Hand coding
+> to the implementer; you review the real diff, run the full gate, and open
+> a PR.
+
+The parent agent loads `SKILL.md` and runs the loop — you should not restate
+the whole workflow. It asks one kickoff question (stop point, cadence,
+implementer choice), then: **decompose → dispatch → review → iterate →
+gate → publish → next**. Parent owns judgment/gate/publish; only
+`loop-implementer` writes code; resume the same agent for iteration.
+
+`disable-model-invocation` is intentionally not set — mentions of "hand this
+plan to the implementer" and similar phrasing let the agent select the skill
+on its own; invoke explicitly when in doubt. For temporary machines, a
+symlink under `~/.cursor/plugins/local/` is enough; remove the symlink +
+clone to uninstall.
