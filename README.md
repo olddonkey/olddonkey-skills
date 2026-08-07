@@ -60,13 +60,13 @@ For Cursor, install [`cursor-implementation-loop`](#cursor-implementation-loop) 
 
 ```bash
 git clone https://github.com/olddonkey/olddonkey-skills
-mkdir -p ~/.cursor/plugins/local
-ln -s "$(pwd)/olddonkey-skills/cursor-implementation-loop" \
-      ~/.cursor/plugins/local/cursor-implementation-loop
+bash olddonkey-skills/cursor-implementation-loop/scripts/install-local.sh
 # restart Cursor or run "Developer: Reload Window"
 ```
 
-Verify once:
+The script copies into `~/.cursor/plugins/local/cursor-implementation-loop` and runs the gate selftest. Pass `--link` to symlink the clone instead, or `--force` to replace an existing install.
+
+Verify (already run by the installer unless you pass `--skip-selftest`):
 
 ```bash
 bash ~/.cursor/plugins/local/cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
@@ -82,7 +82,7 @@ cp -R olddonkey-skills/cursor-implementation-loop/skills/cursor-implementation-l
 cp olddonkey-skills/cursor-implementation-loop/agents/*.md ~/.cursor/agents/
 ```
 
-To uninstall a symlink install: `rm ~/.cursor/plugins/local/cursor-implementation-loop` and delete the clone. Team marketplaces (Teams/Enterprise) can also import this repository: Dashboard → Plugins → Import from Repo. Manifest: [`.cursor-plugin/marketplace.json`](./.cursor-plugin/marketplace.json).
+To uninstall: `rm -rf ~/.cursor/plugins/local/cursor-implementation-loop` (also delete the clone if you used `--link`). Team marketplaces (Teams/Enterprise) can also import this repository: Dashboard → Plugins → Import from Repo. Manifest: [`.cursor-plugin/marketplace.json`](./.cursor-plugin/marketplace.json).
 
 ---
 

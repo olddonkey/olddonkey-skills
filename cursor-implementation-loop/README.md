@@ -23,10 +23,14 @@ only what it would sign its name to.
 
 ```bash
 git clone https://github.com/olddonkey/olddonkey-skills
-ln -s "$(pwd)/olddonkey-skills/cursor-implementation-loop" \
-      ~/.cursor/plugins/local/cursor-implementation-loop
+bash olddonkey-skills/cursor-implementation-loop/scripts/install-local.sh
 # restart Cursor or run "Developer: Reload Window"
 ```
+
+The installer copies into `~/.cursor/plugins/local/cursor-implementation-loop`
+(default) and runs the gate selftest. Use `--link` to symlink the clone
+instead (faster iteration; if Cursor ignores the plugin, re-run with
+`--copy --force`). Use `--force` to replace an existing install.
 
 Team marketplaces (Teams/Enterprise) can import this repository directly:
 Dashboard → Plugins → Import from Repo.
@@ -36,10 +40,11 @@ Dashboard → Plugins → Import from Repo.
 `agents/*.md` into `~/.cursor/agents/`. Both steps are required — the skill
 orchestrates, the agents implement and review.
 
-After installing, verify the gate on your machine:
+After installing, verify the gate on your machine (the installer already does
+this unless you pass `--skip-selftest`):
 
 ```bash
-bash skills/cursor-implementation-loop/scripts/gate-selftest.sh
+bash ~/.cursor/plugins/local/cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
 # expect: selftest: PASS (122 checks)
 ```
 
