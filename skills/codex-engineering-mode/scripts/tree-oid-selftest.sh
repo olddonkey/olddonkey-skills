@@ -49,6 +49,11 @@ pass() {
   printf 'ok %d - %s\n' "$CHECKS" "$1"
 }
 
+skip() { # $1=description $2=reason
+  CHECKS=$((CHECKS + 1))
+  printf 'ok %d - %s (skipped: %s)\n' "$CHECKS" "$1" "$2"
+}
+
 fail() {
   CHECKS=$((CHECKS + 1))
   FAILED_CHECKS=$((FAILED_CHECKS + 1))
@@ -235,6 +240,57 @@ expect_oid_equal() { # $1=expected $2=actual $3=description
   fi
 }
 
+index_path_has_flag() { # $1=repo $2=path $3=assume-unchanged|skip-worktree
+  local repo="$1" candidate="$2" flag_kind="$3"
+  local records="$TMP_ROOT/index-flag-query"
+  local record tag path
+
+  git -C "$repo" ls-files -v -z > "$records" || return 2
+  while IFS= read -r -d '' record; do
+    [[ ${#record} -ge 3 && "${record:1:1}" == " " ]] || return 2
+    tag="${record:0:1}"
+    path="${record:2}"
+    [[ "$path" == "$candidate" ]] || continue
+    case "$flag_kind" in
+      assume-unchanged)
+        [[ "$tag" == [[:lower:]] ]]
+        return
+        ;;
+      skip-worktree)
+        [[ "$tag" == "S" || "$tag" == "s" ]]
+        return
+        ;;
+      *)
+        return 2
+        ;;
+    esac
+  done < "$records"
+  return 1
+}
+
+expect_real_index_flag() { # $1=repo $2=path $3=flag $4=description
+  if index_path_has_flag "$1" "$2" "$3"; then
+    pass "$4"
+  else
+    fail "$4"
+  fi
+}
+
+index_has_skip_worktree_entry() { # $1=repo
+  local records="$TMP_ROOT/index-skip-worktree-query"
+  local record tag
+
+  git -C "$1" ls-files -v -z > "$records" || return 2
+  while IFS= read -r -d '' record; do
+    [[ ${#record} -ge 3 && "${record:1:1}" == " " ]] || return 2
+    tag="${record:0:1}"
+    if [[ "$tag" == "S" || "$tag" == "s" ]]; then
+      return 0
+    fi
+  done < "$records"
+  return 1
+}
+
 # 1. Normal HEAD: success, with tracked content affecting the identity.
 CASE_ROOT="$TMP_ROOT/case-1-normal"
 REPO="$CASE_ROOT/repo"
@@ -359,7 +415,7 @@ run_tree "tracked-ignored-before" "$REPO" "$REPO" "$TEMP_BASE"
 expect_status 0 "tracked-but-ignored baseline succeeds"
 expect_oid_output "tracked-but-ignored baseline"
 IGNORED_BEFORE="$RUN_OID"
-printf 'tracked ignored version two\n' > "$REPO/ignored.txt"
+printf 'tracked ignored version two with a different size\n' > "$REPO/ignored.txt"
 run_tree "tracked-ignored-after" "$REPO" "$REPO" "$TEMP_BASE"
 expect_status 0 "modified tracked-but-ignored file succeeds"
 expect_oid_output "modified tracked-but-ignored file"
@@ -380,7 +436,7 @@ run_tree "force-added-ignored-before" "$REPO" "$REPO" "$TEMP_BASE"
 expect_status 0 "force-added ignored baseline succeeds"
 expect_oid_output "force-added ignored baseline"
 FORCE_IGNORED_BEFORE="$RUN_OID"
-printf 'v2\n' > "$REPO/secret.txt"
+printf 'version two\n' > "$REPO/secret.txt"
 run_tree "force-added-ignored-after" "$REPO" "$REPO" "$TEMP_BASE"
 expect_status 0 "modified force-added ignored file succeeds"
 expect_oid_output "modified force-added ignored file"
@@ -414,7 +470,8 @@ git -C "$REPO" -c protocol.file.allow=always submodule update -q \
 run_tree "clean-registered-submodule" "$REPO" "$REPO" "$TEMP_BASE"
 expect_status 0 "clean registered submodule succeeds"
 expect_oid_output "clean registered submodule"
-printf 'inner dirty\n' > "$REPO/outer module/nested module/payload.txt"
+printf 'inner dirty with a different size\n' \
+  > "$REPO/outer module/nested module/payload.txt"
 run_tree "dirty-nested-submodule" "$REPO" "$REPO" "$TEMP_BASE"
 expect_status 3 "dirty nested submodule exits with binding-unavailable status 3"
 expect_empty_stdout "dirty nested submodule"
@@ -438,6 +495,104 @@ expect_empty_stdout "untracked embedded repository"
 expect_one_line_stderr \
   "binding unavailable: a submodule has modifications or an unregistered embedded repository may be present" \
   "untracked embedded repository"
+
+# 10. Assume-unchanged regular files are rebound in the throwaway index only.
+CASE_ROOT="$TMP_ROOT/case-10-assume-unchanged"
+REPO="$CASE_ROOT/repo"
+TEMP_BASE="$CASE_ROOT/script-tmp"
+init_repo "$REPO"
+printf 'version one\n' > "$REPO/a.txt"
+commit_all "$REPO" "initial"
+git -C "$REPO" update-index --assume-unchanged -- a.txt || \
+  abort "cannot mark a.txt assume-unchanged"
+run_tree "assume-unchanged-before" "$REPO" "$REPO" "$TEMP_BASE"
+expect_status 0 "assume-unchanged regular-file baseline succeeds"
+expect_oid_output "assume-unchanged regular-file baseline"
+ASSUME_UNCHANGED_BEFORE="$RUN_OID"
+printf 'version two with a different size\n' > "$REPO/a.txt"
+run_tree "assume-unchanged-after" "$REPO" "$REPO" "$TEMP_BASE"
+expect_status 0 "modified assume-unchanged regular file succeeds"
+expect_oid_output "modified assume-unchanged regular file"
+ASSUME_UNCHANGED_AFTER="$RUN_OID"
+expect_oid_changed "$ASSUME_UNCHANGED_BEFORE" "$ASSUME_UNCHANGED_AFTER" \
+  "modifying an assume-unchanged regular file changes the tree OID"
+expect_real_index_flag "$REPO" "a.txt" "assume-unchanged" \
+  "assume-unchanged regular-file runs preserve the flag in the real index"
+
+# 11. Skip-worktree entries make worktree binding unavailable.
+CASE_ROOT="$TMP_ROOT/case-11-skip-worktree"
+REPO="$CASE_ROOT/repo"
+TEMP_BASE="$CASE_ROOT/script-tmp"
+init_repo "$REPO"
+printf 'version one\n' > "$REPO/b.txt"
+commit_all "$REPO" "initial"
+git -C "$REPO" update-index --skip-worktree -- b.txt || \
+  abort "cannot mark b.txt skip-worktree"
+printf 'version two\n' > "$REPO/b.txt"
+run_tree "skip-worktree-file" "$REPO" "$REPO" "$TEMP_BASE"
+expect_status 3 "modified skip-worktree file exits with binding-unavailable status 3"
+expect_empty_stdout "modified skip-worktree file"
+expect_one_line_stderr \
+  "binding unavailable: an index entry carries skip-worktree (sparse checkout or manual suppression); worktree binding is unavailable" \
+  "modified skip-worktree file"
+expect_real_index_flag "$REPO" "b.txt" "skip-worktree" \
+  "skip-worktree run preserves the flag in the real index"
+
+# 12. An assume-unchanged gitlink cannot bypass the submodule dirty check.
+CASE_ROOT="$TMP_ROOT/case-12-assume-unchanged-gitlink"
+SUBMODULE_SOURCE="$CASE_ROOT/submodule-source"
+REPO="$CASE_ROOT/repo"
+TEMP_BASE="$CASE_ROOT/script-tmp"
+init_repo "$SUBMODULE_SOURCE"
+printf 'clean\n' > "$SUBMODULE_SOURCE/payload.txt"
+commit_all "$SUBMODULE_SOURCE" "submodule initial"
+init_repo "$REPO"
+printf 'superproject\n' > "$REPO/superproject.txt"
+commit_all "$REPO" "superproject initial"
+git -C "$REPO" -c protocol.file.allow=always submodule add -q \
+  "$SUBMODULE_SOURCE" module || abort "cannot add gitlink suppression fixture"
+commit_all "$REPO" "add submodule"
+git -C "$REPO" update-index --assume-unchanged -- module || \
+  abort "cannot mark the gitlink assume-unchanged"
+printf 'dirty\n' > "$REPO/module/payload.txt"
+run_tree "assume-unchanged-gitlink" "$REPO" "$REPO" "$TEMP_BASE"
+expect_status 3 "assume-unchanged gitlink exits with binding-unavailable status 3"
+expect_empty_stdout "assume-unchanged gitlink"
+expect_one_line_stderr \
+  "binding unavailable: an index gitlink carries assume-unchanged; worktree binding is unavailable" \
+  "assume-unchanged gitlink"
+expect_real_index_flag "$REPO" "module" "assume-unchanged" \
+  "assume-unchanged gitlink run preserves the flag in the real index"
+
+# 13. Sparse checkout's skip-worktree entries also fail closed.
+CASE_ROOT="$TMP_ROOT/case-13-sparse-checkout"
+REPO="$CASE_ROOT/repo"
+TEMP_BASE="$CASE_ROOT/script-tmp"
+init_repo "$REPO"
+mkdir -p "$REPO/included" "$REPO/excluded" || \
+  abort "cannot create sparse-checkout fixture directories"
+printf 'included\n' > "$REPO/included/kept.txt"
+printf 'excluded\n' > "$REPO/excluded/outside.txt"
+commit_all "$REPO" "sparse-checkout fixture"
+if git -C "$REPO" sparse-checkout init --cone \
+    > "$CASE_ROOT/sparse-setup.out" 2> "$CASE_ROOT/sparse-setup.err" &&
+   git -C "$REPO" sparse-checkout set included \
+    >> "$CASE_ROOT/sparse-setup.out" 2>> "$CASE_ROOT/sparse-setup.err"; then
+  if index_has_skip_worktree_entry "$REPO"; then
+    pass "sparse-checkout fixture carries skip-worktree entries"
+  else
+    abort "sparse-checkout setup succeeded without skip-worktree entries"
+  fi
+  run_tree "sparse-checkout" "$REPO" "$REPO" "$TEMP_BASE"
+  expect_status 3 "sparse checkout exits with binding-unavailable status 3"
+  expect_empty_stdout "sparse checkout"
+  expect_one_line_stderr \
+    "binding unavailable: an index entry carries skip-worktree (sparse checkout or manual suppression); worktree binding is unavailable" \
+    "sparse checkout"
+else
+  skip "sparse-checkout skip-worktree regression" \
+    "installed Git does not support the cone-mode sparse-checkout setup used by this test"
+fi
 
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' \
