@@ -51,8 +51,10 @@ Three exclusions must be disclosed:
 - Submodule internals appear only as gitlink SHAs.
 - The identity inherits ordinary git stat-cache semantics: like `git add
   -A` itself, a racy same-size edit with a restored mtime between the two
-  snapshot runs can in principle evade change detection. This matches
-  literal git behavior and is not stronger.
+  snapshot runs can in principle evade change detection, and neither
+  snapshot is atomic against concurrent filesystem writers. This matches
+  literal git behavior and is not stronger. Requires git ≥ 2.36 (boolean
+  `core.fsmonitor` support in the audits).
 
 Worktree binding is unavailable when any of these conditions exists:
 
