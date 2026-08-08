@@ -60,13 +60,13 @@ ln -s ~/Documents/olddonkey-skills/skills/<skill-name> ~/.claude/skills/<skill-n
 
 ```bash
 git clone https://github.com/olddonkey/olddonkey-skills
-mkdir -p ~/.cursor/plugins/local
-ln -s "$(pwd)/olddonkey-skills/cursor-implementation-loop" \
-      ~/.cursor/plugins/local/cursor-implementation-loop
+bash olddonkey-skills/cursor-implementation-loop/scripts/install-local.sh
 # 重启 Cursor，或执行 "Developer: Reload Window"
 ```
 
-装完自检一次：
+脚本默认拷贝到 `~/.cursor/plugins/local/cursor-implementation-loop` 并跑门禁自检。想软链 clone 用 `--link`；覆盖已有安装用 `--force`。
+
+装完自检（安装脚本默认会跑，除非加了 `--skip-selftest`）：
 
 ```bash
 bash ~/.cursor/plugins/local/cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
@@ -82,7 +82,7 @@ cp -R olddonkey-skills/cursor-implementation-loop/skills/cursor-implementation-l
 cp olddonkey-skills/cursor-implementation-loop/agents/*.md ~/.cursor/agents/
 ```
 
-软链安装的卸载：`rm ~/.cursor/plugins/local/cursor-implementation-loop`，再删掉 clone。Teams / Enterprise 也可 Dashboard → Plugins → Import from Repo。清单见 [`.cursor-plugin/marketplace.json`](./.cursor-plugin/marketplace.json)。
+卸载：`rm -rf ~/.cursor/plugins/local/cursor-implementation-loop`（若用了 `--link` 再删掉 clone）。Teams / Enterprise 也可 Dashboard → Plugins → Import from Repo。清单见 [`.cursor-plugin/marketplace.json`](./.cursor-plugin/marketplace.json)。
 
 ## 计划先行 vs 目标先行
 
