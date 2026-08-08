@@ -183,17 +183,24 @@ cleanup_case_home() { # $1=HOME $2=description prefix
 git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
   abort "selftest source is not a Git worktree: $SCRIPT_DIR"
 
-# 1. Fresh install uses the local-plugin symlink and prints verification/usage.
+# 1. Fresh default install copies the skill and agents, without a plugin link.
 CASE_HOME="$(new_home fresh)"
 CHECKOUT="$CASE_HOME/checkout"
-PLUGIN_LINK="$CASE_HOME/.cursor/plugins/local/cursor-implementation-loop"
+COPY_SKILL="$CASE_HOME/.cursor/skills/cursor-implementation-loop"
 run_installer fresh "$CASE_HOME" "$CHECKOUT"
-expect_status 0 "fresh symlink install succeeds"
-expect_symlink_target "$PLUGIN_LINK" \
-  "$CHECKOUT/cursor-implementation-loop" \
-  "fresh install links the plugin into its managed checkout"
-expect_output "$CASE_STDOUT" "Install mode: symlink" \
-  "fresh install reports symlink mode"
+expect_status 0 "fresh default install succeeds"
+expect_directory "$COPY_SKILL" \
+  "default mode installs the skill directory"
+expect_file "$COPY_SKILL/scripts/gate-selftest.sh" \
+  "default mode installs the gate selftest"
+expect_file "$CASE_HOME/.cursor/agents/loop-implementer.md" \
+  "default mode installs loop-implementer.md"
+expect_file "$CASE_HOME/.cursor/agents/loop-independent-reviewer.md" \
+  "default mode installs loop-independent-reviewer.md"
+expect_missing "$CASE_HOME/.cursor/plugins/local/cursor-implementation-loop" \
+  "default mode does not create a plugin symlink"
+expect_output "$CASE_STDOUT" "Install mode: bare copy" \
+  "fresh default install reports bare-copy mode"
 expect_output "$CASE_STDOUT" "selftest: PASS" \
   "fresh install prints the installed gate selftest PASS line"
 expect_output "$CASE_STDOUT" 'Developer: Reload Window' \
@@ -202,18 +209,44 @@ expect_output "$CASE_STDOUT" '/cursor-implementation-loop' \
   "fresh install prints the slash-command next step"
 expect_output "$CASE_STDOUT" 'model: inherit' \
   "fresh install recommends replacing the inherited implementer model"
+expect_output "$CASE_STDOUT" 'Want true plugin form?' \
+  "default install offers the true-plugin UI flow"
+expect_output "$CASE_STDOUT" 'Customize → Plugins' \
+  "default install names the Cursor Plugins page"
+expect_output "$CASE_STDOUT" "    $CHECKOUT" \
+  "default install prints the checkout root to select"
+expect_output "$CASE_STDOUT" '.cursor-plugin/marketplace.json' \
+  "default install identifies the bundled marketplace manifest"
+expect_output "$CASE_STDOUT" \
+  'rm -rf "$HOME/.cursor/skills/cursor-implementation-loop"' \
+  "default install prints the standalone-skill removal command"
+expect_output "$CASE_STDOUT" \
+  'rm -f "$HOME/.cursor/agents/loop-implementer.md" "$HOME/.cursor/agents/loop-independent-reviewer.md"' \
+  "default install prints the standalone-agent removal command"
 assert_no_installer_temps "$CASE_HOME" "fresh install"
 cleanup_case_home "$CASE_HOME" "fresh install"
 
-# 2. A separate sandbox is installed once, then rerun to exercise git pull.
+# 2. --link retains the local-plugin symlink behavior, including idempotency.
 CASE_HOME="$(new_home idempotent)"
 CHECKOUT="$CASE_HOME/checkout"
 PLUGIN_LINK="$CASE_HOME/.cursor/plugins/local/cursor-implementation-loop"
-run_installer idempotent-setup "$CASE_HOME" "$CHECKOUT"
-expect_status 0 "idempotent fixture's initial install succeeds"
+run_installer idempotent-setup "$CASE_HOME" "$CHECKOUT" --link
+expect_status 0 "--link fixture's initial install succeeds"
+expect_symlink_target "$PLUGIN_LINK" \
+  "$CHECKOUT/cursor-implementation-loop" \
+  "--link installs the plugin from its managed checkout"
+expect_output "$CASE_STDOUT" "Install mode: symlink" \
+  "--link install reports symlink mode"
+expect_output "$CASE_STDOUT" "selftest: PASS" \
+  "--link install verifies the installed plugin"
+expect_output "$CASE_STDOUT" \
+  'Warning: current Cursor builds may not scan plugins/local.' \
+  "--link warns about current Cursor discovery behavior"
+expect_output "$CASE_STDOUT" "and select $CHECKOUT." \
+  "--link points the current Cursor UI alternative at the checkout root"
 FIRST_LINK_TARGET="$(readlink "$PLUGIN_LINK" 2>/dev/null || true)"
 FIRST_LINK_INODE="$(ls -di "$PLUGIN_LINK" 2>/dev/null | awk '{print $1}')"
-run_installer idempotent-rerun "$CASE_HOME" "$CHECKOUT"
+run_installer idempotent-rerun "$CASE_HOME" "$CHECKOUT" --link
 expect_status 0 "idempotent rerun succeeds"
 SECOND_LINK_TARGET="$(readlink "$PLUGIN_LINK" 2>/dev/null || true)"
 SECOND_LINK_INODE="$(ls -di "$PLUGIN_LINK" 2>/dev/null | awk '{print $1}')"
@@ -234,27 +267,29 @@ expect_output "$CASE_STDOUT" 'selftest: PASS' \
 assert_no_installer_temps "$CASE_HOME" "idempotent rerun"
 cleanup_case_home "$CASE_HOME" "idempotent rerun"
 
-# 3. --copy installs the skill and exactly the two shipped agents as bare files.
+# 3. --copy remains an explicit alias for the default bare-copy mode.
 CASE_HOME="$(new_home copy)"
 CHECKOUT="$CASE_HOME/checkout"
 COPY_SKILL="$CASE_HOME/.cursor/skills/cursor-implementation-loop"
 run_installer copy "$CASE_HOME" "$CHECKOUT" --copy
-expect_status 0 "forced bare-copy install succeeds"
-expect_directory "$COPY_SKILL" "bare-copy mode installs the skill directory"
+expect_status 0 "explicit --copy install succeeds"
+expect_directory "$COPY_SKILL" "--copy installs the skill directory"
 expect_file "$COPY_SKILL/scripts/gate-selftest.sh" \
-  "bare-copy mode installs the gate selftest"
+  "--copy installs the gate selftest"
 expect_file "$CASE_HOME/.cursor/agents/loop-implementer.md" \
-  "bare-copy mode installs loop-implementer.md"
+  "--copy installs loop-implementer.md"
 expect_file "$CASE_HOME/.cursor/agents/loop-independent-reviewer.md" \
-  "bare-copy mode installs loop-independent-reviewer.md"
+  "--copy installs loop-independent-reviewer.md"
 expect_missing "$CASE_HOME/.cursor/plugins/local/cursor-implementation-loop" \
-  "forced bare-copy mode does not create a plugin symlink"
+  "--copy does not create a plugin symlink"
 expect_output "$CASE_STDOUT" 'Install mode: bare copy' \
-  "forced bare-copy install reports its mode"
+  "--copy reports bare-copy mode"
 expect_output "$CASE_STDOUT" 'selftest: PASS' \
-  "bare-copy install verifies the installed skill"
-assert_no_installer_temps "$CASE_HOME" "bare-copy install"
-cleanup_case_home "$CASE_HOME" "bare-copy install"
+  "--copy verifies the installed skill"
+expect_output "$CASE_STDOUT" 'Want true plugin form?' \
+  "--copy prints the same plugin-form hint as the default"
+assert_no_installer_temps "$CASE_HOME" "--copy install"
+cleanup_case_home "$CASE_HOME" "--copy install"
 
 # 4. A real directory at the plugin name is a conflict and must survive.
 CASE_HOME="$(new_home conflict)"
@@ -263,7 +298,7 @@ CONFLICT="$CASE_HOME/.cursor/plugins/local/cursor-implementation-loop"
 mkdir -p "$CONFLICT" || abort "cannot create conflict fixture"
 printf 'keep me\n' > "$CONFLICT/sentinel.txt" || \
   abort "cannot create conflict sentinel"
-run_installer conflict "$CASE_HOME" "$CHECKOUT"
+run_installer conflict "$CASE_HOME" "$CHECKOUT" --link
 expect_nonzero "plugin-name conflict fails closed"
 expect_directory "$CONFLICT" "plugin-name conflict remains a real directory"
 expect_file "$CONFLICT/sentinel.txt" "plugin-name conflict keeps its contents"
@@ -327,7 +362,7 @@ assert_no_installer_temps "$CASE_HOME" "unknown flag"
 cleanup_case_home "$CASE_HOME" "unknown flag"
 
 # The total assertion counts itself, matching the repository's selftest style.
-EXPECTED_FINAL_CHECKS=48
+EXPECTED_FINAL_CHECKS=64
 CASE_STDOUT=""
 CASE_STDERR=""
 if [[ $((CHECKS + 1)) -eq $EXPECTED_FINAL_CHECKS ]]; then

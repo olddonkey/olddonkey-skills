@@ -58,19 +58,21 @@ If you created `~/.claude/skills` for the first time during an active Claude Cod
 
 ### Cursor Plugin
 
-For Cursor, install [`cursor-implementation-loop`](#cursor-implementation-loop) as a local plugin (skills and agents together). Works on a personal machine or a temporary/company laptop — only writes under your home directory:
+For Cursor, the one-line installer copies the standalone skill and both agents into Cursor's discovered directories. It works on all current builds and on a personal or temporary/company machine — it only writes under your home directory:
 
-One-line install:
+One-line install (bare-copy default):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/olddonkey/olddonkey-skills/main/install-cursor.sh | bash
 ```
 
-On machines where Cursor local plugins are blocked, force bare-copy mode with `--copy`:
+`--copy` remains accepted as an explicit alias. For older Cursor builds that scan `plugins/local`, opt into the managed-checkout symlink with `--link`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/olddonkey/olddonkey-skills/main/install-cursor.sh | bash -s -- --copy
+curl -fsSL https://raw.githubusercontent.com/olddonkey/olddonkey-skills/main/install-cursor.sh | bash -s -- --link
 ```
+
+Want true plugin form? In Cursor's Customize → Plugins page, press "+ Add" and select `$OLDDONKEY_SKILLS_DIR` (default: `~/olddonkey-skills`); that checkout root contains `.cursor-plugin/marketplace.json`, which registers the `cursor-implementation-loop` plugin. Then remove the standalone copies to avoid double-loading.
 
 Alternatively, install the local-plugin symlink manually:
 
@@ -89,7 +91,7 @@ bash ~/.cursor/plugins/local/cursor-implementation-loop/skills/cursor-implementa
 # expect: selftest: PASS (122 checks)
 ```
 
-If local plugins are blocked, copy bare files instead — both steps are required:
+To reproduce the default install manually, copy bare files — both steps are required:
 
 ```bash
 mkdir -p ~/.cursor/skills ~/.cursor/agents
