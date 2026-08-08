@@ -1,7 +1,11 @@
 # Engineering Mode v1
 
-Status: r12 — executing. r7 accepted at Codex plan-review round 6; user
-approved. PRs 1–2 merged 2026-08-08 (#21 → 94c2ff8, #22 → 022c81b).
+Status: r13 — executing PR 3. r7 accepted at Codex plan-review round 6;
+user approved. PRs 1–2 merged 2026-08-08 (#21 → 94c2ff8, #22 → 022c81b).
+**The §3 dogfood milestone was explicitly waived by the user on
+2026-08-08** ("我需要 PR3 也做给 cursor") — a plan-owner decision, recorded
+as history, not authority. The four dogfood exercises remain worthwhile
+post-port; they no longer gate it.
 Post-merge holistic review rounds, each with reproduced defects fixed and
 merged: round 1 → #23 (2b9df5c); round 2, index-flag suppression → #24
 (0075927); round 3, suppression inside registered submodules → #25
@@ -9,7 +13,8 @@ merged: round 1 → #23 (2b9df5c); round 2, index-flag suppression → #24
 Round 5 found no exploitable binding defect and cleared the mechanism for
 dogfooding; this revision closes its documentation-drift findings. The
 selftest suite covers all suppression variants recursively and asserts
-its own final count. PR 3 remains blocked on the §3 dogfood milestone.
+its own final count. PR 3 (Cursor port) is in flight on
+`engineering-mode-pr3` under the waiver above.
 Scope: `olddonkey/olddonkey-skills`
 Shape: goal-first wrapper over the existing implementation-loop kernels
 Executable by: codex-implementation-loop, unit by unit, after approval

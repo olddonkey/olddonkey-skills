@@ -13,11 +13,11 @@
 
 ---
 
-Three Claude Code skills so far, plus a Cursor Plugin port of the implementation loop:
+Three Claude Code skills so far, plus a Cursor Plugin that ships two engineering skills:
 
 - [`codex-implementation-loop`](#codex-implementation-loop) — delegate implementation to Codex without delegating judgment: Claude reviews the real diff, runs the full test gate, and ships only what it would sign its name to.
 - `codex-engineering-mode` — goal-first engineering ownership: investigate, design, and plan, then drive `codex-implementation-loop` unit by unit.
-- [`cursor-implementation-loop`](#cursor-implementation-loop) — Cursor Plugin port of `codex-implementation-loop`: the parent agent reviews, gates, and publishes; an implementer subagent writes code; `run-gate.sh` is shared verbatim.
+- [`cursor-implementation-loop`](#cursor-implementation-loop) — Cursor Plugin with the plan-first implementation loop and the goal-first `cursor-engineering-mode` wrapper; the parent agent reviews, gates, and publishes while an implementer subagent writes code.
 - [`web-slides`](#web-slides) — turn material or outlines into click-driven 16:9 HTML slide decks for live presenting, with 24 built-in themes and a presenter view that keeps speaker notes off the shared screen.
 
 ## Installation
@@ -106,9 +106,9 @@ To uninstall a symlink install: `rm ~/.cursor/plugins/local/cursor-implementatio
 
 **Plan-first (unchanged):** approve a plan, then invoke the implementation loop directly: `Use codex-implementation-loop to implement PLAN.md unit by unit.`
 
-**Goal-first:** give engineering mode an outcome; it investigates the root cause, chooses a design, writes the plan, then drives that same loop: `Use codex-engineering-mode to fix duplicate fulfillment caused by webhook replay.`
+**Goal-first:** give engineering mode an outcome; it investigates the root cause, chooses a design, writes the plan, then drives that same loop. Codex: `Use codex-engineering-mode to fix duplicate fulfillment caused by webhook replay.` Cursor: `Use cursor-engineering-mode to fix duplicate fulfillment caused by webhook replay.`
 
-Prerequisites: `codex-engineering-mode` → `codex-implementation-loop` → official Codex companion plugin.
+Codex prerequisites: `codex-engineering-mode` → `codex-implementation-loop` → official Codex companion plugin. On Cursor, `cursor-engineering-mode` ships inside the `cursor-implementation-loop` plugin, so there is no separate install; existing installs receive it on update by rerunning the one-line installer or running `git pull` in the managed checkout.
 
 ---
 
@@ -198,7 +198,7 @@ Model and effort inherit the user's Codex configuration unless explicitly overri
 
 ## cursor-implementation-loop
 
-**Cursor Plugin port of [`codex-implementation-loop`](#codex-implementation-loop).**
+**Cursor Plugin shipping two skills: the plan-first `cursor-implementation-loop` and the goal-first `cursor-engineering-mode` wrapper.**
 
 Same review-gated loop, adapted to Cursor's native subagents: the **parent agent** owns planning, diff review, the full test gate, and publication; a dedicated **implementer** subagent writes code. [`run-gate.sh`](./cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh) is shared verbatim with the Codex skill.
 

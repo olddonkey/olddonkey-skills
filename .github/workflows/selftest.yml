@@ -22,6 +22,46 @@ jobs:
           diff -q \
             skills/codex-implementation-loop/scripts/run-gate.sh \
             cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh
+      - name: Shared engineering-mode files must stay identical
+        run: |
+          diff -q \
+            skills/codex-engineering-mode/references/playbooks/bug-fix.md \
+            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/bug-fix.md
+          diff -q \
+            skills/codex-engineering-mode/references/playbooks/feature.md \
+            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/feature.md
+          diff -q \
+            skills/codex-engineering-mode/references/playbooks/investigation.md \
+            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/investigation.md
+          diff -q \
+            skills/codex-engineering-mode/references/playbooks/performance.md \
+            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/performance.md
+          diff -q \
+            skills/codex-engineering-mode/references/playbooks/prototype.md \
+            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/prototype.md
+          diff -q \
+            skills/codex-engineering-mode/references/playbooks/refactor.md \
+            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/refactor.md
+          diff -q \
+            skills/codex-engineering-mode/references/verification-contract.md \
+            cursor-implementation-loop/skills/cursor-engineering-mode/references/verification-contract.md
+          diff -q \
+            skills/codex-engineering-mode/references/handoff.md \
+            cursor-implementation-loop/skills/cursor-engineering-mode/references/handoff.md
+          diff -q \
+            skills/codex-engineering-mode/scripts/tree-oid.sh \
+            cursor-implementation-loop/skills/cursor-engineering-mode/scripts/tree-oid.sh
+          diff -q \
+            skills/codex-engineering-mode/scripts/tree-oid-selftest.sh \
+            cursor-implementation-loop/skills/cursor-engineering-mode/scripts/tree-oid-selftest.sh
+      - name: Shared playbooks stay platform-neutral
+        run: |
+          ! grep -rnwE 'read-only|investigate' \
+            skills/codex-engineering-mode/references/playbooks/ \
+            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/
+          ! grep -rn 'codex-dispatch' \
+            skills/codex-engineering-mode/references/playbooks/ \
+            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/
       - name: Regression selftest
         run: bash skills/codex-implementation-loop/scripts/selftest.sh
       - name: Cursor gate selftest
@@ -59,6 +99,7 @@ jobs:
           from pathlib import Path
 
           paths = sorted(Path("skills").glob("*/SKILL.md"))
+          paths.extend(sorted(Path("cursor-implementation-loop/skills").glob("*/SKILL.md")))
           errors = []
           if not paths:
               errors.append("frontmatter: no skills/*/SKILL.md files found")
@@ -119,6 +160,8 @@ jobs:
 
           root = Path("skills/codex-engineering-mode")
           paths = [root / "SKILL.md", *sorted((root / "references").glob("**/*.md"))]
+          cursor_root = Path("cursor-implementation-loop/skills/cursor-engineering-mode")
+          paths.extend([cursor_root / "SKILL.md", *sorted((cursor_root / "references").glob("**/*.md"))])
           patterns = (
               re.compile(r"!?\[[^\]\n]*\]\((<[^>\n]+>|[^)\n]+)\)"),
               re.compile(r"^\s*\[[^\]\n]+\]:\s*(<[^>\n]+>|\S+)", re.MULTILINE),
@@ -155,3 +198,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Tree OID selftest
         run: bash skills/codex-engineering-mode/scripts/tree-oid-selftest.sh
+      - name: Cursor tree OID selftest
+        run: bash cursor-implementation-loop/skills/cursor-engineering-mode/scripts/tree-oid-selftest.sh
