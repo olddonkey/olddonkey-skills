@@ -1,6 +1,6 @@
 # Engineering Mode v1
 
-Status: r11 — executing. r7 accepted at Codex plan-review round 6; user
+Status: r12 — executing. r7 accepted at Codex plan-review round 6; user
 approved. PRs 1–2 merged 2026-08-08 (#21 → 94c2ff8, #22 → 022c81b).
 Post-merge holistic review rounds, each with reproduced defects fixed and
 merged: round 1 → #23 (2b9df5c); round 2, index-flag suppression → #24
