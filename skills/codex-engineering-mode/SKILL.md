@@ -32,7 +32,7 @@ description: 'Own goal-first engineering outcomes: investigate, find root cause,
 
 **Keep run state outside the target worktree:** `$(git rev-parse --git-common-dir)/olddonkey-loop/<run-slug>/`. Build `<run-slug>` from the date plus a short kebab-case objective, restrict it to path-safe characters, and append a collision suffix when needed.
 
-Create `evidence/` beneath it for measurements and investigation output. Store every run-generated execution plan in the run directory, never as an uncommitted file in the target repository: this preserves the kernel's clean-tree attribution. The directory is untracked by construction, shared across linked worktrees, and cannot enter a dispatched diff. The cross-session handoff document lives in this same directory.
+Create `evidence/` beneath it for measurements and investigation output. Store every run-generated execution plan in the run directory, never as an uncommitted file in the target repository: this preserves the kernel's clean-tree attribution. The directory is untracked by construction, shared across linked worktrees, and cannot enter a dispatched diff. The [cross-session handoff document](references/handoff.md) lives in this same directory.
 
 **Plan-only output is a deliverable, not run state.** Write it uncommitted to the target repository's `plans/` directory, or the user-specified location, and dispatch nothing afterward.
 
