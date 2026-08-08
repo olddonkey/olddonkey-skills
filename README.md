@@ -84,6 +84,14 @@ cp olddonkey-skills/cursor-implementation-loop/agents/*.md ~/.cursor/agents/
 
 To uninstall a symlink install: `rm ~/.cursor/plugins/local/cursor-implementation-loop` and delete the clone. Team marketplaces (Teams/Enterprise) can also import this repository: Dashboard → Plugins → Import from Repo. Manifest: [`.cursor-plugin/marketplace.json`](./.cursor-plugin/marketplace.json).
 
+## Plan-first vs goal-first
+
+**Plan-first (unchanged):** approve a plan, then invoke the implementation loop directly: `Use codex-implementation-loop to implement PLAN.md unit by unit.`
+
+**Goal-first:** give engineering mode an outcome; it investigates the root cause, chooses a design, writes the plan, then drives that same loop: `Use codex-engineering-mode to fix duplicate fulfillment caused by webhook replay.`
+
+Prerequisites: `codex-engineering-mode` → `codex-implementation-loop` → official Codex companion plugin.
+
 ---
 
 ## codex-implementation-loop

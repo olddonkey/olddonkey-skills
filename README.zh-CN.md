@@ -84,6 +84,14 @@ cp olddonkey-skills/cursor-implementation-loop/agents/*.md ~/.cursor/agents/
 
 软链安装的卸载：`rm ~/.cursor/plugins/local/cursor-implementation-loop`，再删掉 clone。Teams / Enterprise 也可 Dashboard → Plugins → Import from Repo。清单见 [`.cursor-plugin/marketplace.json`](./.cursor-plugin/marketplace.json)。
 
+## 计划先行 vs 目标先行
+
+**计划先行（现有行为不变）：**先审阅并批准计划，再直接调用实现循环：`使用 codex-implementation-loop 逐单元实现 PLAN.md。`
+
+**目标先行：**只给 engineering mode 一个结果目标；它会调查根因、选定设计、写出计划，再驱动同一套循环：`使用 codex-engineering-mode 修复 webhook 重放导致的重复履约。`
+
+依赖链：`codex-engineering-mode` → `codex-implementation-loop` → 官方 Codex companion 插件。
+
 ---
 
 ## codex-implementation-loop

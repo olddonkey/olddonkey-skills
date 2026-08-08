@@ -4,8 +4,8 @@
     "name": "olddonkey"
   },
   "metadata": {
-    "description": "Agent skills distilled from real-world usage: codex-implementation-loop — delegate implementation to Codex while keeping review, test-gating, and shipping judgment in Claude's hands; web-slides — click-driven 16:9 HTML slide decks with a presenter view for live presenting.",
-    "version": "0.2.0"
+    "description": "Agent skills distilled from real-world usage: codex-implementation-loop — delegate implementation to Codex while keeping review, test-gating, and shipping judgment in Claude's hands; web-slides — click-driven 16:9 HTML slide decks with a presenter view for live presenting. codex-engineering-mode — goal-first investigation, design, planning, and verified implementation.",
+    "version": "0.3.0"
   },
   "plugins": [
     {
@@ -21,6 +21,15 @@
       "name": "web-slides",
       "description": "Turn material, outlines, or talking points into click-driven 16:9 HTML slide decks for live presenting — cinematic, anti-AI aesthetic, 24 built-in themes, per-step speaker notes, and a presenter view (press P: speaker notes + live slide preview + timer in a separate window, synced via BroadcastChannel — share only the slide window to hide notes from the audience). Ships a Vite + React + TypeScript scaffold. Derived from ConardLi's garden-skills (MIT).",
       "source": "./skills/web-slides",
+      "strict": false,
+      "skills": [
+        "./"
+      ]
+    },
+    {
+      "name": "codex-engineering-mode",
+      "description": "Goal-first engineering ownership — investigate, root-cause, design, plan, then delegate implementation unit-by-unit to codex-implementation-loop, with honest artifact-level verification. REQUIRES the codex-implementation-loop plugin plus the official Codex companion plugin.",
+      "source": "./skills/codex-engineering-mode",
       "strict": false,
       "skills": [
         "./"
