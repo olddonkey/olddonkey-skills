@@ -1,6 +1,11 @@
 # Engineering Mode v1
 
-Status: r7 — **ACCEPT** at independent Codex review round 6 (gpt-5.6-sol, effort max; rounds 1–5 REVISE, findings incorporated each round); awaiting user approval
+Status: r8 — executing. r7 accepted at Codex plan-review round 6; user approved.
+PRs 1–2 merged 2026-08-08 (#21 → 94c2ff8, #22 → 022c81b). A post-merge
+holistic Codex review returned REVISE (two confirmed defects, both
+reproduced); this revision incorporates its fixture/rule amendments and the
+fixes ship on the `engineering-mode-fixes` branch. PR 3 remains blocked on
+the §3 dogfood milestone.
 Scope: `olddonkey/olddonkey-skills`
 Shape: goal-first wrapper over the existing implementation-loop kernels
 Executable by: codex-implementation-loop, unit by unit, after approval
@@ -97,17 +102,27 @@ are read side by side.
      internal path.
   2. **Plan-only / no-implementation instruction**: any explicit "plan
      only", "don't implement", "no code changes" → produce the requested
-     artifact (plan or answer), stop before any implementation dispatch.
-     A direct prohibition on code changes dominates every shortcut below.
+     artifact, stop before any implementation dispatch. An
+     investigation-style answer is produced under the investigation
+     playbook's discipline (fact / inference / open uncertainty), not as
+     free-form prose. A direct prohibition on code changes dominates every
+     shortcut below.
   3. **Small-task fast path**: genuinely small, well-specified, low-risk,
      **and the request explicitly asks for a code change** → one kernel
      unit directly. A request that merely *mentions* code ("investigate
      why `parse_args` drops `--foo`") never enters the fast path — without
      a requested change it falls through to rule 5, where the no-code
-     tie-break sends it to investigation. Checked *before* playbook
+     tie-break sends it to investigation. A change already governed by an
+     approved plan being executed follows rule 4, not the fast path — the
+     fast path serves standalone small requests. Checked *before* playbook
      selection, so smallness trumps category (a small rename never enters
      the refactor playbook). The fast path still records verification per
-     U4.
+     U4. Scope note: this is engineering mode's *internal* shortcut — it
+     presumes the request is already in engineering mode's hands (explicit
+     invocation, or arising inside a goal-first run); a bare precise
+     change request that automatic skill selection sent straight to the
+     kernel is equally legitimate, and the trigger boundary, not this
+     rule, decides who receives it.
   4. **Approved-plan passthrough**: an approved plan *or equivalently
      precise spec* plus "execute" routes to `codex-implementation-loop`
      directly **when the request needs nothing beyond kernel scope**. If
@@ -177,6 +192,8 @@ not an impression. Duplication check is a **deferred-concern inventory**
 filled in at review: for each kernel concern (dispatch hygiene, diff
 review, iteration, gate, publication, calibration), the reviewer records
 whether the router defers (cites) or restates it; any "restates" fails.
+The filled table and inventory are preserved in
+`docs/pr1-review-record.md`.
 
 ### U3 — six playbooks + adapter reference, delta-only
 
@@ -203,7 +220,8 @@ cursor one. This is what makes the PR 3 byte-identical set possible.
 *Acceptance:* line caps hold; each playbook (1) names at least one rule
 whose deferred-concern inventory row reads "novel — no kernel line covers
 this", (2) uses only canonical tokens for kernel concepts, and (3) ends by
-invoking the kernel. Neutrality is checked two ways: a **tripwire grep**
+invoking the kernel — except `investigation.md`, which by its nature ends
+with the argument (no diff, nothing to dispatch). Neutrality is checked two ways: a **tripwire grep**
 (`read-only`, `investigate` as whole words, `codex-dispatch.sh` — zero
 hits in playbook files; the canonical tokens themselves are legal
 everywhere) and the deferred-concern inventory review, which owns the
@@ -428,41 +446,57 @@ Cursor enforcement caveats stated in the adapter file, not diluted.
 ## 5. Trigger fixtures (the routing contract)
 
 Common assumed environment: fresh repo, no calibration record, no standing
-authorization; kickoff answers are part of each fixture, or marked "n/a"
-when the route dispatches nothing writable. **An implementation dispatch =
-a new unit's initial dispatch; same-thread iteration resumes (review
-findings, gate fixes) do not increment the count.** Expected invariants in
-parentheses.
+authorization; kickoff answers (stop point, cadence, model/effort) are part
+of each writable fixture, or marked "n/a" when the route dispatches nothing
+writable. **An implementation dispatch = a new unit's initial dispatch;
+same-thread iteration resumes (review findings, gate fixes) do not
+increment the count.** Expected invariants in parentheses.
 
-1. "Execute item 1 in approved PLAN.md." — fixture supplies a frozen
-   `PLAN.md` with two items; kickoff: stop=pr.
-   (Kernel direct via precedence 4; item 1's units taken from PLAN.md
-   unchanged; no investigation phase beyond plan-drift validation; stops
-   at an open PR.)
-2. "Fix this duplicate-charge bug end to end." — kickoff: stop=pr.
+1. "Execute item 1 in approved PLAN.md." — fixture supplies the frozen
+   `PLAN.md` inline (two items: 1. add `--verbose` flag to
+   `scripts/foo.sh` with acceptance criteria and expected test; 2. update
+   `README.md` usage section); kickoff: stop=pr, cadence=confirm,
+   model/effort=inherit.
+   (Kernel direct via precedence 4 — rule 3 defers to rule 4 for
+   plan-governed changes even when item 1 is small; item 1's units taken
+   from PLAN.md unchanged; no investigation phase beyond plan-drift
+   validation; stops at an open PR.)
+2. "Fix this duplicate-charge bug end to end." — kickoff: stop=pr,
+   cadence=confirm, model/effort=inherit.
    (Engineering mode → bug-fix; a recorded reproduce step precedes the
    first implementation dispatch; ≥ 1 implementation dispatch; report
    contains required vs achieved verification.)
 3. "Investigate why startup regressed; don't modify code." — kickoff: n/a.
-   (Precedence 2 → investigation; **zero implementation dispatches**; no
-   diff; deliverable is an evidence-backed answer separating fact,
-   inference, and open uncertainty.)
-4. "Work with me on a plan only." — kickoff: n/a.
+   (Precedence 2 → investigation under the investigation playbook's
+   discipline; **zero implementation dispatches**; no diff; deliverable
+   is an evidence-backed answer separating fact, inference, and open
+   uncertainty.)
+4. "Work with me on a plan only for adding a `--json` output flag to
+   `scripts/foo.sh`." — kickoff: n/a.
    (Precedence 2 → plan-only; zero implementation dispatches; plan
-   artifact written to `plans/`, left uncommitted; run ends before any
-   unit decomposition is dispatched.)
+   artifact for the named objective written to `plans/`, left
+   uncommitted; run ends before any unit decomposition is dispatched.)
 5. "Execute this approved plan and verify the live CLI afterward." —
-   fixture supplies a frozen two-unit plan file; kickoff: stop=pr.
+   fixture supplies the frozen plan inline (two units: 1. add `--quiet`
+   flag to `scripts/foo.sh`; 2. wire it through `scripts/bar.sh` — each
+   with acceptance criteria and expected tests; required verification:
+   `artifact`); kickoff: stop=pr, cadence=confirm, model/effort=inherit.
    (Engineering mode in passthrough via precedence 4's capability branch;
-   plan's two units executed unchanged — plan lock; report shows
-   required=`artifact` and the achieved level with oracle result.)
+   the plan's two units executed unchanged — plan lock; exactly 2
+   implementation dispatches; report shows required=`artifact` and the
+   achieved level with oracle result.)
 6. "Rename the private helper `parse_args` in `scripts/foo.sh` to
-   `parse_cli_args`." — kickoff: stop=worktree.
+   `parse_cli_args`." — frozen setup: **invoked explicitly as
+   codex-engineering-mode** (rule 1; internal routing then applies — a
+   bare auto-selected request this precise may legitimately go
+   kernel-direct instead, per the trigger boundary); kickoff:
+   stop=worktree, cadence=confirm, model/effort=inherit.
    (Precedence 3 fast path — an explicit change request, beats the
    refactor playbook; exactly 1 implementation dispatch; achieved
-   verification `focused` — the script is runtime content, so
-   `not_applicable` would be an invalid classification; verdict bound to
-   equal before/after tree OIDs, no commit created.)
+   verification `focused` or the stronger `artifact` — the script is
+   runtime content, so `not_applicable` would be an invalid
+   classification; verdict bound to equal before/after tree OIDs, no
+   commit created.)
 7. "Plan only for renaming the private helper `parse_args` in
    `scripts/foo.sh`; don't implement." — kickoff: n/a.
    (Precedence 2 beats the fast path — **zero implementation
@@ -513,11 +547,12 @@ CI syntax check); continuous watching = this tool under the harness's own
 someone manually re-checking a PR's freshness more than twice. Until then
 it is not scheduled work, and it needs no approval to stay unscheduled.
 
-## 8. Open decisions (user-owned)
+## 8. Open decisions — all resolved 2026-08-08
 
-1. Skill name: `codex-engineering-mode` (default) or another name.
-2. Plan-only output location: `plans/` in the target repo (default) or
-   user-specified per run.
-3. Publication boundary for *this* plan's own PRs. This is a separate
-   grant from approving this document — approving the plan does not answer
-   it. Repo convention is PR-to-main; confirm `stop=pr` explicitly.
+1. Skill name: `codex-engineering-mode` (default accepted; shipped).
+2. Plan-only output location: `plans/` in the target repo (default
+   accepted; shipped in the router).
+3. Publication boundary for this plan's own PRs: the user granted it in
+   the implementing conversation, separately from plan approval. The
+   authority record lives in user-level private memory per the kernel's
+   calibration rules — this note is history, not authority.
