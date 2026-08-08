@@ -78,7 +78,18 @@ jobs:
                       value = match.group(1).strip()
                       if value.startswith("#"):
                           value = ""
-                      if value.lower() not in {"", "''", '""', "null", "~"}:
+                      elif value.startswith(("'", '"')):
+                          closing = value.find(value[0], 1)
+                          if closing != -1:
+                              comment = re.search(r"\s+#", value[closing + 1:])
+                              if comment:
+                                  value = value[:closing + 1 + comment.start()].rstrip()
+                      else:
+                          value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+                      if (
+                          value.lower() not in {"", "''", '""', "null", "~"}
+                          and not re.fullmatch(r"[|>][+-]?", value)
+                      ):
                           return True
                   return False
 

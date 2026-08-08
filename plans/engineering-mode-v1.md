@@ -3,9 +3,13 @@
 Status: r9 — executing. r7 accepted at Codex plan-review round 6; user
 approved. PRs 1–2 merged 2026-08-08 (#21 → 94c2ff8, #22 → 022c81b).
 Post-merge holistic review round 1 (REVISE, two reproduced defects) fixed
-and merged as #23 → 2b9df5c; round 2 (REVISE, one reproduced defect —
-index-flag suppression) fixed on `engineering-mode-fixes-r2` together with
-this revision's doc sync. PR 3 remains blocked on the §3 dogfood milestone.
+and merged as #23 → 2b9df5c; round 2 (REVISE, index-flag suppression)
+fixed and merged as #24 → 0075927; round 3 (REVISE, suppression inside
+registered submodules — reproduced) fixed on `engineering-mode-fixes-r3`
+with recursive child audits, contract interface documentation, and this
+doc sync. Selftest suite now also covers child-suppression cases and
+asserts its own final count. PR 3 remains blocked on the §3 dogfood
+milestone.
 Scope: `olddonkey/olddonkey-skills`
 Shape: goal-first wrapper over the existing implementation-loop kernels
 Executable by: codex-implementation-loop, unit by unit, after approval
@@ -326,16 +330,21 @@ spaces and a nested submodule (porcelain parsing must be NUL-safe) —
 clean registered submodule positive case, untracked embedded repository
 → exit 3, assume-unchanged file (OID must track content; real index
 keeps its flag), assume-unchanged gitlink → exit 3, skip-worktree entry
-→ exit 3, and a sparse checkout → exit 3. For every case: assertions
+→ exit 3, a sparse checkout → exit 3, and suppression flags inside a
+populated registered submodule's own index — assume-unchanged,
+skip-worktree, and nested variants → exit 3 with the child index left
+untouched. For every case: assertions
 that the temp directory is cleaned up, failure paths print nothing to
 stdout, and the real index, refs, and worktree are unchanged (index
 bytes, refs listing, content checksums).
 
-*Acceptance:* contract page ≤ 90 lines of prose (the script is separate);
-the router's report format references it; the downgrade, failing-oracle,
-and not_applicable cases in U7 are decidable from the report plus the
-pair table alone; `tree-oid.sh` selftest green in CI and its six cases
-present.
+*Acceptance:* contract page ≤ 90 lines of prose (the script is separate)
+and documents the caller-facing 0/1/3 interface with every
+binding-unavailable cause; the router's report format references it; the
+downgrade, failing-oracle, and not_applicable cases in U7 are decidable
+from the report plus the pair table alone; `tree-oid.sh` selftest green
+in CI with every case in the suite list above present and the selftest
+asserting its own expected final count.
 
 ### U5 — packaging
 

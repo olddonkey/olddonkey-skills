@@ -38,6 +38,7 @@ RUN_STATUS=0
 RUN_STDOUT=""
 RUN_STDERR=""
 RUN_OID=""
+SPARSE_CAPABILITY_AVAILABLE=0
 
 abort() {
   printf 'selftest: FAIL (setup error: %s)\n' "$1" >&2
@@ -101,8 +102,10 @@ worktree_manifest() { # $1=repo; main .git directory is administrative state
 }
 
 snapshot_repo() { # $1=repo $2=output prefix
-  local repo="$1" prefix="$2"
+  local repo="$1" prefix="$2" git_dir
   mkdir -p "$(dirname "$prefix")" || abort "cannot create snapshot directory"
+  git_dir="$(git -C "$repo" rev-parse --absolute-git-dir)" || \
+    abort "cannot locate Git directory for $repo"
   (
     cd "$repo" || exit 1
     GIT_OPTIONAL_LOCKS=0 git status --porcelain -z \
@@ -112,10 +115,10 @@ snapshot_repo() { # $1=repo $2=output prefix
     cd "$repo" || exit 1
     git for-each-ref --format='%(refname) %(objectname)'
   ) | LC_ALL=C sort > "$prefix.refs" || abort "cannot snapshot refs for $repo"
-  cp "$repo/.git/HEAD" "$prefix.HEAD" || abort "cannot snapshot HEAD for $repo"
-  if [[ -f "$repo/.git/index" ]]; then
+  cp "$git_dir/HEAD" "$prefix.HEAD" || abort "cannot snapshot HEAD for $repo"
+  if [[ -f "$git_dir/index" ]]; then
     printf 'present\n' > "$prefix.index-state"
-    cp "$repo/.git/index" "$prefix.index" || abort "cannot snapshot index for $repo"
+    cp "$git_dir/index" "$prefix.index" || abort "cannot snapshot index for $repo"
   else
     printf 'missing\n' > "$prefix.index-state"
     : > "$prefix.index"
@@ -174,6 +177,17 @@ run_tree() { # $1=name $2=execution dir $3=repo to protect $4=temp base
   snapshot_repo "$repo" "$after"
   assert_repo_unchanged "$before" "$after" "$name"
   assert_temp_clean "$temp_base" "$name"
+}
+
+run_tree_with_child() { # $1=name $2=execution dir $3=repo $4=temp $5=child
+  local name="$1" execution_dir="$2" repo="$3" temp_base="$4" child="$5"
+  local result_dir="$TMP_ROOT/results/$name"
+  local before="$result_dir/child-before" after="$result_dir/child-after"
+
+  snapshot_repo "$child" "$before"
+  run_tree "$name" "$execution_dir" "$repo" "$temp_base"
+  snapshot_repo "$child" "$after"
+  assert_repo_unchanged "$before" "$after" "$name child"
 }
 
 expect_status() { # $1=expected $2=description
@@ -470,8 +484,74 @@ git -C "$REPO" -c protocol.file.allow=always submodule update -q \
 run_tree "clean-registered-submodule" "$REPO" "$REPO" "$TEMP_BASE"
 expect_status 0 "clean registered submodule succeeds"
 expect_oid_output "clean registered submodule"
+OUTER_WORKTREE="$REPO/outer module"
+INNER_WORKTREE="$OUTER_WORKTREE/nested module"
+SUBMODULE_SUPPRESSION_MESSAGE="binding unavailable: a registered submodule's index carries change-suppression flags; worktree binding is unavailable"
+
+# The reproduced failure changed an assume-unchanged child path twice. Both
+# observations must now fail closed, without mutating either real index.
+git -C "$OUTER_WORKTREE" update-index --assume-unchanged -- middle.txt || \
+  abort "cannot mark a child path assume-unchanged"
+printf 'middle dirty version two\n' > "$OUTER_WORKTREE/middle.txt"
+run_tree_with_child "child-assume-unchanged-first" \
+  "$REPO" "$REPO" "$TEMP_BASE" "$OUTER_WORKTREE"
+expect_status 3 \
+  "first modified assume-unchanged child path exits with binding-unavailable status 3"
+expect_empty_stdout "first modified assume-unchanged child path"
+expect_one_line_stderr "$SUBMODULE_SUPPRESSION_MESSAGE" \
+  "first modified assume-unchanged child path"
+expect_real_index_flag "$OUTER_WORKTREE" "middle.txt" "assume-unchanged" \
+  "first child audit preserves assume-unchanged in the child's real index"
+
+printf 'middle dirty version three with a different size\n' \
+  > "$OUTER_WORKTREE/middle.txt"
+run_tree_with_child "child-assume-unchanged-second" \
+  "$REPO" "$REPO" "$TEMP_BASE" "$OUTER_WORKTREE"
+expect_status 3 \
+  "second modified assume-unchanged child path exits with binding-unavailable status 3"
+expect_empty_stdout "second modified assume-unchanged child path"
+expect_one_line_stderr "$SUBMODULE_SUPPRESSION_MESSAGE" \
+  "second modified assume-unchanged child path"
+expect_real_index_flag "$OUTER_WORKTREE" "middle.txt" "assume-unchanged" \
+  "second child audit preserves assume-unchanged in the child's real index"
+git -C "$OUTER_WORKTREE" update-index --no-assume-unchanged -- middle.txt || \
+  abort "cannot clear the child assume-unchanged fixture"
+printf 'middle\n' > "$OUTER_WORKTREE/middle.txt"
+
+git -C "$OUTER_WORKTREE" update-index --skip-worktree -- middle.txt || \
+  abort "cannot mark a child path skip-worktree"
+printf 'middle dirty under skip-worktree\n' > "$OUTER_WORKTREE/middle.txt"
+run_tree_with_child "child-skip-worktree" \
+  "$REPO" "$REPO" "$TEMP_BASE" "$OUTER_WORKTREE"
+expect_status 3 \
+  "modified skip-worktree child path exits with binding-unavailable status 3"
+expect_empty_stdout "modified skip-worktree child path"
+expect_one_line_stderr "$SUBMODULE_SUPPRESSION_MESSAGE" \
+  "modified skip-worktree child path"
+expect_real_index_flag "$OUTER_WORKTREE" "middle.txt" "skip-worktree" \
+  "child audit preserves skip-worktree in the child's real index"
+git -C "$OUTER_WORKTREE" update-index --no-skip-worktree -- middle.txt || \
+  abort "cannot clear the child skip-worktree fixture"
+printf 'middle\n' > "$OUTER_WORKTREE/middle.txt"
+
+git -C "$INNER_WORKTREE" update-index --assume-unchanged -- payload.txt || \
+  abort "cannot mark a nested child path assume-unchanged"
+printf 'nested suppressed dirtiness\n' > "$INNER_WORKTREE/payload.txt"
+run_tree_with_child "nested-child-assume-unchanged" \
+  "$REPO" "$REPO" "$TEMP_BASE" "$INNER_WORKTREE"
+expect_status 3 \
+  "nested assume-unchanged child path exits with binding-unavailable status 3"
+expect_empty_stdout "nested assume-unchanged child path"
+expect_one_line_stderr "$SUBMODULE_SUPPRESSION_MESSAGE" \
+  "nested assume-unchanged child path"
+expect_real_index_flag "$INNER_WORKTREE" "payload.txt" "assume-unchanged" \
+  "nested child audit preserves assume-unchanged in the inner real index"
+git -C "$INNER_WORKTREE" update-index --no-assume-unchanged -- payload.txt || \
+  abort "cannot clear the nested child assume-unchanged fixture"
+printf 'inner clean\n' > "$INNER_WORKTREE/payload.txt"
+
 printf 'inner dirty with a different size\n' \
-  > "$REPO/outer module/nested module/payload.txt"
+  > "$INNER_WORKTREE/payload.txt"
 run_tree "dirty-nested-submodule" "$REPO" "$REPO" "$TEMP_BASE"
 expect_status 3 "dirty nested submodule exits with binding-unavailable status 3"
 expect_empty_stdout "dirty nested submodule"
@@ -579,6 +659,7 @@ if git -C "$REPO" sparse-checkout init --cone \
    git -C "$REPO" sparse-checkout set included \
     >> "$CASE_ROOT/sparse-setup.out" 2>> "$CASE_ROOT/sparse-setup.err"; then
   if index_has_skip_worktree_entry "$REPO"; then
+    SPARSE_CAPABILITY_AVAILABLE=1
     pass "sparse-checkout fixture carries skip-worktree entries"
   else
     abort "sparse-checkout setup succeeded without skip-worktree entries"
@@ -592,6 +673,22 @@ if git -C "$REPO" sparse-checkout init --cone \
 else
   skip "sparse-checkout skip-worktree regression" \
     "installed Git does not support the cone-mode sparse-checkout setup used by this test"
+fi
+
+# Expected final totals include the count assertion itself: 182 checks on the
+# full-capability path, or 175 when the sparse capability skip replaces that
+# case's eight checks with one documented skip.
+if [[ $SPARSE_CAPABILITY_AVAILABLE -eq 1 ]]; then
+  EXPECTED_FINAL_CHECKS=182
+else
+  EXPECTED_FINAL_CHECKS=175
+fi
+RUN_STDOUT=""
+RUN_STDERR=""
+if [[ $((CHECKS + 1)) -eq $EXPECTED_FINAL_CHECKS ]]; then
+  pass "selftest ran its expected final total of $EXPECTED_FINAL_CHECKS checks"
+else
+  fail "selftest expected $EXPECTED_FINAL_CHECKS final checks, got $((CHECKS + 1))"
 fi
 
 if [[ $FAILED_CHECKS -gt 0 ]]; then

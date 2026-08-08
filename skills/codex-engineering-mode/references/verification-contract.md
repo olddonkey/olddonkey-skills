@@ -35,7 +35,13 @@ This contract supplements the kernel's full-suite gate and never replaces it. `f
 
 The verdict binds to the candidate Git tree derived from the verified worktree. At a stop point that creates a commit, bind it to the candidate commit SHA under the kernel's publish rules.
 
-At `stop=worktree`, run [`tree-oid.sh`](../scripts/tree-oid.sh) immediately **before** the verification run and again immediately **after** it. The verdict is valid only when the two OIDs are equal.
+At `stop=worktree`, run [`tree-oid.sh`](../scripts/tree-oid.sh) with no arguments from the target worktree root immediately **before** the verification run and again immediately **after** it. Its caller-facing interface is:
+
+- Exit `0`: success; stdout contains exactly one tree OID.
+- Exit `1`: operational failure; stdout is empty and diagnostics go to stderr.
+- Exit `3`: worktree binding is unavailable; stdout is empty and stderr contains a one-line cause.
+
+The verdict is valid only when both runs exit `0` and the two OIDs are equal.
 
 The worktree tree id identifies the tree produced by staging the complete non-ignored worktree with `git add -A` in a throwaway index. It includes tracked and untracked contents and excludes ignored files. It is narrower than what a commit could contain because a commit may stage selectively.
 
@@ -44,4 +50,12 @@ Two exclusions must be disclosed:
 - Content is clean-filter normalized, so raw bytes that normalize identically are indistinguishable; large filter or LFS pipelines can also make this slow.
 - Submodule internals appear only as gitlink SHAs.
 
-Any submodule modification, detected configuration-independently, makes worktree binding unavailable. Say so in the report; the verdict is at best incomplete. A commit-binding stop point resolves this only when every changed submodule is separately committed and clean, so its gitlink identifies real content. Committing the superproject alone binds nothing inside submodules, and authorization to commit the superproject grants nothing in another repository. Never create a commit solely to bind a verdict.
+Worktree binding is unavailable when any of these conditions exists:
+
+- A registered submodule is modified.
+- A populated registered submodule's own index, at any recursive depth, has change-suppression flags.
+- An unregistered embedded repository would be absorbed as a gitlink.
+- Any entry has `skip-worktree`; sparse checkouts are therefore a disclosed can't-bind limitation.
+- A gitlink has `assume-unchanged`.
+
+For ordinary entries, `assume-unchanged` bits are cleared only in the throwaway index so their worktree content is certified; the real index retains its flags. On exit `3`, disclose the cause in the report; the verdict is at best incomplete. A commit-binding stop point resolves a modified registered submodule only when every changed submodule is separately committed and clean, so its gitlink identifies real content. Committing the superproject alone binds nothing inside submodules, and authorization to commit the superproject grants nothing in another repository. Never create a commit solely to bind a verdict.
