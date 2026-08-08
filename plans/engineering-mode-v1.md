@@ -1,11 +1,11 @@
 # Engineering Mode v1
 
-Status: r8 — executing. r7 accepted at Codex plan-review round 6; user approved.
-PRs 1–2 merged 2026-08-08 (#21 → 94c2ff8, #22 → 022c81b). A post-merge
-holistic Codex review returned REVISE (two confirmed defects, both
-reproduced); this revision incorporates its fixture/rule amendments and the
-fixes ship on the `engineering-mode-fixes` branch. PR 3 remains blocked on
-the §3 dogfood milestone.
+Status: r9 — executing. r7 accepted at Codex plan-review round 6; user
+approved. PRs 1–2 merged 2026-08-08 (#21 → 94c2ff8, #22 → 022c81b).
+Post-merge holistic review round 1 (REVISE, two reproduced defects) fixed
+and merged as #23 → 2b9df5c; round 2 (REVISE, one reproduced defect —
+index-flag suppression) fixed on `engineering-mode-fixes-r2` together with
+this revision's doc sync. PR 3 remains blocked on the §3 dogfood milestone.
 Scope: `olddonkey/olddonkey-skills`
 Shape: goal-first wrapper over the existing implementation-loop kernels
 Executable by: codex-implementation-loop, unit by unit, after approval
@@ -296,28 +296,40 @@ superproject alone cannot bind uncommitted submodule contents, and
 commit authorization in the superproject grants nothing in another
 repository. Never create a commit solely to bind a verdict.
 
-**[`scripts/tree-oid.sh`](../scripts/tree-oid.sh)** (relative link so the
-U5 link checker verifies its presence) ships in PR 1 — this recipe failed
-prose review twice, which is exactly program rule 3's threshold: it is
-now a small fail-closed script with a selftest, not inline shell.
+**[`scripts/tree-oid.sh`](../skills/codex-engineering-mode/scripts/tree-oid.sh)**
+ships in PR 1 — this recipe failed prose review twice, which is exactly
+program rule 3's threshold: it is now a small fail-closed script with a
+selftest, not inline shell.
 **Interface:** run from the target worktree root, no arguments; success
 prints **exactly one tree OID** on stdout and exits 0; operational
-failure exits nonzero with **no stdout output**; binding-unavailable
-(dirty submodule) is a **distinct documented exit code** with no stdout
-output — the router never parses stderr to learn the outcome.
-**Internals:** temp index path inside a securely created `mktemp -d`
-directory; cleanup via trap that preserves the operation's exit status;
-unborn HEAD detected explicitly (`git rev-parse --verify HEAD`) and
-handled as a real branch, not a comment; every git step's failure aborts.
+failure exits nonzero with **no stdout output**; binding-unavailable is a
+**distinct documented exit code** (3) with no stdout output — the router
+never parses stderr to learn the outcome. Exit-3 causes: a modified
+submodule; an unregistered embedded repository absorbed as a gitlink; any
+skip-worktree index entry (sparse checkouts therefore cannot
+worktree-bind — a disclosed limitation); an assume-unchanged gitlink.
+**Internals:** throwaway index seeded by **copying the real index** (the
+identity is "what `git add -A` would commit right now"); assume-unchanged
+bits on regular entries cleared in the throwaway index only; temp index
+path inside a securely created `mktemp -d` directory; cleanup via trap
+that preserves the operation's exit status; unborn HEAD handled as a real
+branch; mutating commands run with fsmonitor/untracked-cache disabled;
+every git step's failure aborts.
 Selftest — `scripts/tree-oid-selftest.sh` (named explicitly so the PR 3
 equality and CI lists stay mechanical), wired into CI like the gate
-selftests. Cases: normal HEAD, unborn HEAD, injected command failure,
-untracked files, tracked-but-ignored files, dirty submodule →
-binding-unavailable exit code — including a submodule path containing
+selftests. Cases: normal HEAD with an independent expected-tree oracle,
+unborn HEAD, injected command failure both pre-discovery (outside a
+worktree) and post-discovery (read-only object database), untracked
+files (content-sensitive), tracked-but-ignored and force-added-ignored
+files, dirty submodule → exit 3 — including a submodule path containing
 spaces and a nested submodule (porcelain parsing must be NUL-safe) —
-and, for every case, assertions that the temp directory is cleaned up,
-failure paths print nothing to stdout, and the real index, refs, and
-worktree are byte-identical before and after.
+clean registered submodule positive case, untracked embedded repository
+→ exit 3, assume-unchanged file (OID must track content; real index
+keeps its flag), assume-unchanged gitlink → exit 3, skip-worktree entry
+→ exit 3, and a sparse checkout → exit 3. For every case: assertions
+that the temp directory is cleaned up, failure paths print nothing to
+stdout, and the real index, refs, and worktree are unchanged (index
+bytes, refs listing, content checksums).
 
 *Acceptance:* contract page ≤ 90 lines of prose (the script is separate);
 the router's report format references it; the downgrade, failing-oracle,
@@ -384,7 +396,9 @@ subordinate the file to git evidence explicitly.
 A manual pre-release checklist of **fixed fixtures**. Each fixture freezes
 three things: the prompt string, the **assumed environment** (fresh repo,
 no calibration record, no standing authorization, and the kickoff answers
-given verbatim as part of the fixture), and the **expected invariants** —
+given verbatim as part of the fixture — every writable fixture, in the
+safety and honesty sections too, freezes stop point, cadence, and
+model/effort), and the **expected invariants** —
 properties decidable from a transcript, not exact numbers where the
 protocol legitimately varies. Dispatch counts appear only where truly
 determined (e.g. "zero implementation dispatches").
@@ -453,9 +467,12 @@ same-thread iteration resumes (review findings, gate fixes) do not
 increment the count.** Expected invariants in parentheses.
 
 1. "Execute item 1 in approved PLAN.md." — fixture supplies the frozen
-   `PLAN.md` inline (two items: 1. add `--verbose` flag to
-   `scripts/foo.sh` with acceptance criteria and expected test; 2. update
-   `README.md` usage section); kickoff: stop=pr, cadence=confirm,
+   `PLAN.md` inline. Item 1: add a `--verbose` flag to `scripts/foo.sh`;
+   acceptance: with the flag, one diagnostic line per processed file on
+   stderr, default output byte-identical without it; expected test:
+   `tests/foo-verbose.test.sh` asserting both. Item 2: document the flag
+   in `README.md`'s usage section; acceptance: usage block shows the
+   flag; expected test: none (docs). Kickoff: stop=pr, cadence=confirm,
    model/effort=inherit.
    (Kernel direct via precedence 4 — rule 3 defers to rule 4 for
    plan-governed changes even when item 1 is small; item 1's units taken
@@ -477,10 +494,14 @@ increment the count.** Expected invariants in parentheses.
    artifact for the named objective written to `plans/`, left
    uncommitted; run ends before any unit decomposition is dispatched.)
 5. "Execute this approved plan and verify the live CLI afterward." —
-   fixture supplies the frozen plan inline (two units: 1. add `--quiet`
-   flag to `scripts/foo.sh`; 2. wire it through `scripts/bar.sh` — each
-   with acceptance criteria and expected tests; required verification:
-   `artifact`); kickoff: stop=pr, cadence=confirm, model/effort=inherit.
+   fixture supplies the frozen plan inline. Unit 1: add a `--quiet` flag
+   to `scripts/foo.sh`; acceptance: with the flag, nothing on stdout on
+   success, errors still on stderr; expected test:
+   `tests/foo-quiet.test.sh`. Unit 2: `scripts/bar.sh` forwards `--quiet`
+   to foo.sh; acceptance: `bar.sh --quiet` is silent on success;
+   expected test: `tests/bar-quiet.test.sh`. Required verification:
+   `artifact` (run the real CLI both ways and inspect output). Kickoff:
+   stop=pr, cadence=confirm, model/effort=inherit.
    (Engineering mode in passthrough via precedence 4's capability branch;
    the plan's two units executed unchanged — plan lock; exactly 2
    implementation dispatches; report shows required=`artifact` and the
