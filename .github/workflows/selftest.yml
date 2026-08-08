@@ -69,10 +69,23 @@ jobs:
                   errors.append(f"{path}: frontmatter has no closing ---")
                   continue
               frontmatter = lines[1:end]
+
+              def has_value(key):
+                  for line in frontmatter:
+                      match = re.match(rf"^{key}\s*:(.*)$", line)
+                      if not match:
+                          continue
+                      value = match.group(1).strip()
+                      if value.startswith("#"):
+                          value = ""
+                      if value.lower() not in {"", "''", '""', "null", "~"}:
+                          return True
+                  return False
+
               missing = [
                   key
                   for key in ("name", "description")
-                  if not any(re.match(rf"^{key}\s*:\s*\S", line) for line in frontmatter)
+                  if not has_value(key)
               ]
               if missing:
                   errors.append(f"{path}: missing frontmatter key(s): {', '.join(missing)}")

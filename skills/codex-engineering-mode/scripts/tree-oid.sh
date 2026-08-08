@@ -7,10 +7,10 @@
 #   goes to stdout.
 # - Operational failure (any Git step fails, not in a Git worktree, and so on):
 #   exit 1 with no stdout output; diagnostics go to stderr.
-# - Binding unavailable (any submodule modification or an unregistered embedded
-#   repository): exit 3 with no stdout output and a one-line stderr explanation.
-#   Exit 3 is distinct so callers never confuse "cannot bind" with "the
-#   operation broke."
+# - Binding unavailable (any submodule modification, an unregistered embedded
+#   repository, a skip-worktree entry, or an assume-unchanged gitlink): exit 3
+#   with no stdout output and a one-line stderr explanation. Exit 3 is distinct
+#   so callers never confuse "cannot bind" with "the operation broke."
 
 set -euo pipefail
 
@@ -41,6 +41,18 @@ binding_unavailable() {
   exit 3
 }
 
+binding_unavailable_skip_worktree() {
+  printf '%s\n' \
+    'tree-oid: binding unavailable: an index entry carries skip-worktree (sparse checkout or manual suppression); worktree binding is unavailable' >&2
+  exit 3
+}
+
+binding_unavailable_suppressed_gitlink() {
+  printf '%s\n' \
+    'tree-oid: binding unavailable: an index gitlink carries assume-unchanged; worktree binding is unavailable' >&2
+  exit 3
+}
+
 [[ $# -eq 0 ]] || error "no arguments accepted"
 
 umask 077
@@ -51,6 +63,9 @@ STATUS_FILE="$TEMP_ROOT/status"
 INDEX_ENTRIES="$TEMP_ROOT/index-entries"
 HEAD_ENTRIES="$TEMP_ROOT/head-entries"
 THROWAWAY_ENTRIES="$TEMP_ROOT/throwaway-index-entries"
+SEEDED_ENTRIES="$TEMP_ROOT/seeded-index-entries"
+INDEX_FLAGS="$TEMP_ROOT/index-flags"
+ASSUME_UNCHANGED_PATHS="$TEMP_ROOT/assume-unchanged-paths"
 HEAD_REF_FILE="$TEMP_ROOT/head-ref"
 OID_FILE="$TEMP_ROOT/tree-oid"
 
@@ -130,6 +145,21 @@ path_is_submodule() { # $1=exact worktree-relative path
   return 1
 }
 
+seeded_path_is_gitlink() { # $1=exact worktree-relative path
+  local candidate="$1"
+  local record path
+
+  while IFS= read -r -d '' record; do
+    [[ "$record" == *$'\t'* ]] || error "malformed seeded index output"
+    if [[ "$record" == 160000\ * ]]; then
+      path="${record#*$'\t'}"
+      [[ "$path" == "$candidate" ]] && return 0
+    fi
+  done < "$SEEDED_ENTRIES"
+
+  return 1
+}
+
 exec 3< "$STATUS_FILE"
 while :; do
   status_record=""
@@ -165,7 +195,52 @@ if [[ -e "$REAL_INDEX_PATH" ]]; then
 elif [[ -L "$REAL_INDEX_PATH" ]]; then
   error "the real index path is a broken symbolic link"
 fi
-if ! GIT_INDEX_FILE="$INDEX_FILE" git -c advice.addEmbeddedRepo=false add -A \
+
+# A copied index may carry change-suppression bits. Skip-worktree entries cannot
+# be rebound safely because their worktree paths may intentionally be absent.
+# Assume-unchanged gitlinks are likewise unavailable; clear the bit for every
+# other assume-unchanged path in the throwaway index only so add sees reality.
+GIT_INDEX_FILE="$INDEX_FILE" git ls-files --stage -z > "$SEEDED_ENTRIES" || \
+  error "could not inspect the seeded throwaway index"
+GIT_INDEX_FILE="$INDEX_FILE" git ls-files -v -z > "$INDEX_FLAGS" || \
+  error "could not inspect throwaway index flags"
+: > "$ASSUME_UNCHANGED_PATHS"
+while IFS= read -r -d '' record; do
+  [[ ${#record} -ge 3 && "${record:1:1}" == " " ]] || \
+    error "malformed throwaway index flag output"
+  tag="${record:0:1}"
+  path="${record:2}"
+  case "$tag" in
+    S|s)
+      binding_unavailable_skip_worktree
+      ;;
+  esac
+  if [[ "$tag" == [[:lower:]] ]]; then
+    if seeded_path_is_gitlink "$path"; then
+      binding_unavailable_suppressed_gitlink
+    fi
+    printf '%s\0' "$path" >> "$ASSUME_UNCHANGED_PATHS" || \
+      error "could not record assume-unchanged paths"
+  fi
+done < "$INDEX_FLAGS"
+
+if [[ -s "$ASSUME_UNCHANGED_PATHS" ]]; then
+  # --stdin consumes path records, not options, and must be the final argument.
+  if ! GIT_INDEX_FILE="$INDEX_FILE" \
+      git -c core.fsmonitor=false -c core.untrackedcache=false \
+      update-index --no-assume-unchanged -z --stdin \
+      < "$ASSUME_UNCHANGED_PATHS" > "$TEMP_ROOT/update-index.out" \
+      2> "$TEMP_ROOT/update-index.err"; then
+    if [[ -s "$TEMP_ROOT/update-index.err" ]]; then
+      cat "$TEMP_ROOT/update-index.err" >&2 || true
+    fi
+    error "could not clear assume-unchanged in the throwaway index"
+  fi
+fi
+
+if ! GIT_INDEX_FILE="$INDEX_FILE" \
+    git -c core.fsmonitor=false -c core.untrackedcache=false \
+    -c advice.addEmbeddedRepo=false add -A \
     > "$TEMP_ROOT/add.out" 2> "$TEMP_ROOT/add.err"; then
   if [[ -s "$TEMP_ROOT/add.err" ]]; then
     cat "$TEMP_ROOT/add.err" >&2 || true
@@ -183,7 +258,9 @@ while IFS= read -r -d '' record; do
     fi
   fi
 done < "$THROWAWAY_ENTRIES"
-GIT_INDEX_FILE="$INDEX_FILE" git write-tree > "$OID_FILE" || \
+GIT_INDEX_FILE="$INDEX_FILE" \
+  git -c core.fsmonitor=false -c core.untrackedcache=false write-tree \
+  > "$OID_FILE" || \
   error "git write-tree failed"
 
 TREE_OID=""
