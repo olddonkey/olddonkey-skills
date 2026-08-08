@@ -24,3 +24,104 @@ jobs:
         run: bash skills/codex-implementation-loop/scripts/selftest.sh
       - name: Cursor gate selftest
         run: bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
+      - name: Engineering mode packaging checks
+        run: |
+          bash -n skills/codex-engineering-mode/scripts/tree-oid.sh
+          bash -n skills/codex-engineering-mode/scripts/tree-oid-selftest.sh
+          python3 - <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          failed = False
+          for path in (
+              Path(".claude-plugin/marketplace.json"),
+              Path(".cursor-plugin/marketplace.json"),
+          ):
+              try:
+                  with path.open(encoding="utf-8") as handle:
+                      json.load(handle)
+              except (OSError, json.JSONDecodeError) as exc:
+                  print(f"json: FAIL {path}: {exc}", file=sys.stderr)
+                  failed = True
+              else:
+                  print(f"json: PASS {path}")
+          if failed:
+              raise SystemExit(1)
+          PY
+          python3 - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          paths = sorted(Path("skills").glob("*/SKILL.md"))
+          errors = []
+          if not paths:
+              errors.append("frontmatter: no skills/*/SKILL.md files found")
+          for path in paths:
+              lines = path.read_text(encoding="utf-8").splitlines()
+              if not lines or lines[0] != "---":
+                  errors.append(f"{path}: first line is not ---")
+                  continue
+              try:
+                  end = lines.index("---", 1)
+              except ValueError:
+                  errors.append(f"{path}: frontmatter has no closing ---")
+                  continue
+              frontmatter = lines[1:end]
+              missing = [
+                  key
+                  for key in ("name", "description")
+                  if not any(re.match(rf"^{key}\s*:", line) for line in frontmatter)
+              ]
+              if missing:
+                  errors.append(f"{path}: missing frontmatter key(s): {', '.join(missing)}")
+          if errors:
+              print("\n".join(errors), file=sys.stderr)
+              raise SystemExit(1)
+          print(f"frontmatter: PASS ({len(paths)} skill files)")
+          PY
+          python3 - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+          from urllib.parse import unquote, urlsplit
+
+          root = Path("skills/codex-engineering-mode")
+          paths = [root / "SKILL.md", *sorted((root / "references").glob("**/*.md"))]
+          patterns = (
+              re.compile(r"!?\[[^\]\n]*\]\((<[^>\n]+>|[^)\n]+)\)"),
+              re.compile(r"^\s*\[[^\]\n]+\]:\s*(<[^>\n]+>|\S+)", re.MULTILINE),
+          )
+          errors = []
+          checked = 0
+          for path in paths:
+              text = path.read_text(encoding="utf-8")
+              for pattern in patterns:
+                  for match in pattern.finditer(text):
+                      raw = match.group(1).strip()
+                      target = raw[1:raw.index(">")] if raw.startswith("<") else raw.split(maxsplit=1)[0]
+                      target = target.split("#", 1)[0]
+                      parsed = urlsplit(target)
+                      if not target or parsed.scheme or parsed.netloc or target.startswith("/"):
+                          continue
+                      checked += 1
+                      resolved = (path.parent / unquote(parsed.path)).resolve()
+                      if not resolved.is_file():
+                          line = text.count("\n", 0, match.start()) + 1
+                          errors.append(f"{path}:{line}: dangling relative link: {raw} -> {resolved}")
+          if errors:
+              print("\n".join(errors), file=sys.stderr)
+              raise SystemExit(1)
+          print(f"relative-links: PASS ({checked} links across {len(paths)} files)")
+          PY
+
+  tree-oid:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tree OID selftest
+        run: bash skills/codex-engineering-mode/scripts/tree-oid-selftest.sh
