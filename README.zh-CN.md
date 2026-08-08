@@ -13,11 +13,11 @@
 
 ---
 
-目前包含三个 Claude Code skill，外加一个实现循环的 Cursor Plugin 移植版：
+目前包含三个 Claude Code skill，外加一个内含两个工程 skill 的 Cursor Plugin：
 
 - [`codex-implementation-loop`](#codex-implementation-loop) —— 把实现交给 Codex，但不把判断交出去：Claude 亲自审查真实 diff、跑全量测试门禁，只发布自己敢签名的改动。
 - `codex-engineering-mode` —— 目标先行的工程主导模式：先调查、定设计、写计划，再逐单元驱动 `codex-implementation-loop`。
-- [`cursor-implementation-loop`](#cursor-implementation-loop) —— `codex-implementation-loop` 的 Cursor Plugin 移植：父 agent 负责 review / 门禁 / 发布，implementer 子 agent 写代码；`run-gate.sh` 与 Codex 版逐字共享。
+- [`cursor-implementation-loop`](#cursor-implementation-loop) —— Cursor Plugin 内含计划先行的实现循环和目标先行的 `cursor-engineering-mode` 包装器；父 agent 负责 review / 门禁 / 发布，implementer 子 agent 写代码。
 - [`web-slides`](#web-slides) —— 把素材 / 提纲做成点击驱动的 16:9 HTML 幻灯片，用于现场放映；内置 24 套主题 + 演讲者窗口，投屏时口播稿对观众不可见。
 
 ## 安装
@@ -106,9 +106,9 @@ cp olddonkey-skills/cursor-implementation-loop/agents/*.md ~/.cursor/agents/
 
 **计划先行（现有行为不变）：**先审阅并批准计划，再直接调用实现循环：`使用 codex-implementation-loop 逐单元实现 PLAN.md。`
 
-**目标先行：**只给 engineering mode 一个结果目标；它会调查根因、选定设计、写出计划，再驱动同一套循环：`使用 codex-engineering-mode 修复 webhook 重放导致的重复履约。`
+**目标先行：**只给 engineering mode 一个结果目标；它会调查根因、选定设计、写出计划，再驱动同一套循环。Codex：`使用 codex-engineering-mode 修复 webhook 重放导致的重复履约。` Cursor：`使用 cursor-engineering-mode 修复 webhook 重放导致的重复履约。`
 
-依赖链：`codex-engineering-mode` → `codex-implementation-loop` → 官方 Codex companion 插件。
+Codex 侧依赖链：`codex-engineering-mode` → `codex-implementation-loop` → 官方 Codex companion 插件。Cursor 侧的 `cursor-engineering-mode` 已内置于 `cursor-implementation-loop` 插件，无需单独安装；现有安装更新后即可获得：重新运行一行安装命令，或在 managed checkout 中执行 `git pull`。
 
 ---
 
@@ -198,7 +198,7 @@ Skill 为首次运行准备了保守选择；只需要指定你想改变的部�
 
 ## cursor-implementation-loop
 
-**[`codex-implementation-loop`](#codex-implementation-loop) 的 Cursor Plugin 移植版。**
+**内含两个 skill 的 Cursor Plugin：计划先行的 `cursor-implementation-loop`，以及目标先行的 `cursor-engineering-mode` 包装器。**
 
 同一套 review-gated 循环，适配 Cursor 原生子 agent：**父 agent** 负责规划、diff review、全量测试门禁和发布；专用 **implementer** 子 agent 写代码。[`run-gate.sh`](./cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh) 与 Codex skill 逐字共享。
 

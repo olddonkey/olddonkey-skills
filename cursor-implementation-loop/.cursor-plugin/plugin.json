@@ -1,7 +1,7 @@
 {
   "name": "cursor-implementation-loop",
-  "description": "Review-gated implementation loop for Cursor: an implementer subagent writes code; the parent agent owns judgment, the full test gate, and publication.",
-  "version": "0.1.0",
+  "description": "Review-gated implementation loop for Cursor: an implementer subagent writes code; the parent agent owns judgment, the full test gate, and publication. Ships two skills: the plan-first cursor-implementation-loop and the goal-first cursor-engineering-mode wrapper.",
+  "version": "0.2.0",
   "author": {
     "name": "olddonkey"
   },
@@ -10,6 +10,7 @@
     "delegation",
     "code-review",
     "testing",
-    "subagents"
+    "subagents",
+    "engineering-mode"
   ]
 }
