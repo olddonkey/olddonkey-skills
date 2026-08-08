@@ -7,7 +7,22 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TREE_OID="$SCRIPT_DIR/tree-oid.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/tree-oid-selftest.XXXXXX")" || exit 1
-trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+LOCKED_OBJECTS_DIR=""
+
+cleanup() { # $1=status to preserve
+  local status="$1"
+  trap - EXIT HUP INT TERM
+  if [[ -n "$LOCKED_OBJECTS_DIR" ]]; then
+    chmod u+w "$LOCKED_OBJECTS_DIR" 2>/dev/null || true
+  fi
+  rm -rf "$TMP_ROOT" || true
+  exit "$status"
+}
+
+trap 'cleanup "$?"' EXIT
+trap 'cleanup 129' HUP
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
 
 export GIT_AUTHOR_NAME="Tree OID Selftest"
 export GIT_AUTHOR_EMAIL="tree-oid-selftest@example.invalid"
@@ -108,20 +123,20 @@ assert_repo_unchanged() { # $1=before prefix $2=after prefix $3=description pref
   local before="$1" after="$2" description="$3"
   if cmp -s "$before.index-state" "$after.index-state" &&
      cmp -s "$before.index" "$after.index"; then
-    pass "$description leaves the real index byte-identical"
+    pass "$description leaves the real index unchanged (presence and bytes)"
   else
     fail "$description changed the real index"
   fi
   if cmp -s "$before.refs" "$after.refs" && cmp -s "$before.HEAD" "$after.HEAD"; then
-    pass "$description leaves refs byte-identical"
+    pass "$description leaves refs unchanged (refs listing and HEAD content)"
   else
     fail "$description changed refs"
   fi
   if cmp -s "$before.status" "$after.status" &&
      cmp -s "$before.worktree" "$after.worktree"; then
-    pass "$description leaves status and worktree bytes identical"
+    pass "$description leaves status/worktree unchanged (status bytes and content-checksum manifest)"
   else
-    fail "$description changed status or worktree bytes"
+    fail "$description changed the status/worktree snapshot"
   fi
 }
 
@@ -196,11 +211,27 @@ expect_one_line_stderr() { # $1=fixed text $2=description
   fi
 }
 
+expect_stderr_contains() { # $1=fixed text $2=description
+  if grep -Fq -- "$1" "$RUN_STDERR"; then
+    pass "$2"
+  else
+    fail "$2 (missing expected stderr text: $1)"
+  fi
+}
+
 expect_oid_changed() { # $1=old $2=new $3=description
   if [[ -n "$1" && -n "$2" && "$1" != "$2" ]]; then
     pass "$3"
   else
     fail "$3 (tree OIDs were equal)"
+  fi
+}
+
+expect_oid_equal() { # $1=expected $2=actual $3=description
+  if [[ -n "$1" && "$1" == "$2" ]]; then
+    pass "$3"
+  else
+    fail "$3 (expected $1, got $2)"
   fi
 }
 
@@ -211,15 +242,23 @@ TEMP_BASE="$CASE_ROOT/script-tmp"
 init_repo "$REPO"
 printf 'before\n' > "$REPO/tracked.txt"
 commit_all "$REPO" "initial"
+ORACLE_REPO="$CASE_ROOT/oracle"
+git clone -q "$REPO" "$ORACLE_REPO" || abort "cannot clone normal-HEAD oracle"
 run_tree "normal-head-before" "$REPO" "$REPO" "$TEMP_BASE"
 expect_status 0 "normal HEAD succeeds"
 expect_oid_output "normal HEAD"
 NORMAL_BEFORE="$RUN_OID"
 printf 'after\n' > "$REPO/tracked.txt"
+printf 'after\n' > "$ORACLE_REPO/tracked.txt"
+git -C "$ORACLE_REPO" add -A || abort "oracle git add -A failed"
+EXPECTED_NORMAL_AFTER="$(git -C "$ORACLE_REPO" write-tree)" || \
+  abort "oracle git write-tree failed"
 run_tree "normal-head-after" "$REPO" "$REPO" "$TEMP_BASE"
 expect_status 0 "normal HEAD with a tracked edit succeeds"
 expect_oid_output "normal HEAD after a tracked edit"
 NORMAL_AFTER="$RUN_OID"
+expect_oid_equal "$EXPECTED_NORMAL_AFTER" "$NORMAL_AFTER" \
+  "normal HEAD matches an independent git add -A/write-tree oracle"
 expect_oid_changed "$NORMAL_BEFORE" "$NORMAL_AFTER" \
   "changing a tracked file changes the tree OID"
 
@@ -248,8 +287,39 @@ run_tree "outside-worktree" "$OUTSIDE" "$REPO" "$TEMP_BASE"
 expect_status 1 "outside-worktree failure exits 1"
 expect_empty_stdout "outside-worktree failure"
 
-# 4. Untracked files: both addition and same-name content edits are bound.
-CASE_ROOT="$TMP_ROOT/case-4-untracked"
+# 4. A failure after discovery succeeds exits 1 without publishing an OID.
+CASE_ROOT="$TMP_ROOT/case-4-post-discovery-failure"
+REPO="$CASE_ROOT/repo"
+TEMP_BASE="$CASE_ROOT/script-tmp"
+init_repo "$REPO"
+printf 'tracked\n' > "$REPO/tracked.txt"
+commit_all "$REPO" "initial"
+attempt=0
+while :; do
+  printf 'unwritable object database fixture %d\n' "$attempt" \
+    > "$REPO/post-discovery.txt"
+  FAILURE_OID="$(git -C "$REPO" hash-object post-discovery.txt)" || \
+    abort "cannot hash the post-discovery failure fixture"
+  FAILURE_PREFIX="${FAILURE_OID:0:2}"
+  if [[ ! -e "$REPO/.git/objects/$FAILURE_PREFIX" ]] &&
+     ! git -C "$REPO" cat-file -e "$FAILURE_OID" 2>/dev/null; then
+    break
+  fi
+  attempt=$((attempt + 1))
+  [[ $attempt -lt 1024 ]] || abort "cannot find a fresh loose-object prefix"
+done
+LOCKED_OBJECTS_DIR="$REPO/.git/objects"
+chmod u-w "$LOCKED_OBJECTS_DIR" || abort "cannot make object database unwritable"
+run_tree "post-discovery-failure" "$REPO" "$REPO" "$TEMP_BASE"
+chmod u+w "$LOCKED_OBJECTS_DIR" || abort "cannot restore object database permissions"
+LOCKED_OBJECTS_DIR=""
+expect_status 1 "post-discovery git add failure exits 1"
+expect_empty_stdout "post-discovery git add failure"
+expect_stderr_contains "tree-oid: git add -A failed" \
+  "post-discovery failure reaches git add -A"
+
+# 5. Untracked files: both addition and same-name content edits are bound.
+CASE_ROOT="$TMP_ROOT/case-5-untracked"
 REPO="$CASE_ROOT/repo"
 TEMP_BASE="$CASE_ROOT/script-tmp"
 init_repo "$REPO"
@@ -274,8 +344,8 @@ expect_oid_changed "$UNTRACKED_ABSENT" "$UNTRACKED_ONE" \
 expect_oid_changed "$UNTRACKED_ONE" "$UNTRACKED_TWO" \
   "editing the same untracked path changes the tree OID"
 
-# 5. A tracked file remains bound even after a matching ignore rule is added.
-CASE_ROOT="$TMP_ROOT/case-5-tracked-ignored"
+# 6. A tracked file remains bound even after a matching ignore rule is added.
+CASE_ROOT="$TMP_ROOT/case-6-tracked-ignored"
 REPO="$CASE_ROOT/repo"
 TEMP_BASE="$CASE_ROOT/script-tmp"
 init_repo "$REPO"
@@ -297,8 +367,29 @@ IGNORED_AFTER="$RUN_OID"
 expect_oid_changed "$IGNORED_BEFORE" "$IGNORED_AFTER" \
   "a tracked-but-ignored edit changes the tree OID"
 
-# 6. A dirty nested submodule beneath a space-containing path is unavailable.
-CASE_ROOT="$TMP_ROOT/case-6-submodule"
+# 7. A force-added ignored file present only in the real index stays bound.
+CASE_ROOT="$TMP_ROOT/case-7-force-added-ignored"
+REPO="$CASE_ROOT/repo"
+TEMP_BASE="$CASE_ROOT/script-tmp"
+init_repo "$REPO"
+printf 'secret.txt\n' > "$REPO/.gitignore"
+commit_all "$REPO" "ignore secret"
+printf 'v1\n' > "$REPO/secret.txt"
+git -C "$REPO" add -f secret.txt || abort "cannot force-add ignored fixture"
+run_tree "force-added-ignored-before" "$REPO" "$REPO" "$TEMP_BASE"
+expect_status 0 "force-added ignored baseline succeeds"
+expect_oid_output "force-added ignored baseline"
+FORCE_IGNORED_BEFORE="$RUN_OID"
+printf 'v2\n' > "$REPO/secret.txt"
+run_tree "force-added-ignored-after" "$REPO" "$REPO" "$TEMP_BASE"
+expect_status 0 "modified force-added ignored file succeeds"
+expect_oid_output "modified force-added ignored file"
+FORCE_IGNORED_AFTER="$RUN_OID"
+expect_oid_changed "$FORCE_IGNORED_BEFORE" "$FORCE_IGNORED_AFTER" \
+  "editing a force-added ignored file changes the tree OID"
+
+# 8. Registered submodules stay allowed when clean and unavailable when dirty.
+CASE_ROOT="$TMP_ROOT/case-8-submodule"
 INNER="$CASE_ROOT/inner-source"
 MIDDLE="$CASE_ROOT/middle-source"
 REPO="$CASE_ROOT/repo"
@@ -320,12 +411,33 @@ git -C "$REPO" -c protocol.file.allow=always submodule add -q \
 commit_all "$REPO" "add outer submodule"
 git -C "$REPO" -c protocol.file.allow=always submodule update -q \
   --init --recursive || abort "cannot initialize nested submodules"
+run_tree "clean-registered-submodule" "$REPO" "$REPO" "$TEMP_BASE"
+expect_status 0 "clean registered submodule succeeds"
+expect_oid_output "clean registered submodule"
 printf 'inner dirty\n' > "$REPO/outer module/nested module/payload.txt"
 run_tree "dirty-nested-submodule" "$REPO" "$REPO" "$TEMP_BASE"
 expect_status 3 "dirty nested submodule exits with binding-unavailable status 3"
 expect_empty_stdout "dirty nested submodule"
 expect_one_line_stderr "binding unavailable: a submodule has modifications" \
   "dirty nested submodule"
+
+# 9. A newly discovered embedded repository cannot be content-completely bound.
+CASE_ROOT="$TMP_ROOT/case-9-embedded-repository"
+REPO="$CASE_ROOT/repo"
+EMBEDDED="$REPO/embedded"
+TEMP_BASE="$CASE_ROOT/script-tmp"
+init_repo "$REPO"
+printf 'outer\n' > "$REPO/outer.txt"
+commit_all "$REPO" "outer initial"
+init_repo "$EMBEDDED"
+printf 'v1\n' > "$EMBEDDED/x.txt"
+commit_all "$EMBEDDED" "embedded initial"
+run_tree "untracked-embedded-repository" "$REPO" "$REPO" "$TEMP_BASE"
+expect_status 3 "untracked embedded repository exits with binding-unavailable status 3"
+expect_empty_stdout "untracked embedded repository"
+expect_one_line_stderr \
+  "binding unavailable: a submodule has modifications or an unregistered embedded repository may be present" \
+  "untracked embedded repository"
 
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' \

@@ -4,35 +4,35 @@ This is the manual pre-release checklist for `codex-engineering-mode` and, later
 
 Every case is a fixed fixture that freezes three things: the prompt string, the assumed environment, and the expected invariants. Pass/fail is read directly from a transcript plus the frozen fixture; no case may require interpretation of intent.
 
-- **Common assumed environment:** fresh repo, no calibration record, no standing authorization; kickoff answers are part of each fixture, or marked "n/a" when the route dispatches nothing writable.
+- **Common assumed environment:** fresh repo, no calibration record, no standing authorization; kickoff answers (stop point, cadence, model/effort) are part of each writable fixture, or marked "n/a" when the route dispatches nothing writable.
 - **Dispatch-count semantics:** An implementation dispatch = a new unit's initial dispatch; same-thread iteration resumes (review findings, gate fixes) do not increment the count.
 
 ## Routing cases
 
 - [ ] **1**
   - Prompt: "Execute item 1 in approved PLAN.md."
-  - Frozen setup: fixture supplies a frozen `PLAN.md` with two items; kickoff: stop=pr.
-  - Pass when: Kernel direct via precedence 4; item 1's units taken from PLAN.md unchanged; no investigation phase beyond plan-drift validation; stops at an open PR.
+  - Frozen setup: fixture supplies the frozen `PLAN.md` inline (two items: 1. add `--verbose` flag to `scripts/foo.sh` with acceptance criteria and expected test; 2. update `README.md` usage section); kickoff: stop=pr, cadence=confirm, model/effort=inherit.
+  - Pass when: Kernel direct via precedence 4 — rule 3 defers to rule 4 for plan-governed changes even when item 1 is small; item 1's units taken from PLAN.md unchanged; no investigation phase beyond plan-drift validation; stops at an open PR.
 - [ ] **2**
   - Prompt: "Fix this duplicate-charge bug end to end."
-  - Frozen setup: kickoff: stop=pr.
+  - Frozen setup: kickoff: stop=pr, cadence=confirm, model/effort=inherit.
   - Pass when: Engineering mode → bug-fix; a recorded reproduce step precedes the first implementation dispatch; ≥ 1 implementation dispatch; report contains required vs achieved verification.
 - [ ] **3**
   - Prompt: "Investigate why startup regressed; don't modify code."
   - Frozen setup: kickoff: n/a.
-  - Pass when: Precedence 2 → investigation; **zero implementation dispatches**; no diff; deliverable is an evidence-backed answer separating fact, inference, and open uncertainty.
+  - Pass when: Precedence 2 → investigation under the investigation playbook's discipline; **zero implementation dispatches**; no diff; deliverable is an evidence-backed answer separating fact, inference, and open uncertainty.
 - [ ] **4**
-  - Prompt: "Work with me on a plan only."
+  - Prompt: "Work with me on a plan only for adding a `--json` output flag to `scripts/foo.sh`."
   - Frozen setup: kickoff: n/a.
-  - Pass when: Precedence 2 → plan-only; zero implementation dispatches; plan artifact written to `plans/`, left uncommitted; run ends before any unit decomposition is dispatched.
+  - Pass when: Precedence 2 → plan-only; zero implementation dispatches; plan artifact for the named objective written to `plans/`, left uncommitted; run ends before any unit decomposition is dispatched.
 - [ ] **5**
   - Prompt: "Execute this approved plan and verify the live CLI afterward."
-  - Frozen setup: fixture supplies a frozen two-unit plan file; kickoff: stop=pr.
-  - Pass when: Engineering mode in passthrough via precedence 4's capability branch; plan's two units executed unchanged — plan lock; report shows required=`artifact` and the achieved level with oracle result.
+  - Frozen setup: fixture supplies the frozen plan inline (two units: 1. add `--quiet` flag to `scripts/foo.sh`; 2. wire it through `scripts/bar.sh` — each with acceptance criteria and expected tests; required verification: `artifact`); kickoff: stop=pr, cadence=confirm, model/effort=inherit.
+  - Pass when: Engineering mode in passthrough via precedence 4's capability branch; the plan's two units executed unchanged — plan lock; exactly 2 implementation dispatches; report shows required=`artifact` and the achieved level with oracle result.
 - [ ] **6**
   - Prompt: "Rename the private helper `parse_args` in `scripts/foo.sh` to `parse_cli_args`."
-  - Frozen setup: kickoff: stop=worktree.
-  - Pass when: Precedence 3 fast path — an explicit change request, beats the refactor playbook; exactly 1 implementation dispatch; achieved verification `focused` — the script is runtime content, so `not_applicable` would be an invalid classification; verdict bound to equal before/after tree OIDs, no commit created.
+  - Frozen setup: **invoked explicitly as codex-engineering-mode** (rule 1; internal routing then applies — a bare auto-selected request this precise may legitimately go kernel-direct instead, per the trigger boundary); kickoff: stop=worktree, cadence=confirm, model/effort=inherit.
+  - Pass when: Precedence 3 fast path — an explicit change request, beats the refactor playbook; exactly 1 implementation dispatch; achieved verification `focused` or the stronger `artifact` — the script is runtime content, so `not_applicable` would be an invalid classification; verdict bound to equal before/after tree OIDs, no commit created.
 - [ ] **7**
   - Prompt: "Plan only for renaming the private helper `parse_args` in `scripts/foo.sh`; don't implement."
   - Frozen setup: kickoff: n/a.

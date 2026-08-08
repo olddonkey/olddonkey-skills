@@ -7,9 +7,10 @@
 #   goes to stdout.
 # - Operational failure (any Git step fails, not in a Git worktree, and so on):
 #   exit 1 with no stdout output; diagnostics go to stderr.
-# - Binding unavailable (any submodule modification): exit 3 with no stdout
-#   output and a one-line stderr explanation. Exit 3 is distinct so callers
-#   never confuse "cannot bind" with "the operation broke."
+# - Binding unavailable (any submodule modification or an unregistered embedded
+#   repository): exit 3 with no stdout output and a one-line stderr explanation.
+#   Exit 3 is distinct so callers never confuse "cannot bind" with "the
+#   operation broke."
 
 set -euo pipefail
 
@@ -35,7 +36,8 @@ error() {
 }
 
 binding_unavailable() {
-  printf 'tree-oid: binding unavailable: a submodule has modifications\n' >&2
+  printf '%s\n' \
+    'tree-oid: binding unavailable: a submodule has modifications or an unregistered embedded repository may be present' >&2
   exit 3
 }
 
@@ -48,6 +50,7 @@ INDEX_FILE="$TEMP_ROOT/index"
 STATUS_FILE="$TEMP_ROOT/status"
 INDEX_ENTRIES="$TEMP_ROOT/index-entries"
 HEAD_ENTRIES="$TEMP_ROOT/head-entries"
+THROWAWAY_ENTRIES="$TEMP_ROOT/throwaway-index-entries"
 HEAD_REF_FILE="$TEMP_ROOT/head-ref"
 OID_FILE="$TEMP_ROOT/tree-oid"
 
@@ -64,6 +67,13 @@ TOPLEVEL_ROOT="$(cd "$TOPLEVEL" && pwd -P)" || \
   error "cannot resolve the Git worktree root"
 [[ "$CURRENT_ROOT" == "$TOPLEVEL_ROOT" ]] || \
   error "run from the target worktree root"
+
+REAL_INDEX_PATH="$(git rev-parse --git-path index 2>/dev/null)" || \
+  error "could not locate the real index"
+[[ -n "$REAL_INDEX_PATH" ]] || error "Git returned an empty real-index path"
+if [[ "$REAL_INDEX_PATH" != /* ]]; then
+  REAL_INDEX_PATH="$TOPLEVEL_ROOT/$REAL_INDEX_PATH"
+fi
 
 # A failed HEAD verification is an unborn branch only when HEAD is symbolic
 # and its target ref does not exist. Other broken/detached states fail closed.
@@ -150,12 +160,29 @@ while :; do
 done
 exec 3<&-
 
-if [[ $HAS_HEAD -eq 1 ]]; then
-  GIT_INDEX_FILE="$INDEX_FILE" git read-tree HEAD > "$TEMP_ROOT/read-tree.out" || \
-    error "git read-tree failed"
+if [[ -e "$REAL_INDEX_PATH" ]]; then
+  cp "$REAL_INDEX_PATH" "$INDEX_FILE" || error "could not copy the real index"
+elif [[ -L "$REAL_INDEX_PATH" ]]; then
+  error "the real index path is a broken symbolic link"
 fi
-GIT_INDEX_FILE="$INDEX_FILE" git add -A > "$TEMP_ROOT/add.out" || \
+if ! GIT_INDEX_FILE="$INDEX_FILE" git -c advice.addEmbeddedRepo=false add -A \
+    > "$TEMP_ROOT/add.out" 2> "$TEMP_ROOT/add.err"; then
+  if [[ -s "$TEMP_ROOT/add.err" ]]; then
+    cat "$TEMP_ROOT/add.err" >&2 || true
+  fi
   error "git add -A failed"
+fi
+GIT_INDEX_FILE="$INDEX_FILE" git ls-files --stage -z \
+  > "$THROWAWAY_ENTRIES" || error "could not inspect the throwaway index"
+while IFS= read -r -d '' record; do
+  [[ "$record" == *$'\t'* ]] || error "malformed throwaway index output"
+  if [[ "$record" == 160000\ * ]]; then
+    path="${record#*$'\t'}"
+    if ! path_is_submodule "$path"; then
+      binding_unavailable
+    fi
+  fi
+done < "$THROWAWAY_ENTRIES"
 GIT_INDEX_FILE="$INDEX_FILE" git write-tree > "$OID_FILE" || \
   error "git write-tree failed"
 

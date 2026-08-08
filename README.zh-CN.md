@@ -13,9 +13,10 @@
 
 ---
 
-目前包含两个 Claude Code skill，外加一个实现循环的 Cursor Plugin 移植版：
+目前包含三个 Claude Code skill，外加一个实现循环的 Cursor Plugin 移植版：
 
 - [`codex-implementation-loop`](#codex-implementation-loop) —— 把实现交给 Codex，但不把判断交出去：Claude 亲自审查真实 diff、跑全量测试门禁，只发布自己敢签名的改动。
+- `codex-engineering-mode` —— 目标先行的工程主导模式：先调查、定设计、写计划，再逐单元驱动 `codex-implementation-loop`。
 - [`cursor-implementation-loop`](#cursor-implementation-loop) —— `codex-implementation-loop` 的 Cursor Plugin 移植：父 agent 负责 review / 门禁 / 发布，implementer 子 agent 写代码；`run-gate.sh` 与 Codex 版逐字共享。
 - [`web-slides`](#web-slides) —— 把素材 / 提纲做成点击驱动的 16:9 HTML 幻灯片，用于现场放映；内置 24 套主题 + 演讲者窗口，投屏时口播稿对观众不可见。
 
@@ -23,16 +24,17 @@
 
 ### 插件市场（推荐）
 
-在 Claude Code 里先添加一次 marketplace，再按需安装其中一个或两个 skill：
+在 Claude Code 里先添加一次 marketplace，再按需安装需要的 skill：
 
 ```text
 /plugin marketplace add olddonkey/olddonkey-skills
 /plugin install codex-implementation-loop@olddonkey-skills
+/plugin install codex-engineering-mode@olddonkey-skills
 /plugin install web-slides@olddonkey-skills
 /reload-plugins
 ```
 
-`codex-implementation-loop` 还需要官方 Codex 插件和已登录的 Codex CLI，见下方[环境准备](#环境准备)；`web-slides` 除了生成的幻灯片项目需要 Node.js 之外没有额外依赖。
+`codex-engineering-mode` 依赖 `codex-implementation-loop` 和官方 Codex companion 插件；Codex 环境还需要已登录的 Codex CLI，见下方[环境准备](#环境准备)。`web-slides` 除了生成的幻灯片项目需要 Node.js 之外没有额外依赖。
 
 ### 手动安装
 
@@ -254,6 +256,7 @@ review 或门禁发现的 bug 也要作为新单元交给 implementer——父 a
 ```text
 /plugin marketplace update olddonkey-skills
 /plugin update codex-implementation-loop@olddonkey-skills
+/plugin update codex-engineering-mode@olddonkey-skills
 /plugin update web-slides@olddonkey-skills
 /reload-plugins
 ```

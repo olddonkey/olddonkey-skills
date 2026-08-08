@@ -13,9 +13,10 @@
 
 ---
 
-Two Claude Code skills so far, plus a Cursor Plugin port of the implementation loop:
+Three Claude Code skills so far, plus a Cursor Plugin port of the implementation loop:
 
 - [`codex-implementation-loop`](#codex-implementation-loop) — delegate implementation to Codex without delegating judgment: Claude reviews the real diff, runs the full test gate, and ships only what it would sign its name to.
+- `codex-engineering-mode` — goal-first engineering ownership: investigate, design, and plan, then drive `codex-implementation-loop` unit by unit.
 - [`cursor-implementation-loop`](#cursor-implementation-loop) — Cursor Plugin port of `codex-implementation-loop`: the parent agent reviews, gates, and publishes; an implementer subagent writes code; `run-gate.sh` is shared verbatim.
 - [`web-slides`](#web-slides) — turn material or outlines into click-driven 16:9 HTML slide decks for live presenting, with 24 built-in themes and a presenter view that keeps speaker notes off the shared screen.
 
@@ -23,16 +24,17 @@ Two Claude Code skills so far, plus a Cursor Plugin port of the implementation l
 
 ### Marketplace (recommended)
 
-Inside Claude Code, add the marketplace once, then install either skill or both:
+Inside Claude Code, add the marketplace once, then install the skills you want:
 
 ```text
 /plugin marketplace add olddonkey/olddonkey-skills
 /plugin install codex-implementation-loop@olddonkey-skills
+/plugin install codex-engineering-mode@olddonkey-skills
 /plugin install web-slides@olddonkey-skills
 /reload-plugins
 ```
 
-`codex-implementation-loop` additionally needs the official Codex plugin and an authenticated Codex CLI — see [Setup](#setup) below. `web-slides` needs nothing beyond Node.js for the generated slide project.
+`codex-engineering-mode` requires `codex-implementation-loop` plus the official Codex companion plugin; the Codex setup also needs an authenticated Codex CLI — see [Setup](#setup) below. `web-slides` needs nothing beyond Node.js for the generated slide project.
 
 ### Manual
 
@@ -254,6 +256,7 @@ For a marketplace installation, run inside Claude Code:
 ```text
 /plugin marketplace update olddonkey-skills
 /plugin update codex-implementation-loop@olddonkey-skills
+/plugin update codex-engineering-mode@olddonkey-skills
 /plugin update web-slides@olddonkey-skills
 /reload-plugins
 ```
