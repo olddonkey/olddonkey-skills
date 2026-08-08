@@ -72,7 +72,7 @@ jobs:
               missing = [
                   key
                   for key in ("name", "description")
-                  if not any(re.match(rf"^{key}\s*:", line) for line in frontmatter)
+                  if not any(re.match(rf"^{key}\s*:\s*\S", line) for line in frontmatter)
               ]
               if missing:
                   errors.append(f"{path}: missing frontmatter key(s): {', '.join(missing)}")
