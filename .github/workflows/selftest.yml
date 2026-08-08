@@ -15,6 +15,8 @@ jobs:
           bash -n skills/codex-implementation-loop/scripts/selftest.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
+          bash -n install-cursor.sh
+          bash -n install-cursor-selftest.sh
       - name: Shared run-gate.sh must stay identical
         run: |
           diff -q \
@@ -24,6 +26,8 @@ jobs:
         run: bash skills/codex-implementation-loop/scripts/selftest.sh
       - name: Cursor gate selftest
         run: bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
+      - name: Cursor installer selftest
+        run: bash install-cursor-selftest.sh
       - name: Engineering mode packaging checks
         run: |
           bash -n skills/codex-engineering-mode/scripts/tree-oid.sh

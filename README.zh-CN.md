@@ -60,6 +60,20 @@ ln -s ~/Documents/olddonkey-skills/skills/<skill-name> ~/.claude/skills/<skill-n
 
 在 Cursor 中，将 [`cursor-implementation-loop`](#cursor-implementation-loop) 安装为本地插件（skill 与 agents 一起装）。个人电脑或临时 / 公司电脑都适用——只写你 home 目录：
 
+一行安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/olddonkey/olddonkey-skills/main/install-cursor.sh | bash
+```
+
+若机器禁用了 Cursor 本地插件，可加 `--copy` 强制使用裸文件拷贝模式：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/olddonkey/olddonkey-skills/main/install-cursor.sh | bash -s -- --copy
+```
+
+也可以手动安装本地插件软链接：
+
 ```bash
 git clone https://github.com/olddonkey/olddonkey-skills
 mkdir -p ~/.cursor/plugins/local

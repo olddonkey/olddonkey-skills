@@ -60,6 +60,20 @@ If you created `~/.claude/skills` for the first time during an active Claude Cod
 
 For Cursor, install [`cursor-implementation-loop`](#cursor-implementation-loop) as a local plugin (skills and agents together). Works on a personal machine or a temporary/company laptop — only writes under your home directory:
 
+One-line install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/olddonkey/olddonkey-skills/main/install-cursor.sh | bash
+```
+
+On machines where Cursor local plugins are blocked, force bare-copy mode with `--copy`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/olddonkey/olddonkey-skills/main/install-cursor.sh | bash -s -- --copy
+```
+
+Alternatively, install the local-plugin symlink manually:
+
 ```bash
 git clone https://github.com/olddonkey/olddonkey-skills
 mkdir -p ~/.cursor/plugins/local
