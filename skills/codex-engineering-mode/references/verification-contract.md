@@ -45,10 +45,14 @@ The verdict is valid only when both runs exit `0` and the two OIDs are equal.
 
 The worktree tree id identifies the tree produced by staging the complete non-ignored worktree with `git add -A` in a throwaway index. It includes tracked and untracked contents and excludes ignored files. It is narrower than what a commit could contain because a commit may stage selectively.
 
-Two exclusions must be disclosed:
+Three exclusions must be disclosed:
 
 - Content is clean-filter normalized, so raw bytes that normalize identically are indistinguishable; large filter or LFS pipelines can also make this slow.
 - Submodule internals appear only as gitlink SHAs.
+- The identity inherits ordinary git stat-cache semantics: like `git add
+  -A` itself, a racy same-size edit with a restored mtime between the two
+  snapshot runs can in principle evade change detection. This matches
+  literal git behavior and is not stronger.
 
 Worktree binding is unavailable when any of these conditions exists:
 

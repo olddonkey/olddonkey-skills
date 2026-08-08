@@ -171,7 +171,8 @@ case "$mode" in
   status)
     output="$audit_dir/child-status"
     git -c core.fsmonitor=false -c core.untrackedcache=false \
-      status --porcelain -z --ignore-submodules=none > "$output" || \
+      status --porcelain -z --ignore-submodules=none \
+      --untracked-files=all > "$output" || \
       operational_failure
     if [[ -s "$output" ]]; then
       : > "$audit_dir/dirty-submodule" || operational_failure

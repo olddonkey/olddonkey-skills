@@ -1,15 +1,14 @@
 # Engineering Mode v1
 
-Status: r9 — executing. r7 accepted at Codex plan-review round 6; user
+Status: r11 — executing. r7 accepted at Codex plan-review round 6; user
 approved. PRs 1–2 merged 2026-08-08 (#21 → 94c2ff8, #22 → 022c81b).
-Post-merge holistic review round 1 (REVISE, two reproduced defects) fixed
-and merged as #23 → 2b9df5c; round 2 (REVISE, index-flag suppression)
-fixed and merged as #24 → 0075927; round 3 (REVISE, suppression inside
-registered submodules — reproduced) fixed on `engineering-mode-fixes-r3`
-with recursive child audits, contract interface documentation, and this
-doc sync. Selftest suite now also covers child-suppression cases and
-asserts its own final count. PR 3 remains blocked on the §3 dogfood
-milestone.
+Post-merge holistic review rounds, each with reproduced defects fixed and
+merged: round 1 → #23 (2b9df5c); round 2, index-flag suppression → #24
+(0075927); round 3, suppression inside registered submodules → #25
+(de8925d); round 4, child untracked files hidden by status config →
+`engineering-mode-fixes-r4` with this doc sync. The selftest suite covers
+all suppression variants recursively and asserts its own final count.
+PR 3 remains blocked on the §3 dogfood milestone.
 Scope: `olddonkey/olddonkey-skills`
 Shape: goal-first wrapper over the existing implementation-loop kernels
 Executable by: codex-implementation-loop, unit by unit, after approval
@@ -309,9 +308,12 @@ prints **exactly one tree OID** on stdout and exits 0; operational
 failure exits nonzero with **no stdout output**; binding-unavailable is a
 **distinct documented exit code** (3) with no stdout output — the router
 never parses stderr to learn the outcome. Exit-3 causes: a modified
-submodule; an unregistered embedded repository absorbed as a gitlink; any
-skip-worktree index entry (sparse checkouts therefore cannot
-worktree-bind — a disclosed limitation); an assume-unchanged gitlink.
+submodule (child dirtiness re-checked recursively with fsmonitor,
+untracked-cache, and untracked-file config overridden); change-suppression
+flags in a populated registered submodule's own index, at any depth; an
+unregistered embedded repository absorbed as a gitlink; any skip-worktree
+index entry (sparse checkouts therefore cannot worktree-bind — a disclosed
+limitation); an assume-unchanged gitlink.
 **Internals:** throwaway index seeded by **copying the real index** (the
 identity is "what `git add -A` would commit right now"); assume-unchanged
 bits on regular entries cleared in the throwaway index only; temp index

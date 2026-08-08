@@ -38,6 +38,7 @@ RUN_STATUS=0
 RUN_STDOUT=""
 RUN_STDERR=""
 RUN_OID=""
+RUN_TREE_PATH=""
 SPARSE_CAPABILITY_AVAILABLE=0
 
 abort() {
@@ -168,7 +169,8 @@ run_tree() { # $1=name $2=execution dir $3=repo to protect $4=temp base
   RUN_STDOUT="$result_dir/stdout"
   RUN_STDERR="$result_dir/stderr"
   snapshot_repo "$repo" "$before"
-  if (cd "$execution_dir" && TMPDIR="$temp_base" bash "$TREE_OID") \
+  if (cd "$execution_dir" && TMPDIR="$temp_base" \
+      PATH="${RUN_TREE_PATH:-$PATH}" bash "$TREE_OID") \
       > "$RUN_STDOUT" 2> "$RUN_STDERR"; then
     RUN_STATUS=0
   else
@@ -481,12 +483,81 @@ git -C "$REPO" -c protocol.file.allow=always submodule add -q \
 commit_all "$REPO" "add outer submodule"
 git -C "$REPO" -c protocol.file.allow=always submodule update -q \
   --init --recursive || abort "cannot initialize nested submodules"
-run_tree "clean-registered-submodule" "$REPO" "$REPO" "$TEMP_BASE"
-expect_status 0 "clean registered submodule succeeds"
-expect_oid_output "clean registered submodule"
 OUTER_WORKTREE="$REPO/outer module"
 INNER_WORKTREE="$OUTER_WORKTREE/nested module"
+run_tree_with_child "clean-registered-submodule" \
+  "$REPO" "$REPO" "$TEMP_BASE" "$OUTER_WORKTREE"
+expect_status 0 "clean registered submodule succeeds"
+expect_oid_output "clean registered submodule"
 SUBMODULE_SUPPRESSION_MESSAGE="binding unavailable: a registered submodule's index carries change-suppression flags; worktree binding is unavailable"
+
+# A child-local status preference must not hide a non-ignored untracked file
+# from either recursive dirtiness audit.
+git -C "$OUTER_WORKTREE" config status.showUntrackedFiles no || \
+  abort "cannot suppress default untracked-file display in the child"
+printf 'untracked child content\n' > "$OUTER_WORKTREE/child-untracked.txt"
+run_tree_with_child "child-untracked-hidden-by-config" \
+  "$REPO" "$REPO" "$TEMP_BASE" "$OUTER_WORKTREE"
+expect_status 3 \
+  "child untracked file hidden by config exits with binding-unavailable status 3"
+expect_empty_stdout "child untracked file hidden by config"
+expect_one_line_stderr "binding unavailable: a submodule has modifications" \
+  "child untracked file hidden by config"
+rm "$OUTER_WORKTREE/child-untracked.txt" || \
+  abort "cannot remove the child untracked-file fixture"
+git -C "$OUTER_WORKTREE" config --unset status.showUntrackedFiles || \
+  abort "cannot restore the child untracked-file setting"
+
+# Fail only the auditor's child status command. Its sentinel must turn the
+# recursive foreach failure into an operational exit, never a published OID.
+AUDITOR_FAILURE_BIN="$CASE_ROOT/auditor-failure-bin"
+mkdir -p "$AUDITOR_FAILURE_BIN" || abort "cannot create auditor failure bin"
+REAL_BASH="$(command -v bash)" || abort "cannot locate bash for auditor failure"
+REAL_GIT="$(command -v git)" || abort "cannot locate git for auditor failure"
+if ! command cat > "$AUDITOR_FAILURE_BIN/bash" <<'AUDITOR_BASH_FAILURE_EOF'
+#!/bin/sh
+set -u
+
+if [ "${1-}" = "${TREE_OID_SUBMODULE_AUDITOR-}" ] &&
+   [ "${2-}" = "status" ]; then
+  export TREE_OID_SELFTEST_FAIL_CHILD_GIT=1
+  PATH="${TREE_OID_SELFTEST_FAILURE_BIN:?}:$PATH"
+  export PATH
+fi
+
+exec "${TREE_OID_SELFTEST_REAL_BASH:?}" "$@"
+AUDITOR_BASH_FAILURE_EOF
+then
+  abort "cannot create auditor bash wrapper"
+fi
+if ! command cat > "$AUDITOR_FAILURE_BIN/git" <<'AUDITOR_GIT_FAILURE_EOF'
+#!/bin/sh
+set -u
+
+if [ "${TREE_OID_SELFTEST_FAIL_CHILD_GIT-}" = "1" ]; then
+  exit 97
+fi
+
+exec "${TREE_OID_SELFTEST_REAL_GIT:?}" "$@"
+AUDITOR_GIT_FAILURE_EOF
+then
+  abort "cannot create auditor git wrapper"
+fi
+chmod +x "$AUDITOR_FAILURE_BIN/bash" "$AUDITOR_FAILURE_BIN/git" || \
+  abort "cannot make auditor failure wrappers executable"
+export TREE_OID_SELFTEST_REAL_BASH="$REAL_BASH"
+export TREE_OID_SELFTEST_REAL_GIT="$REAL_GIT"
+export TREE_OID_SELFTEST_FAILURE_BIN="$AUDITOR_FAILURE_BIN"
+RUN_TREE_PATH="$AUDITOR_FAILURE_BIN:$PATH"
+run_tree "child-status-operational-failure" \
+  "$REPO" "$REPO" "$TEMP_BASE"
+RUN_TREE_PATH=""
+unset TREE_OID_SELFTEST_REAL_BASH TREE_OID_SELFTEST_REAL_GIT \
+  TREE_OID_SELFTEST_FAILURE_BIN
+expect_status 1 "child status operational failure exits 1"
+expect_empty_stdout "child status operational failure"
+expect_one_line_stderr "tree-oid: could not re-check registered-submodule dirtiness" \
+  "child status operational failure"
 
 # The reproduced failure changed an assume-unchanged child path twice. Both
 # observations must now fail closed, without mutating either real index.
@@ -675,13 +746,13 @@ else
     "installed Git does not support the cone-mode sparse-checkout setup used by this test"
 fi
 
-# Expected final totals include the count assertion itself: 182 checks on the
-# full-capability path, or 175 when the sparse capability skip replaces that
+# Expected final totals include the count assertion itself: 202 checks on the
+# full-capability path, or 195 when the sparse capability skip replaces that
 # case's eight checks with one documented skip.
 if [[ $SPARSE_CAPABILITY_AVAILABLE -eq 1 ]]; then
-  EXPECTED_FINAL_CHECKS=182
+  EXPECTED_FINAL_CHECKS=202
 else
-  EXPECTED_FINAL_CHECKS=175
+  EXPECTED_FINAL_CHECKS=195
 fi
 RUN_STDOUT=""
 RUN_STDERR=""
