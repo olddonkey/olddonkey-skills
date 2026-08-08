@@ -50,12 +50,16 @@ usage() {
   cat <<'USAGE'
 Usage:
   curl -fsSL https://raw.githubusercontent.com/olddonkey/olddonkey-skills/main/install-cursor.sh | bash
-  bash install-cursor.sh [--copy]
+  bash install-cursor.sh [--copy | --link]
   bash install-cursor.sh --help
 
 Options:
-  --copy  Force bare-copy mode instead of installing a local-plugin symlink.
+  --copy  Install the standalone skill and agents (default; explicit alias).
+  --link  Install a local-plugin symlink for older Cursor builds that scan plugins/local.
   --help  Show this help and exit.
+
+Bare copy is the default because current Cursor builds register plugins through
+the UI instead of scanning plugins/local.
 
 Environment overrides:
   OLDDONKEY_SKILLS_DIR   Checkout location (default: $HOME/olddonkey-skills)
@@ -81,11 +85,14 @@ path_exists() { # $1=path, including a broken symbolic link
   [[ -e "$1" || -L "$1" ]]
 }
 
-FORCE_COPY=0
+LINK_MODE=0
 for argument in "$@"; do
   case "$argument" in
     --copy)
-      FORCE_COPY=1
+      LINK_MODE=0
+      ;;
+    --link)
+      LINK_MODE=1
       ;;
     --help)
       usage
@@ -298,15 +305,17 @@ install_copy() {
 INSTALL_MODE=""
 INSTALLED_GATE=""
 VERIFY_TMPDIR=""
-if [[ $FORCE_COPY -eq 1 ]]; then
-  install_copy
-  INSTALL_MODE="bare copy"
-  INSTALLED_GATE="$COPY_DEST/scripts/gate-selftest.sh"
-  VERIFY_TMPDIR="$CURSOR_SKILLS"
-elif install_symlink; then
-  INSTALL_MODE="symlink"
-  INSTALLED_GATE="$PLUGIN_LINK/skills/cursor-implementation-loop/scripts/gate-selftest.sh"
-  VERIFY_TMPDIR="$PLUGIN_PARENT"
+if [[ $LINK_MODE -eq 1 ]]; then
+  if install_symlink; then
+    INSTALL_MODE="symlink"
+    INSTALLED_GATE="$PLUGIN_LINK/skills/cursor-implementation-loop/scripts/gate-selftest.sh"
+    VERIFY_TMPDIR="$PLUGIN_PARENT"
+  else
+    install_copy
+    INSTALL_MODE="bare copy"
+    INSTALLED_GATE="$COPY_DEST/scripts/gate-selftest.sh"
+    VERIFY_TMPDIR="$CURSOR_SKILLS"
+  fi
 else
   install_copy
   INSTALL_MODE="bare copy"
@@ -343,3 +352,21 @@ Next steps:
   2. Invoke the workflow with /cursor-implementation-loop.
   3. ~/.cursor/agents/loop-implementer.md ships with model: inherit; pinning a real model is recommended (edit its frontmatter).
 NEXT_STEPS
+
+if [[ "$INSTALL_MODE" == "bare copy" ]]; then
+  printf '%s\n' \
+    'Want true plugin form?' \
+    '  In Cursor, open Customize → Plugins, press "+ Add", and select:' \
+    "    $CHECKOUT_DIR" \
+    '  It contains .cursor-plugin/marketplace.json, which registers the cursor-implementation-loop plugin.' \
+    '  Then remove the standalone copies to avoid double-loading:' \
+    '    rm -rf "$HOME/.cursor/skills/cursor-implementation-loop"' \
+    '    rm -f "$HOME/.cursor/agents/loop-implementer.md" "$HOME/.cursor/agents/loop-independent-reviewer.md"'
+else
+  printf '%s\n' \
+    'Warning: current Cursor builds may not scan plugins/local.' \
+    '  If the plugin does not appear, open Customize → Plugins, press "+ Add",' \
+    "  and select $CHECKOUT_DIR." \
+    '  It contains .cursor-plugin/marketplace.json, which registers the cursor-implementation-loop plugin.' \
+    '  Or rerun this installer in default copy mode.'
+fi

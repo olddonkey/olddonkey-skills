@@ -58,19 +58,21 @@ ln -s ~/Documents/olddonkey-skills/skills/<skill-name> ~/.claude/skills/<skill-n
 
 ### Cursor Plugin
 
-在 Cursor 中，将 [`cursor-implementation-loop`](#cursor-implementation-loop) 安装为本地插件（skill 与 agents 一起装）。个人电脑或临时 / 公司电脑都适用——只写你 home 目录：
+在 Cursor 中，一行安装器会把独立 skill 和两个 agents 裸拷贝到 Cursor 可发现的目录。适用于当前所有 build，也适用于个人电脑或临时 / 公司电脑——只写你的 home 目录：
 
-一行安装：
+一行安装（默认裸拷贝）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/olddonkey/olddonkey-skills/main/install-cursor.sh | bash
 ```
 
-若机器禁用了 Cursor 本地插件，可加 `--copy` 强制使用裸文件拷贝模式：
+`--copy` 仍可作为默认模式的显式别名。对于仍会扫描 `plugins/local` 的旧版 Cursor，可用 `--link` 选择 managed-checkout 软链接：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/olddonkey/olddonkey-skills/main/install-cursor.sh | bash -s -- --copy
+curl -fsSL https://raw.githubusercontent.com/olddonkey/olddonkey-skills/main/install-cursor.sh | bash -s -- --link
 ```
+
+想使用真正的插件形态？在 Cursor 的 Customize → Plugins 页面按 "+ Add"，选择 `$OLDDONKEY_SKILLS_DIR`（默认：`~/olddonkey-skills`）；该 checkout 根目录包含 `.cursor-plugin/marketplace.json`，它会注册 `cursor-implementation-loop` 插件。然后删除独立拷贝，避免重复加载。
 
 也可以手动安装本地插件软链接：
 
@@ -89,7 +91,7 @@ bash ~/.cursor/plugins/local/cursor-implementation-loop/skills/cursor-implementa
 # 期望输出：selftest: PASS (122 checks)
 ```
 
-若本地插件目录不可用，改用裸文件拷贝——两步都要做：
+若想手动复现默认安装，请裸拷贝文件——两步都要做：
 
 ```bash
 mkdir -p ~/.cursor/skills ~/.cursor/agents
