@@ -5,10 +5,11 @@ approved. PRs 1–2 merged 2026-08-08 (#21 → 94c2ff8, #22 → 022c81b).
 Post-merge holistic review rounds, each with reproduced defects fixed and
 merged: round 1 → #23 (2b9df5c); round 2, index-flag suppression → #24
 (0075927); round 3, suppression inside registered submodules → #25
-(de8925d); round 4, child untracked files hidden by status config →
-`engineering-mode-fixes-r4` with this doc sync. The selftest suite covers
-all suppression variants recursively and asserts its own final count.
-PR 3 remains blocked on the §3 dogfood milestone.
+(de8925d); round 4, child untracked files hidden by status config → #26 (2c9a9fa).
+Round 5 found no exploitable binding defect and cleared the mechanism for
+dogfooding; this revision closes its documentation-drift findings. The
+selftest suite covers all suppression variants recursively and asserts
+its own final count. PR 3 remains blocked on the §3 dogfood milestone.
 Scope: `olddonkey/olddonkey-skills`
 Shape: goal-first wrapper over the existing implementation-loop kernels
 Executable by: codex-implementation-loop, unit by unit, after approval
@@ -285,14 +286,20 @@ could certify files the verification itself changed).
 **staging the complete non-ignored worktree** (`git add -A` into a
 throwaway index) — tracked and untracked contents included, ignored files
 excluded; narrower than "what a commit could contain", since ordinary
-commits may stage selectively. Two disclosed exclusions: content is
+commits may stage selectively. Three disclosed exclusions: content is
 clean-filter normalized (raw bytes that normalize identically are
 indistinguishable; on large filter/LFS pipelines this step can also be
-slow), and submodule internals appear only as gitlink SHAs. Therefore:
-**if `git status --porcelain --ignore-submodules=none` shows any
-submodule modification — the flag forces detection regardless of repo or
-user config — worktree binding is unavailable**: the report says so and
-the verdict is at best incomplete. A commit-binding stop point resolves
+slow); submodule internals appear only as gitlink SHAs; and the identity
+inherits git's ordinary stat-cache/racy-clean semantics — like literal
+`git add -A`, no stronger — with neither snapshot atomic against
+concurrent writers. Submodule dirtiness detection is **two-layered and
+configuration-independent**: a recursive flag audit of every populated
+registered submodule's own index (any suppression bit → unavailable),
+then a direct child status re-check with fsmonitor, untracked-cache, and
+untracked-file settings explicitly overridden and
+`--ignore-submodules=none`. **Any detected submodule modification makes
+worktree binding unavailable**: the report says so and the verdict is at
+best incomplete. A commit-binding stop point resolves
 this **only when every changed submodule is itself separately committed
 and clean**, so its gitlink identifies real content — committing the
 superproject alone cannot bind uncommitted submodule contents, and
@@ -332,10 +339,13 @@ spaces and a nested submodule (porcelain parsing must be NUL-safe) —
 clean registered submodule positive case, untracked embedded repository
 → exit 3, assume-unchanged file (OID must track content; real index
 keeps its flag), assume-unchanged gitlink → exit 3, skip-worktree entry
-→ exit 3, a sparse checkout → exit 3, and suppression flags inside a
+→ exit 3, a sparse checkout → exit 3, suppression flags inside a
 populated registered submodule's own index — assume-unchanged,
 skip-worktree, and nested variants → exit 3 with the child index left
-untouched. For every case: assertions
+untouched — child untracked files hidden by
+`status.showUntrackedFiles=no` → exit 3, an injected auditor
+operational failure → exit 1, and clean-path child index/refs
+preservation. For every case: assertions
 that the temp directory is cleaned up, failure paths print nothing to
 stdout, and the real index, refs, and worktree are unchanged (index
 bytes, refs listing, content checksums).
