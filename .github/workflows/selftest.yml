@@ -88,7 +88,9 @@ jobs:
                           value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
                       if (
                           value.lower() not in {"", "''", '""', "null", "~"}
-                          and not re.fullmatch(r"[|>][+-]?", value)
+                          and not re.fullmatch(
+                              r"[|>](?:[1-9][+-]?|[+-][1-9]?)?", value
+                          )
                       ):
                           return True
                   return False
