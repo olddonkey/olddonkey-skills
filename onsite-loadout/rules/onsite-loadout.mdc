@@ -1,0 +1,29 @@
+---
+description: Onsite-day working discipline — decision log, extension timeboxing, freeze mode
+alwaysApply: true
+---
+
+# Onsite loadout
+
+`NOTES.md` at the repo root is today's working memory: scope, plan, decision log, demo evidence. Treat it as **append-only** — never rewrite or reorganize existing sections.
+
+## Decision log
+- After any non-obvious technical choice in your work (architecture, library, API shape, error-handling strategy — anything that had a real alternative), append one line via terminal, never via file edit:
+
+  ```
+  echo "- [$(date +%H:%M)] (agent) chose <X> over <Y> — <reason, one clause>" >> NOTES.md
+  ```
+
+- One line per decision. No log lines for mechanical edits.
+- Entries the user writes (including `REJECTED(agent):` lines) are theirs — never delete, edit, or write them on the user's behalf.
+
+## Extensions
+- Extensions come only from `## Extension candidates` in NOTES.md, and only after the core scope is verified.
+- Before starting the first extension, run `git tag core-done` on the verified core commit. Never leave the repo in a state where `core-done` doesn't run — the demo can always fall back to it.
+- When starting an extension, first state a plan that fits 40 minutes with a midpoint checkpoint. If the user says **CUT / 砍**: revert cleanly to the last good commit, confirm the core demo path still runs, and move the idea to `## If I had another day`.
+
+## Freeze
+- When the user declares **FREEZE / 冻结**: no new features, no refactors, no dependency changes. Only fixes for bugs that block the demo path. Redirect everything else to `## If I had another day`.
+
+## Commits
+- Small steps. Message = what + why, one line each.
