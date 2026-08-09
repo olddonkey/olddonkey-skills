@@ -16,7 +16,7 @@
 ```bash
 mkdir -p .cursor/rules .cursor/commands
 cp <clone>/onsite-loadout/rules/onsite-loadout.mdc .cursor/rules/
-cp <clone>/onsite-loadout/commands/demo-check.md .cursor/commands/
+cp <clone>/onsite-loadout/commands/*.md .cursor/commands/
 cp <clone>/onsite-loadout/NOTES.template.md NOTES.md
 ```
 
