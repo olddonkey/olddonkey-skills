@@ -38,7 +38,11 @@ it does **not** by itself prevent MCP or external tool calls (see
 cursor-runtime.md), so the prompt-level prohibition on external services
 applies to investigate dispatches equally. The productive pairing inside the
 loop: on a gnarly problem, `investigate` first to settle the design, then a
-normal `implement` dispatch against the settled spec.
+normal `implement` dispatch against the settled spec. Breadth is the other
+trigger, not just gnarliness: when spec evidence spans many files,
+`investigate` dispatch keeps that reading out of the orchestrating context —
+conclusions and file:line citations come back instead of file contents that
+every later step pays to carry.
 
 **Gate policy** — `baseline` (`--baseline <log>`) accepts no new non-flake
 failures relative to the base branch, which is the honest bar on a suite
