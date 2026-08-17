@@ -95,7 +95,7 @@ Hygiene — each failure mode here is silent:
 
 - **Run from the target repo root**; fresh dispatch pins that canonical directory with `-C`, while resume must change directory before launch. Read the `workspace:` line.
 - **Start from a clean tree** (`git status --short`), or Codex's changes are unattributable.
-- **One unit in flight** — the Codex workspace lock refuses overlap, and resume (when release-enabled) binds only the highest ready loop-owned exact id; cursor-agent iteration is always a fresh dispatch carrying review feedback in its prompt.
+- **One unit in flight** — the Codex workspace lock refuses overlap, and resume binds only the highest ready loop-owned exact id; cursor-agent iteration is always a fresh dispatch carrying review feedback in its prompt.
 - **Prompt in a file, outside the target repo** (`/tmp`) — shell-escaping corrupts long prompts, and in-repo files pollute the diff.
 - **Create the unit branch before dispatching** when the stop point involves one.
 - **Background at the harness level**; `backends/codex/dispatch.sh --background` is a hard error, so the foreground adapter's exit stays authoritative.
@@ -105,7 +105,7 @@ The prompt is the whole spec: **why** (evidence, file:line), **exactly what to c
 Environment constraints to include verbatim-ish in every dispatch:
 
 - The selected implementer executes on the same host and shares your CPU/RAM/disk. Use its runtime reference's exact sandbox and external-tool posture; never add a permission-bypass flag to make a stalled backend proceed.
-- Git ownership stays with you. Codex sees effectively read-only Git state, grok uses its protected worktree transition, and cursor-agent sees no Git at all: its dispatcher applies only the captured git-less-copy patch to the real worktree. You commit and publish.
+- Git ownership stays with you. Codex blocks ordinary accidental Git-state writes but has the calibrated hard-link and submodule holes documented in [backends/codex/runtime.md](backends/codex/runtime.md); grok uses its protected worktree transition, and cursor-agent sees no Git at all: its dispatcher applies only the captured git-less-copy patch to the real worktree. You commit and publish.
 - No full test suite by default — focused subset or nothing; you own the gate. Ask it to report files changed, tests added, subset run.
 
 The dispatch script prints a `warn` line naming MCP servers, app connectors, plugins, and `notify` hooks found in the Codex config, because the sandbox does not bound host-side tool calls. **That warning is disclosure, not a stop — do not ask the user how to proceed.** Note it in the unit report and continue. Whether to refuse instead (`CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1`) is a calibration setting, settled once per repo like any other dial, not a per-dispatch question. The scan is a tripwire, not a boundary — server-side-enabled Apps and other injected tools can remain invisible, and full isolation means disabling the tools in Codex itself.
@@ -135,13 +135,14 @@ Read the actual diff; the summary only says where to look. Check the whole tree 
 Send findings back through the selected backend with specifics — what's wrong, why it matters, what you expect:
 
 ```bash
-"${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" --prompt-file /tmp/review-findings.txt  # fresh while resume is release-disabled
+"${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" --resume --prompt-file /tmp/review-findings.txt
 "${CLAUDE_SKILL_DIR}/backends/cursor/dispatch.sh" --prompt-file /tmp/review-findings.txt  # fresh session; no --resume
 ```
 
-After the Codex required real-backend matrix is recorded and resume is
-release-enabled, the first command may add `--resume`; it selects only the
-highest ready loop-owned exact id and never an unrelated newest session.
+Codex resume is release-enabled for the calibrated 2026-08-17 tuple. The first
+command selects only the highest ready loop-owned exact id and never an
+unrelated newest session; a different tuple is uncalibrated until its required
+real-backend matrix is recorded.
 
 For cursor-agent, the already-applied worktree carries file state and the new
 prompt carries review context. `backends/cursor/dispatch.sh --resume` deliberately

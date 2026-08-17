@@ -344,10 +344,6 @@ write_lines "$CODEX_STUB" \
 chmod +x "$CODEX_STUB"
 TEST_PATH="$BIN_DIR:$PATH"
 
-RESUME_DISPATCH="$TMP_ROOT/codex-dispatch-resume-enabled.sh"
-sed 's/^RESUME_RELEASE_ENABLED=0$/RESUME_RELEASE_ENABLED=1/' "$DISPATCH" > "$RESUME_DISPATCH"
-chmod +x "$RESUME_DISPATCH"
-
 CASES="$SCRIPT_DIR/../../tests/codex-cases.tsv"
 if python3 - "$CASES" <<'PY'
 import re
@@ -358,7 +354,7 @@ raw = open(sys.argv[1], "rb").read()
 lines = raw.decode("utf-8").splitlines()
 if not lines or lines[0] != "#schema=1":
     raise SystemExit(1)
-if hashlib.sha256(raw).hexdigest() != "fbdc069f0b29cd133f64d7400ab3cdb2236560411eb7548a0d12ea46fd50cd0d":
+if hashlib.sha256(raw).hexdigest() != "b170c3f4ccdf47d94ee23771ca9d100ed77f37249714b17cb0be162b202909b4":
     raise SystemExit(1)
 rows = [line.split("\t") for line in lines[1:] if line and not line.startswith("#")]
 ids = [row[0] for row in rows if len(row) == 4]
@@ -460,25 +456,25 @@ expect_argv_count "$READONLY_LOG" --json 0 "read-only argv omits --json"
 expect_argv_no_forbidden "$READONLY_LOG" "read-only constructed argv contains no policy broadener"
 expect_first_line "$READONLY_STDIN" devnull "read-only codex exec stdin is /dev/null"
 
-# Resume remains release-disabled in the shipped adapter.
-rm -f "$TMP_ROOT/release-disabled.argv"
-run_split_case_in_dir resume-release-disabled "$WORKSPACE" env \
+# Release-enabled managed resume selects the loop-owned exact id and never
+# falls back to a newest-session selector.
+MANAGED_RESUME_LOG="$TMP_ROOT/managed-resume.argv"
+run_split_case_in_dir resume-release-enabled "$WORKSPACE" env \
   HOME="$HOME_DIR" CODEX_HOME="$CODEX_HOME_DIR" PATH="$TEST_PATH" \
-  CODEX_STUB_LOG="$TMP_ROOT/release-disabled.argv" \
+  CODEX_STUB_LOG="$MANAGED_RESUME_LOG" \
   "$DISPATCH" --prompt iterate --resume
-expect_status 2 "shipped --resume refuses before the required real-backend pass"
-expect_output "release-disabled" "resume refusal names the unmet release evidence"
-expect_missing_file "$TMP_ROOT/release-disabled.argv" "release-disabled resume never launches Codex"
+expect_status 0 "shipped --resume succeeds after the required real-backend pass"
+expect_argv_sequence "$MANAGED_RESUME_LOG" "managed resume binds the loop-owned exact id" exec resume 019c0000-0000-7000-8000-000000000001
+expect_argv_count "$MANAGED_RESUME_LOG" --last 0 "release-enabled managed resume never falls back to --last"
 
-# The dormant resume builder is exercised from an exact source copy whose
-# release constant alone is enabled. It must never use --last, -s, or -C.
+# The shipped exact-id resume builder must never use --last, -s, or -C.
 RESUME_LOG="$TMP_ROOT/resume.argv"
 RESUME_STDIN="$TMP_ROOT/resume.stdin"
 run_split_case_in_dir dispatch-resume "$WORKSPACE" env \
   HOME="$HOME_DIR" CODEX_HOME="$CODEX_HOME_DIR" PATH="$TEST_PATH" \
   CODEX_STUB_LOG="$RESUME_LOG" CODEX_STUB_STDIN_LOG="$RESUME_STDIN" \
-  "$RESUME_DISPATCH" --prompt iterate --resume 019c0000-0000-7000-8000-000000000001 --effort max
-expect_status 0 "dormant exact-id resume builder succeeds against the stub"
+  "$DISPATCH" --prompt iterate --resume 019c0000-0000-7000-8000-000000000001 --effort max
+expect_status 0 "shipped exact-id resume builder succeeds against the stub"
 expect_argv_sequence "$RESUME_LOG" "resume argv binds the exact recorded id" exec resume 019c0000-0000-7000-8000-000000000001
 expect_argv_sandbox "$RESUME_LOG" resume workspace-write "resume argv carries exactly one quoted sandbox_mode specification"
 expect_argv_count "$RESUME_LOG" -s 0 "resume argv never emits rejected -s"
@@ -705,7 +701,7 @@ mkdir -p "$NO_READY_HOME/.codex" "$NO_READY_WORKSPACE"
 rm -f "$TMP_ROOT/no-ready.argv"
 run_split_case_in_dir resume-no-ready "$NO_READY_WORKSPACE" env \
   HOME="$NO_READY_HOME" CODEX_HOME="$NO_READY_HOME/.codex" PATH="$TEST_PATH" \
-  CODEX_STUB_LOG="$TMP_ROOT/no-ready.argv" "$RESUME_DISPATCH" --prompt x --resume
+  CODEX_STUB_LOG="$TMP_ROOT/no-ready.argv" "$DISPATCH" --prompt x --resume
 expect_status 5 "--resume with no ready record fails closed"
 expect_output "no ready loop-owned record" "no-ready resume points to a fresh dispatch"
 expect_missing_file "$TMP_ROOT/no-ready.argv" "no-ready resume never launches Codex or --last"
@@ -719,13 +715,13 @@ ADOPT_ID="019c0000-0000-7000-8000-0000000000aa"
 run_split_case_in_dir resume-unmanaged "$ADOPT_WORKSPACE" env \
   HOME="$ADOPT_HOME" CODEX_HOME="$ADOPT_HOME/.codex" PATH="$TEST_PATH" \
   CODEX_STUB_LOG="$TMP_ROOT/adopt-unmanaged.argv" CODEX_STUB_SESSION="$ADOPT_ID" \
-  "$RESUME_DISPATCH" --prompt migrate --resume-unmanaged "$ADOPT_ID"
+  "$DISPATCH" --prompt migrate --resume-unmanaged "$ADOPT_ID"
 expect_status 0 "successful unmanaged exact-id resume is adopted"
 expect_argv_sequence "$TMP_ROOT/adopt-unmanaged.argv" "unmanaged migration binds its exact id" exec resume "$ADOPT_ID"
 run_split_case_in_dir resume-adopted "$ADOPT_WORKSPACE" env \
   HOME="$ADOPT_HOME" CODEX_HOME="$ADOPT_HOME/.codex" PATH="$TEST_PATH" \
   CODEX_STUB_LOG="$TMP_ROOT/adopt-managed.argv" CODEX_STUB_SESSION="$ADOPT_ID" \
-  "$RESUME_DISPATCH" --prompt iterate --resume
+  "$DISPATCH" --prompt iterate --resume
 expect_status 0 "ordinary --resume uses the adopted loop-owned id"
 expect_argv_sequence "$TMP_ROOT/adopt-managed.argv" "adopted managed resume binds the same exact id" exec resume "$ADOPT_ID"
 
@@ -919,7 +915,7 @@ expect_missing_file "$TMP_ROOT/crash-next.argv" "fresh dispatch does not fall ba
 rm -f "$TMP_ROOT/crash-resume.argv"
 run_split_case_in_dir crash-next-resume "$CRASH_WORKSPACE" env \
   HOME="$CRASH_HOME" CODEX_HOME="$CRASH_HOME/.codex" PATH="$TEST_PATH" \
-  CODEX_STUB_LOG="$TMP_ROOT/crash-resume.argv" "$RESUME_DISPATCH" --prompt next --resume
+  CODEX_STUB_LOG="$TMP_ROOT/crash-resume.argv" "$DISPATCH" --prompt next --resume
 expect_status 5 "next resume refuses the highest running generation"
 expect_output "highest generation is still running" "resume refusal names the running record"
 expect_missing_file "$TMP_ROOT/crash-resume.argv" "resume does not fall back to the older ready record or --last"

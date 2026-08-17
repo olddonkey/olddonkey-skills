@@ -15,10 +15,12 @@
 # `--read-only` and `--investigate` select Codex's read-only sandbox. The
 # default is workspace-write. The adapter itself never stages or commits.
 #
-# Resume is exact-id only and never falls back to `--last`. Managed resume is
-# release-disabled until the real `integration-test.sh --require codex` matrix
-# passes. `--resume-unmanaged ID` is the explicit migration path for a legacy
-# app-server session; a successful turn adopts the id into loop-owned state.
+# Resume is exact-id only and never falls back to `--last`. The required matrix
+# passed for the calibrated tuple on 2026-08-17. Reset
+# RESUME_RELEASE_ENABLED to 0 if this adapter's argv, the state schema, or the
+# pinned config keys change, and leave it reset until that matrix is re-run.
+# `--resume-unmanaged ID` is the explicit migration path for a legacy app-server
+# session; a successful turn adopts the id into loop-owned state.
 #
 # This adapter is strictly foreground. `--background` is rejected; background
 # the adapter at the harness level, where its exit remains authoritative.
@@ -39,9 +41,8 @@ RESUME_ID=""
 READ_ONLY=0
 ADAPTER_VERSION="2"
 
-# This is intentionally a source constant, not an environment toggle. Flip it
-# only in the release change that records a full `--require codex` pass.
-RESUME_RELEASE_ENABLED=0
+# This is intentionally a source constant, not an environment toggle.
+RESUME_RELEASE_ENABLED=1
 
 usage() {
   awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"

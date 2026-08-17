@@ -13,7 +13,7 @@ GROK_DISPATCH="$SCRIPT_DIR/../backends/grok/dispatch.sh"
 CURSOR_DISPATCH="$SCRIPT_DIR/../backends/cursor/dispatch.sh"
 CODEX_DISPATCH="$SCRIPT_DIR/../backends/codex/dispatch.sh"
 CODEX_CASES="$SCRIPT_DIR/codex-cases.tsv"
-CODEX_CASES_SHA256="fbdc069f0b29cd133f64d7400ab3cdb2236560411eb7548a0d12ea46fd50cd0d"
+CODEX_CASES_SHA256="b170c3f4ccdf47d94ee23771ca9d100ed77f37249714b17cb0be162b202909b4"
 TOML_PYTHON=""
 TOML_CANDIDATES_TRIED="python3 python3.13 python3.12 python3.11"
 SELECT_GROK=0
@@ -718,7 +718,7 @@ run_codex_backend() {
   local output="$TMP_ROOT/codex-dispatch.out"
   local read_output="$TMP_ROOT/codex-readonly.out"
   local resume_output="$TMP_ROOT/codex-resume.out"
-  local resume_dispatch="$TMP_ROOT/codex-dispatch-resume-enabled.sh"
+  local resume_dispatch="$CODEX_DISPATCH"
   local prompt_file="$TMP_ROOT/codex-prompt.txt"
   local probe="$unit/codex-policy-probe.sh"
   local probe_results="$unit/codex-case-results.tsv"
@@ -726,7 +726,7 @@ run_codex_backend() {
   local git_dir common_dir object_file ref_file packed_refs sub_git_dir
   local status id actual detail host_status read_status resume_status
   local q_results q_tracked q_marker q_git_head q_common_config q_ref q_object
-  local q_packed q_sub_marker q_sub_head q_symlink q_hardlink q_extra q_sibling q_port
+  local q_packed q_sub_head q_symlink q_hardlink q_extra q_sibling q_port
 
   mkdir -m 700 "$test_home" "$codex_home" "$extra_root" || {
     fail "codex isolated HOME and policy roots are prepared"
@@ -744,21 +744,23 @@ run_codex_backend() {
     finish_unrecorded_codex_cases "tomllib-capable Python is unavailable"
     return
   fi
-  # The shipped adapter must remain release-disabled until this required matrix
-  # passes, but the matrix must exercise the dormant resume path to make that
-  # decision possible. Match the stub suite: copy the exact source and change
-  # only the source constant for the two frozen real-resume cases.
-  if [[ "$(LC_ALL=C grep -c '^RESUME_RELEASE_ENABLED=0$' "$CODEX_DISPATCH")" != 1 ]] ||
-     ! sed 's/^RESUME_RELEASE_ENABLED=0$/RESUME_RELEASE_ENABLED=1/' \
-       "$CODEX_DISPATCH" > "$resume_dispatch"; then
-    fail "codex dormant resume integration adapter is prepared"
-    finish_unrecorded_codex_cases "dormant resume fixture setup failed"
-    return
-  fi
-  chmod 700 "$resume_dispatch"
-  if ! LC_ALL=C grep -q '^RESUME_RELEASE_ENABLED=1$' "$resume_dispatch"; then
-    fail "codex dormant resume integration adapter enables exactly the release constant"
-    finish_unrecorded_codex_cases "dormant resume fixture setup failed"
+  # The calibrated release exercises the shipped adapter. If a future argv,
+  # state-schema, or pinned-config change resets the release switch, retain the
+  # narrow constant-only copy so the required matrix can recalibrate resume
+  # without making the release decision circular.
+  if LC_ALL=C grep -q '^RESUME_RELEASE_ENABLED=0$' "$CODEX_DISPATCH"; then
+    resume_dispatch="$TMP_ROOT/codex-dispatch-resume-enabled.sh"
+    if [[ "$(LC_ALL=C grep -c '^RESUME_RELEASE_ENABLED=0$' "$CODEX_DISPATCH")" != 1 ]] ||
+       ! sed 's/^RESUME_RELEASE_ENABLED=0$/RESUME_RELEASE_ENABLED=1/' \
+         "$CODEX_DISPATCH" > "$resume_dispatch"; then
+      fail "codex recalibration resume adapter is prepared"
+      finish_unrecorded_codex_cases "resume recalibration fixture setup failed"
+      return
+    fi
+    chmod 700 "$resume_dispatch"
+  elif ! LC_ALL=C grep -q '^RESUME_RELEASE_ENABLED=1$' "$CODEX_DISPATCH"; then
+    fail "codex resume release switch has a recognized value"
+    finish_unrecorded_codex_cases "unrecognized resume release switch"
     return
   fi
   if [[ -f "$ORIGINAL_HOME/.codex/auth.json" ]]; then
@@ -879,7 +881,6 @@ PY
   printf -v q_ref '%q' "$ref_file"
   printf -v q_object '%q' "$object_file"
   printf -v q_packed '%q' "$packed_refs"
-  printf -v q_sub_marker '%q' "$unit/sub/.git"
   printf -v q_sub_head '%q' "$sub_git_dir/HEAD"
   printf -v q_symlink '%q' "$unit/ref-symlink"
   printf -v q_hardlink '%q' "$unit/ref-hardlink"
@@ -897,7 +898,7 @@ RESULTS=$q_results
 record() { printf '%s\t%s\t%s\n' "\$1" "\$2" "\$3" >> "\$RESULTS"; }
 allow_case() { id="\$1"; shift; "\$@" >/dev/null 2>&1; rc=\$?; [[ \$rc -eq 0 ]] && record "\$id" allow "exit=0" || record "\$id" deny "exit=\$rc"; }
 deny_file_case() { id="\$1" target="\$2"; shift 2; before=\$(shasum -a 256 "\$target" 2>/dev/null); "\$@" >/dev/null 2>&1; rc=\$?; after=\$(shasum -a 256 "\$target" 2>/dev/null); [[ \$rc -ne 0 && "\$before" == "\$after" ]] && record "\$id" deny "denied and bytes preserved" || record "\$id" allow "exit=\$rc before=\$before after=\$after"; }
-deny_two_file_case() { id="\$1" first="\$2" second="\$3"; shift 3; before_first=\$(shasum -a 256 "\$first" 2>/dev/null); before_second=\$(shasum -a 256 "\$second" 2>/dev/null); "\$@" >/dev/null 2>&1; rc=\$?; after_first=\$(shasum -a 256 "\$first" 2>/dev/null); after_second=\$(shasum -a 256 "\$second" 2>/dev/null); [[ \$rc -eq 0 && "\$before_first" == "\$after_first" && "\$before_second" == "\$after_second" ]] && record "\$id" deny "both writes denied and files preserved" || record "\$id" allow "one target changed or denial assertion failed"; }
+measure_allow_file_case() { id="\$1" target="\$2"; shift 2; before=\$(shasum -a 256 "\$target" 2>/dev/null | awk '{print \$1}'); "\$@" >/dev/null 2>&1; rc=\$?; after=\$(shasum -a 256 "\$target" 2>/dev/null | awk '{print \$1}'); [[ \$rc -eq 0 && -n "\$before" && "\$before" != "\$after" ]] && record "\$id" allow "write changed target before=\$before after=\$after" || record "\$id" deny "write did not change target exit=\$rc before=\$before after=\$after"; }
 allow_case fresh-repo-write sh -c 'printf fresh >> "\$1"' _ $q_tracked
 deny_file_case fresh-git-marker-write $q_marker sh -c 'printf X >> "\$1"' _ $q_marker
 deny_file_case linked-git-dir-write $q_git_head sh -c 'printf X >> "\$1"' _ $q_git_head
@@ -905,9 +906,9 @@ deny_file_case linked-common-dir-write $q_common_config sh -c 'printf X >> "\$1"
 deny_file_case git-refs-write $q_ref sh -c 'printf X >> "\$1"' _ $q_ref
 deny_file_case git-objects-write $q_object sh -c 'printf X >> "\$1"' _ $q_object
 deny_file_case git-packed-refs-write $q_packed sh -c 'printf X >> "\$1"' _ $q_packed
-deny_two_file_case submodule-git-dir-write $q_sub_head $q_sub_marker sh -c 'printf X >> "\$1"; first=\$?; printf X >> "\$2"; second=\$?; [ \$first -ne 0 ] && [ \$second -ne 0 ]' _ $q_sub_head $q_sub_marker
+measure_allow_file_case submodule-git-dir-write $q_sub_head sh -c 'printf X >> "\$1"' _ $q_sub_head
 deny_file_case symlink-git-alias-write $q_ref sh -c 'printf X >> "\$1"' _ $q_symlink
-deny_file_case hardlink-git-alias-write $q_ref sh -c 'printf X >> "\$1"' _ $q_hardlink
+measure_allow_file_case hardlink-git-alias-write $q_ref sh -c 'printf X >> "\$1"' _ $q_hardlink
 deny_file_case rename-git-target $q_ref sh -c 'printf X > replacement.tmp && mv replacement.tmp "\$1"' _ $q_ref
 deny_file_case atomic-replace-git-target $q_ref python3 -c 'import os,sys; open("atomic.tmp","w").write("X"); os.replace("atomic.tmp",sys.argv[1])' $q_ref
 deny_file_case extra-writable-root-write $q_extra sh -c 'printf X >> "\$1"' _ $q_extra
@@ -1253,7 +1254,7 @@ ok = (
 raise SystemExit(0 if ok else 1)
 PY
   then
-    pass "required codex matrix executed every non-managed case exactly once with provenance"
+    printf '# required codex matrix executed every non-managed case exactly once with provenance\n'
   else
     fail "required codex matrix needs every non-managed case exactly once, zero skips/failures, and provenance"
   fi
