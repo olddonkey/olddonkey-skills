@@ -2,7 +2,7 @@
 
 Backend-specific mechanics for the grok implementation-loop adapter. Read this
 before the first grok dispatch in a session; the shared observable interface is
-in [dispatch-contract.md](dispatch-contract.md).
+in [dispatch-contract.md](../../references/dispatch-contract.md).
 
 ## Contents
 
@@ -20,7 +20,7 @@ in [dispatch-contract.md](dispatch-contract.md).
 Run from the target repository root:
 
 ```bash
-"${CLAUDE_SKILL_DIR}/scripts/grok-dispatch.sh" \
+"${CLAUDE_SKILL_DIR}/backends/grok/dispatch.sh" \
   --prompt-file /tmp/unit-prompt.txt --model grok-4.6 \
   --effort xhigh
 ```
@@ -225,7 +225,7 @@ The verifier invokes no git command. Always pass the protected absolute
 baseline and authoritative path:
 
 ```bash
-verify="${CLAUDE_SKILL_DIR}/scripts/grok-verify-worktree.sh"
+verify="${CLAUDE_SKILL_DIR}/backends/grok/verify-worktree.sh"
 "$verify" --baseline "$baseline" --worktree "$authoritative" # pre-review
 "$verify" --baseline "$baseline" --worktree "$authoritative" # pre-commit
 "$verify" --baseline "$baseline" --worktree "$authoritative" # pre-gate
@@ -330,7 +330,7 @@ Verified live on Darwin/arm64 with grok 1.0.4:
 ## Live smoke procedure
 
 The manual smoke below is automated in
-[`scripts/integration-test.sh`](../scripts/integration-test.sh); run it before
+[`tests/integration-test.sh`](../../tests/integration-test.sh); run it before
 shipping backend changes.
 
 This is an acceptance procedure, not a normal dispatch. Use a disposable repo;

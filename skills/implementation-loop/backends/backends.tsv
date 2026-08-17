@@ -1,0 +1,4 @@
+#schema=1
+codex	codex	CODEX_LOOP_	exact-id	flag	text	backends/codex/fixture-driver.sh
+cursor	cursor-agent	CURSOR_LOOP_	refuses	embedded-in-model	json	backends/cursor/fixture-driver.sh
+grok	grok	GROK_LOOP_	exact-id	flag	json	backends/grok/fixture-driver.sh

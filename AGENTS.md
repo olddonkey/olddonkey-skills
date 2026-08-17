@@ -12,15 +12,16 @@ update script has nothing to install.
 
 Components:
 
-- `skills/implementation-loop/` — the backend-neutral implementation loop skill. Bash
-  helpers in `scripts/`: `codex-dispatch.sh`, `run-gate.sh`, `selftest.sh`,
-  `grok-dispatch.sh`, `grok-verify-worktree.sh`, `grok-selftest.sh`,
-  `cursor-dispatch.sh`, `cursor-selftest.sh`, and `integration-test.sh`; the
-  frozen Codex integration matrix lives in `scripts/codex-cases.tsv`.
-  Backend-specific mechanics live in `references/runtime-codex.md` and
-  the shipped `references/runtime-grok.md` and `references/runtime-cursor.md`
-  backend references; the shared observable interface is recorded in
-  `references/dispatch-contract.md`.
+- `skills/implementation-loop/` — the backend-neutral implementation loop skill.
+  Uniform backend modules live under `backends/{codex,grok,cursor}/`, each with
+  `dispatch.sh`, `runtime.md`, `selftest.sh`, and `fixture-driver.sh`; grok also
+  has `verify-worktree.sh`. `backends/backends.tsv` registers their capabilities.
+  Shared suites and the opt-in real-backend gate live under `tests/`; the frozen
+  Codex matrix is `tests/codex-cases.tsv`. `scripts/run-gate.sh` remains the
+  backend-neutral gate, while the other eight `scripts/*.sh` executables are
+  one-release forwarding shims removed in 0.5.0. The shared observable interface
+  is recorded in `references/dispatch-contract.md` and enforced by the contract
+  suites.
 - `skills/engineering-mode/` — goal-first wrapper over the loop. Shared
   playbooks in `references/playbooks/`, plus `scripts/tree-oid.sh` and its
   selftest.
@@ -42,11 +43,14 @@ root in this order — all suites are self-contained, need no network, and the
 Codex/Cursor CLIs are **not** required (they are only needed to dispatch a live
 run):
 
-1. `bash -n` syntax checks on all thirteen shipped scripts (nine Codex-loop scripts,
-   two Cursor gate scripts, both installer scripts).
-2. **Byte-for-byte shared-file checks** (`diff -q`): `run-gate.sh` must stay
-   identical between `skills/implementation-loop/scripts/` and
-   `cursor-implementation-loop/skills/cursor-implementation-loop/scripts/`; the
+1. `bash -n` syntax checks on every shipped shell script: backend modules and
+   fixture drivers, shared tests, the gate, all forwarding shims, the two Cursor
+   gate scripts, and both installer scripts.
+2. **Byte-for-byte shared-file checks** (`diff -q`):
+   `skills/implementation-loop/scripts/run-gate.sh` matches the Cursor package's
+   `scripts/run-gate.sh`, and `skills/implementation-loop/tests/gate-selftest.sh`
+   matches its `scripts/gate-selftest.sh` (the canonical suite resolves either
+   layout); the
    six engineering-mode playbooks, `verification-contract.md`, `handoff.md`,
    `tree-oid.sh`, and `tree-oid-selftest.sh` must stay identical between
    `skills/engineering-mode/` and
@@ -55,28 +59,34 @@ run):
 3. Playbooks must stay platform-neutral: no `read-only` / `investigate` words
    and no `codex-dispatch` references anywhere under either
    `references/playbooks/` tree.
-4. `bash skills/implementation-loop/scripts/selftest.sh` — expect
-   `selftest: PASS (288 checks)`. The Codex cases use python3 for secure state,
-   argv, and fixture validation; python3 3.11+ is part of the repo toolchain.
-5. `bash skills/implementation-loop/scripts/grok-selftest.sh` — expect
+4. `bash skills/implementation-loop/backends/codex/selftest.sh` — expect
+   `selftest: PASS (166 checks)`, then
+   `bash skills/implementation-loop/tests/gate-selftest.sh` — expect
+   `selftest: PASS (122 checks)`. Their split total stays 288. The Codex cases
+   use python3 for secure state, argv, and fixture validation; python3 3.11+ is
+   part of the repo toolchain.
+5. `bash skills/implementation-loop/backends/grok/selftest.sh` — expect
    `selftest: PASS (276 checks)`.
-6. `bash skills/implementation-loop/scripts/cursor-selftest.sh` — expect
+6. `bash skills/implementation-loop/backends/cursor/selftest.sh` — expect
    `selftest: PASS (97 checks)`.
-7. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
+7. `bash skills/implementation-loop/tests/contract-core.sh`,
+   `bash skills/implementation-loop/tests/contract-negative.sh`, and
+   `bash skills/implementation-loop/tests/shim-selftest.sh` — expect all green.
+8. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (122 checks)`.
-8. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
-9. Packaging checks: both marketplace JSON manifests must parse; every
+9. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
+10. Packaging checks: both marketplace JSON manifests must parse; every
    `SKILL.md` (under `skills/` and `cursor-implementation-loop/skills/`) must
    have non-empty `name:` and `description:` frontmatter; engineering-mode and
    Codex-loop Markdown must have no dangling relative links.
-10. `tree-oid` job (runs on ubuntu **and** macos):
+11. `tree-oid` job (runs on ubuntu **and** macos):
    `bash skills/engineering-mode/scripts/tree-oid-selftest.sh` and the
    Cursor copy — expect `selftest: PASS (202 checks)` each. Keep these scripts
    portable across GNU and BSD userlands.
 
 ## Manual backend integration gate
 
-`skills/implementation-loop/scripts/integration-test.sh` is the manual,
+`skills/implementation-loop/tests/integration-test.sh` is the manual,
 opt-in pre-release gate for backend changes. It exercises the real codex, grok,
 and cursor-agent sandboxes, needs authenticated CLIs, and makes real API calls.
 `--backend grok|cursor|codex|all` is repeatable and deduplicated; `--require
