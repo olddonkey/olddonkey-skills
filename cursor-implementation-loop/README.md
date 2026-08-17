@@ -1,6 +1,6 @@
 # cursor-implementation-loop
 
-Cursor port of [`codex-implementation-loop`](../skills/codex-implementation-loop):
+Cursor port of [`implementation-loop`](../skills/implementation-loop):
 delegate implementation to a dedicated subagent without delegating judgment.
 The parent agent decomposes work into units, dispatches an implementer
 subagent, reviews the real diff, runs the full test gate itself, and ships
@@ -53,7 +53,7 @@ different implementing model — pin one in
 kickoff. Pin the independent reviewer to a different model than the
 implementer.
 
-## How it differs from codex-implementation-loop
+## How it differs from implementation-loop
 
 - **Dispatch is native.** The Codex companion runtime, its discovery
   script, effort/tier config assertions, and the `--` injection defense are

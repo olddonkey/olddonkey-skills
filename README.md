@@ -15,8 +15,8 @@
 
 Three Claude Code skills so far, plus a Cursor Plugin that ships two engineering skills:
 
-- [`codex-implementation-loop`](#codex-implementation-loop) — delegate implementation to **Codex, grok, or cursor-agent** without delegating judgment: Claude reviews the real diff, runs the full test gate, and ships only what it would sign its name to. The implementer backend is a dial; the review-and-ship discipline is identical for all three.
-- `codex-engineering-mode` — goal-first engineering ownership: investigate, design, and plan, then drive `codex-implementation-loop` unit by unit.
+- [`implementation-loop`](#implementation-loop) — delegate implementation to **Codex, grok, or cursor-agent** without delegating judgment: Claude reviews the real diff, runs the full test gate, and ships only what it would sign its name to. The implementer backend is a dial; the review-and-ship discipline is identical for all three.
+- `engineering-mode` — goal-first engineering ownership: investigate, design, and plan, then drive `implementation-loop` unit by unit.
 - [`cursor-implementation-loop`](#cursor-implementation-loop) — Cursor Plugin with the plan-first implementation loop and the goal-first `cursor-engineering-mode` wrapper; the parent agent reviews, gates, and publishes while an implementer subagent writes code.
 - [`web-slides`](#web-slides) — turn material or outlines into click-driven 16:9 HTML slide decks for live presenting, with 24 built-in themes and a presenter view that keeps speaker notes off the shared screen.
 
@@ -28,13 +28,15 @@ Inside Claude Code, add the marketplace once, then install the skills you want:
 
 ```text
 /plugin marketplace add olddonkey/olddonkey-skills
-/plugin install codex-implementation-loop@olddonkey-skills
-/plugin install codex-engineering-mode@olddonkey-skills
+/plugin install implementation-loop@olddonkey-skills
+/plugin install engineering-mode@olddonkey-skills
 /plugin install web-slides@olddonkey-skills
 /reload-plugins
 ```
 
-`codex-engineering-mode` requires `codex-implementation-loop` plus the official Codex companion plugin; the Codex setup also needs an authenticated Codex CLI — see [Setup](#setup) below. `web-slides` needs nothing beyond Node.js for the generated slide project.
+These plugins were renamed by dropping the `codex-` prefix because the loop now supports Codex, grok, and cursor-agent backends. If the former Codex-prefixed plugin IDs are installed, uninstall them and install `implementation-loop` and `engineering-mode` instead.
+
+`engineering-mode` requires `implementation-loop` plus the official Codex companion plugin; the Codex setup also needs an authenticated Codex CLI — see [Setup](#setup) below. `web-slides` needs nothing beyond Node.js for the generated slide project.
 
 ### Manual
 
@@ -104,15 +106,15 @@ To uninstall a symlink install: `rm ~/.cursor/plugins/local/cursor-implementatio
 
 ## Plan-first vs goal-first
 
-**Plan-first (unchanged):** approve a plan, then invoke the implementation loop directly: `Use codex-implementation-loop to implement PLAN.md unit by unit.`
+**Plan-first (unchanged):** approve a plan, then invoke the implementation loop directly: `Use implementation-loop to implement PLAN.md unit by unit.`
 
-**Goal-first:** give engineering mode an outcome; it investigates the root cause, chooses a design, writes the plan, then drives that same loop. Codex: `Use codex-engineering-mode to fix duplicate fulfillment caused by webhook replay.` Cursor: `Use cursor-engineering-mode to fix duplicate fulfillment caused by webhook replay.`
+**Goal-first:** give engineering mode an outcome; it investigates the root cause, chooses a design, writes the plan, then drives that same loop. Codex: `Use engineering-mode to fix duplicate fulfillment caused by webhook replay.` Cursor: `Use cursor-engineering-mode to fix duplicate fulfillment caused by webhook replay.`
 
-Codex prerequisites: `codex-engineering-mode` → `codex-implementation-loop` → official Codex companion plugin. On Cursor, `cursor-engineering-mode` ships inside the `cursor-implementation-loop` plugin, so there is no separate install; existing installs receive it on update by rerunning the one-line installer or running `git pull` in the managed checkout.
+Codex prerequisites: `engineering-mode` → `implementation-loop` → official Codex companion plugin. On Cursor, `cursor-engineering-mode` ships inside the `cursor-implementation-loop` plugin, so there is no separate install; existing installs receive it on update by rerunning the one-line installer or running `git pull` in the managed checkout.
 
 ---
 
-## codex-implementation-loop
+## implementation-loop
 
 **Delegate implementation to Codex, grok, or cursor-agent without delegating judgment.**
 
@@ -120,8 +122,8 @@ The implementer implements and runs focused tests. Claude reviews the real diff,
 
 **Backend is a dial.** The default is Codex (setup below); the same loop and the same review-and-gate discipline apply whichever backend implements. Each backend's git and publication boundary works differently and is documented in its own runtime reference — read the selected backend's before its first dispatch:
 
-- **grok** — a fail-closed custom sandbox, linked-worktree placement, and a per-machine tuple allowlist. [`references/runtime-grok.md`](./skills/codex-implementation-loop/references/runtime-grok.md).
-- **cursor-agent** — a git-less-copy architecture: the implementer edits a `.git`-free copy inside a network-denied sandbox, and the orchestrator applies the captured patch to the real repo (it never runs with `--force`/`--yolo`, which would bypass the sandbox). [`references/runtime-cursor.md`](./skills/codex-implementation-loop/references/runtime-cursor.md).
+- **grok** — a fail-closed custom sandbox, linked-worktree placement, and a per-machine tuple allowlist. [`references/runtime-grok.md`](./skills/implementation-loop/references/runtime-grok.md).
+- **cursor-agent** — a git-less-copy architecture: the implementer edits a `.git`-free copy inside a network-denied sandbox, and the orchestrator applies the captured patch to the real repo (it never runs with `--force`/`--yolo`, which would bypass the sandbox). [`references/runtime-cursor.md`](./skills/implementation-loop/references/runtime-cursor.md).
 
 grok and cursor-agent both default to grok-4.6 at `xhigh` as the implementer model.
 
@@ -153,7 +155,7 @@ codex update
 
 Open the target repository in Claude Code and ask naturally:
 
-> Use codex-implementation-loop to implement item 1 in PLAN.md. Stop at a PR, use the baseline gate, review at standard depth, confirm before the next unit, and inherit my Codex model and effort settings.
+> Use implementation-loop to implement item 1 in PLAN.md. Stop at a PR, use the baseline gate, review at standard depth, confirm before the next unit, and inherit my Codex model and effort settings.
 
 Natural-language invocation works with both marketplace and manual installations. On the first run, Claude states the resolved controls before dispatching so cost, autonomy, and the publish boundary are visible.
 
@@ -174,9 +176,9 @@ Codex's summary is a map of where to look, not proof that the change is correct.
 - **Evidence-first review.** The checklist targets delegated-change failures that generic review often misses: weakened tests, silent default regressions, gitignored files, new dependencies, and softened enforcement points.
 - **Bounded autonomy.** Seven controls settle how far the loop may act, how deeply it reviews, who implements fixes, and what happens when the gate is red. They are chosen once per repository instead of re-litigated on every unit.
 - **Expensive lessons encoded once.** The workflow distinguishes focused tests from the full gate, detects stuck jobs by their event stream, and covers cancellation plus orphaned-process cleanup.
-- **Two bundled helpers.** [`codex-dispatch.sh`](./skills/codex-implementation-loop/scripts/codex-dispatch.sh) locates the live companion runtime and makes dispatch settings visible; [`run-gate.sh`](./skills/codex-implementation-loop/scripts/run-gate.sh) preserves the suite's real exit code and can compare failures with a baseline.
+- **Two bundled helpers.** [`codex-dispatch.sh`](./skills/implementation-loop/scripts/codex-dispatch.sh) locates the live companion runtime and makes dispatch settings visible; [`run-gate.sh`](./skills/implementation-loop/scripts/run-gate.sh) preserves the suite's real exit code and can compare failures with a baseline.
 
-Read the complete workflow in [`SKILL.md`](./skills/codex-implementation-loop/SKILL.md).
+Read the complete workflow in [`SKILL.md`](./skills/implementation-loop/SKILL.md).
 
 ### Controls
 
@@ -278,8 +280,8 @@ For a marketplace installation, run inside Claude Code:
 
 ```text
 /plugin marketplace update olddonkey-skills
-/plugin update codex-implementation-loop@olddonkey-skills
-/plugin update codex-engineering-mode@olddonkey-skills
+/plugin update implementation-loop@olddonkey-skills
+/plugin update engineering-mode@olddonkey-skills
 /plugin update web-slides@olddonkey-skills
 /reload-plugins
 ```

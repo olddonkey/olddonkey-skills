@@ -1,11 +1,11 @@
 ---
-name: codex-engineering-mode
-description: 'Own goal-first engineering outcomes: investigate, find root cause, design, plan, then delegate implementation unit-by-unit to codex-implementation-loop with verification and honest reporting. Use to fix, build, or own an outcome end to end; investigate-and-fix; "make X work"; or plan-then-execute in one request. A request with an approved plan or equivalently precise spec that needs nothing beyond implementation belongs directly to codex-implementation-loop. Requires codex-implementation-loop and the Codex companion plugin to execute.'
+name: engineering-mode
+description: 'Own goal-first engineering outcomes: investigate, find root cause, design, plan, then delegate implementation unit-by-unit to implementation-loop with verification and honest reporting. Use to fix, build, or own an outcome end to end; investigate-and-fix; "make X work"; or plan-then-execute in one request. A request with an approved plan or equivalently precise spec that needs nothing beyond implementation belongs directly to implementation-loop. Requires implementation-loop and the Codex companion plugin to execute.'
 ---
 
-# Codex engineering mode
+# Engineering mode
 
-**Own the outcome; delegate every code change.** Turn a high-level goal into evidence, a settled design, and an executable plan; then give each implementation unit to the `codex-implementation-loop` kernel.
+**Own the outcome; delegate every code change.** Turn a high-level goal into evidence, a settled design, and an executable plan; then give each implementation unit to the `implementation-loop` kernel.
 
 ## Routing precedence
 
@@ -70,4 +70,4 @@ Create `evidence/` beneath it for measurements and investigation output. Store e
 
 ## Authority
 
-**Kernel authority is unchanged.** Apply `codex-implementation-loop` §§Non-negotiables; 2 Dispatch; 3 Review the diff yourself; 4 Iterate; 5 Gate; 6 Publish; 7 Record and continue; and First-run calibration per repo as written. Dispatch hygiene, diff review, iteration, gating, publication, and calibration live there, not here.
+**Kernel authority is unchanged.** Apply `implementation-loop` §§Non-negotiables; 2 Dispatch; 3 Review the diff yourself; 4 Iterate; 5 Gate; 6 Publish; 7 Record and continue; and First-run calibration per repo as written. Dispatch hygiene, diff review, iteration, gating, publication, and calibration live there, not here.

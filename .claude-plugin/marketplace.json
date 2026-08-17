@@ -4,14 +4,14 @@
     "name": "olddonkey"
   },
   "metadata": {
-    "description": "Agent skills distilled from real-world usage: codex-implementation-loop — delegate implementation to Codex while keeping review, test-gating, and shipping judgment in Claude's hands; web-slides — click-driven 16:9 HTML slide decks with a presenter view for live presenting. codex-engineering-mode — goal-first investigation, design, planning, and verified implementation.",
+    "description": "Agent skills distilled from real-world usage: implementation-loop — delegate implementation to Codex while keeping review, test-gating, and shipping judgment in Claude's hands; web-slides — click-driven 16:9 HTML slide decks with a presenter view for live presenting. engineering-mode — goal-first investigation, design, planning, and verified implementation.",
     "version": "0.3.0"
   },
   "plugins": [
     {
-      "name": "codex-implementation-loop",
+      "name": "implementation-loop",
       "description": "A review-gated implementation loop: dispatch coding units to Codex (codex-companion runtime), review the diff, iterate on the same thread, gate on the full test suite, then ship as a PR. Encodes hard-won environment constraints (read-only git, no full-suite runs, stuck-job handling) and seven user-configurable dials.",
-      "source": "./skills/codex-implementation-loop",
+      "source": "./skills/implementation-loop",
       "strict": false,
       "skills": [
         "./"
@@ -27,9 +27,9 @@
       ]
     },
     {
-      "name": "codex-engineering-mode",
-      "description": "Goal-first engineering ownership — investigate, root-cause, design, plan, then delegate implementation unit-by-unit to codex-implementation-loop, with honest artifact-level verification. REQUIRES the codex-implementation-loop plugin plus the official Codex companion plugin.",
-      "source": "./skills/codex-engineering-mode",
+      "name": "engineering-mode",
+      "description": "Goal-first engineering ownership — investigate, root-cause, design, plan, then delegate implementation unit-by-unit to implementation-loop, with honest artifact-level verification. REQUIRES the implementation-loop plugin plus the official Codex companion plugin.",
+      "source": "./skills/engineering-mode",
       "strict": false,
       "skills": [
         "./"

@@ -10,15 +10,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Syntax check
         run: |
-          bash -n skills/codex-implementation-loop/scripts/codex-dispatch.sh
-          bash -n skills/codex-implementation-loop/scripts/grok-dispatch.sh
-          bash -n skills/codex-implementation-loop/scripts/grok-verify-worktree.sh
-          bash -n skills/codex-implementation-loop/scripts/grok-selftest.sh
-          bash -n skills/codex-implementation-loop/scripts/cursor-dispatch.sh
-          bash -n skills/codex-implementation-loop/scripts/cursor-selftest.sh
-          bash -n skills/codex-implementation-loop/scripts/integration-test.sh
-          bash -n skills/codex-implementation-loop/scripts/run-gate.sh
-          bash -n skills/codex-implementation-loop/scripts/selftest.sh
+          bash -n skills/implementation-loop/scripts/codex-dispatch.sh
+          bash -n skills/implementation-loop/scripts/grok-dispatch.sh
+          bash -n skills/implementation-loop/scripts/grok-verify-worktree.sh
+          bash -n skills/implementation-loop/scripts/grok-selftest.sh
+          bash -n skills/implementation-loop/scripts/cursor-dispatch.sh
+          bash -n skills/implementation-loop/scripts/cursor-selftest.sh
+          bash -n skills/implementation-loop/scripts/integration-test.sh
+          bash -n skills/implementation-loop/scripts/run-gate.sh
+          bash -n skills/implementation-loop/scripts/selftest.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
           bash -n install-cursor.sh
@@ -26,62 +26,62 @@ jobs:
       - name: Shared run-gate.sh must stay identical
         run: |
           diff -q \
-            skills/codex-implementation-loop/scripts/run-gate.sh \
+            skills/implementation-loop/scripts/run-gate.sh \
             cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh
       - name: Shared engineering-mode files must stay identical
         run: |
           diff -q \
-            skills/codex-engineering-mode/references/playbooks/bug-fix.md \
+            skills/engineering-mode/references/playbooks/bug-fix.md \
             cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/bug-fix.md
           diff -q \
-            skills/codex-engineering-mode/references/playbooks/feature.md \
+            skills/engineering-mode/references/playbooks/feature.md \
             cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/feature.md
           diff -q \
-            skills/codex-engineering-mode/references/playbooks/investigation.md \
+            skills/engineering-mode/references/playbooks/investigation.md \
             cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/investigation.md
           diff -q \
-            skills/codex-engineering-mode/references/playbooks/performance.md \
+            skills/engineering-mode/references/playbooks/performance.md \
             cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/performance.md
           diff -q \
-            skills/codex-engineering-mode/references/playbooks/prototype.md \
+            skills/engineering-mode/references/playbooks/prototype.md \
             cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/prototype.md
           diff -q \
-            skills/codex-engineering-mode/references/playbooks/refactor.md \
+            skills/engineering-mode/references/playbooks/refactor.md \
             cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/refactor.md
           diff -q \
-            skills/codex-engineering-mode/references/verification-contract.md \
+            skills/engineering-mode/references/verification-contract.md \
             cursor-implementation-loop/skills/cursor-engineering-mode/references/verification-contract.md
           diff -q \
-            skills/codex-engineering-mode/references/handoff.md \
+            skills/engineering-mode/references/handoff.md \
             cursor-implementation-loop/skills/cursor-engineering-mode/references/handoff.md
           diff -q \
-            skills/codex-engineering-mode/scripts/tree-oid.sh \
+            skills/engineering-mode/scripts/tree-oid.sh \
             cursor-implementation-loop/skills/cursor-engineering-mode/scripts/tree-oid.sh
           diff -q \
-            skills/codex-engineering-mode/scripts/tree-oid-selftest.sh \
+            skills/engineering-mode/scripts/tree-oid-selftest.sh \
             cursor-implementation-loop/skills/cursor-engineering-mode/scripts/tree-oid-selftest.sh
       - name: Shared playbooks stay platform-neutral
         run: |
           ! grep -rnwE 'read-only|investigate' \
-            skills/codex-engineering-mode/references/playbooks/ \
+            skills/engineering-mode/references/playbooks/ \
             cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/
           ! grep -rn 'codex-dispatch' \
-            skills/codex-engineering-mode/references/playbooks/ \
+            skills/engineering-mode/references/playbooks/ \
             cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/
       - name: Regression selftest
-        run: bash skills/codex-implementation-loop/scripts/selftest.sh
+        run: bash skills/implementation-loop/scripts/selftest.sh
       - name: Grok backend selftest
-        run: bash skills/codex-implementation-loop/scripts/grok-selftest.sh
+        run: bash skills/implementation-loop/scripts/grok-selftest.sh
       - name: Cursor-agent backend selftest
-        run: bash skills/codex-implementation-loop/scripts/cursor-selftest.sh
+        run: bash skills/implementation-loop/scripts/cursor-selftest.sh
       - name: Cursor gate selftest
         run: bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
       - name: Cursor installer selftest
         run: bash install-cursor-selftest.sh
       - name: Engineering mode packaging checks
         run: |
-          bash -n skills/codex-engineering-mode/scripts/tree-oid.sh
-          bash -n skills/codex-engineering-mode/scripts/tree-oid-selftest.sh
+          bash -n skills/engineering-mode/scripts/tree-oid.sh
+          bash -n skills/engineering-mode/scripts/tree-oid-selftest.sh
           python3 - <<'PY'
           import json
           import sys
@@ -168,12 +168,12 @@ jobs:
           from pathlib import Path
           from urllib.parse import unquote, urlsplit
 
-          root = Path("skills/codex-engineering-mode")
+          root = Path("skills/engineering-mode")
           paths = [root / "SKILL.md", *sorted((root / "references").glob("**/*.md"))]
           cursor_root = Path("cursor-implementation-loop/skills/cursor-engineering-mode")
           paths.extend([cursor_root / "SKILL.md", *sorted((cursor_root / "references").glob("**/*.md"))])
-          codex_loop_root = Path("skills/codex-implementation-loop")
-          paths.extend([codex_loop_root / "SKILL.md", *sorted((codex_loop_root / "references").glob("**/*.md"))])
+          loop_root = Path("skills/implementation-loop")
+          paths.extend([loop_root / "SKILL.md", *sorted((loop_root / "references").glob("**/*.md"))])
           patterns = (
               re.compile(r"!?\[[^\]\n]*\]\((<[^>\n]+>|[^)\n]+)\)"),
               re.compile(r"^\s*\[[^\]\n]+\]:\s*(<[^>\n]+>|\S+)", re.MULTILINE),
@@ -209,6 +209,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Tree OID selftest
-        run: bash skills/codex-engineering-mode/scripts/tree-oid-selftest.sh
+        run: bash skills/engineering-mode/scripts/tree-oid-selftest.sh
       - name: Cursor tree OID selftest
         run: bash cursor-implementation-loop/skills/cursor-engineering-mode/scripts/tree-oid-selftest.sh
