@@ -15,7 +15,7 @@
 
 Three Claude Code skills so far, plus a Cursor Plugin that ships two engineering skills:
 
-- [`codex-implementation-loop`](#codex-implementation-loop) — delegate implementation to Codex without delegating judgment: Claude reviews the real diff, runs the full test gate, and ships only what it would sign its name to.
+- [`codex-implementation-loop`](#codex-implementation-loop) — delegate implementation to **Codex, grok, or cursor-agent** without delegating judgment: Claude reviews the real diff, runs the full test gate, and ships only what it would sign its name to. The implementer backend is a dial; the review-and-ship discipline is identical for all three.
 - `codex-engineering-mode` — goal-first engineering ownership: investigate, design, and plan, then drive `codex-implementation-loop` unit by unit.
 - [`cursor-implementation-loop`](#cursor-implementation-loop) — Cursor Plugin with the plan-first implementation loop and the goal-first `cursor-engineering-mode` wrapper; the parent agent reviews, gates, and publishes while an implementer subagent writes code.
 - [`web-slides`](#web-slides) — turn material or outlines into click-driven 16:9 HTML slide decks for live presenting, with 24 built-in themes and a presenter view that keeps speaker notes off the shared screen.
@@ -114,9 +114,16 @@ Codex prerequisites: `codex-engineering-mode` → `codex-implementation-loop` �
 
 ## codex-implementation-loop
 
-**Delegate implementation to Codex without delegating judgment.**
+**Delegate implementation to Codex, grok, or cursor-agent without delegating judgment.**
 
-Codex implements and runs focused tests. Claude reviews the real diff, runs the full gate, and ships only what it would sign its name to.
+The implementer implements and runs focused tests. Claude reviews the real diff, runs the full gate, and ships only what it would sign its name to.
+
+**Backend is a dial.** The default is Codex (setup below); the same loop and the same review-and-gate discipline apply whichever backend implements. Each backend's git and publication boundary works differently and is documented in its own runtime reference — read the selected backend's before its first dispatch:
+
+- **grok** — a fail-closed custom sandbox, linked-worktree placement, and a per-machine tuple allowlist. [`references/runtime-grok.md`](./skills/codex-implementation-loop/references/runtime-grok.md).
+- **cursor-agent** — a git-less-copy architecture: the implementer edits a `.git`-free copy inside a network-denied sandbox, and the orchestrator applies the captured patch to the real repo (it never runs with `--force`/`--yolo`, which would bypass the sandbox). [`references/runtime-cursor.md`](./skills/codex-implementation-loop/references/runtime-cursor.md).
+
+grok and cursor-agent both default to grok-4.6 at `xhigh` as the implementer model.
 
 ### Setup
 

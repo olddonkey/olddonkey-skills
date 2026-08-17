@@ -15,7 +15,7 @@
 
 目前包含三个 Claude Code skill，外加一个内含两个工程 skill 的 Cursor Plugin：
 
-- [`codex-implementation-loop`](#codex-implementation-loop) —— 把实现交给 Codex，但不把判断交出去：Claude 亲自审查真实 diff、跑全量测试门禁，只发布自己敢签名的改动。
+- [`codex-implementation-loop`](#codex-implementation-loop) —— 把实现交给 **Codex、grok 或 cursor-agent**，但不把判断交出去：Claude 亲自审查真实 diff、跑全量测试门禁，只发布自己敢签名的改动。实现后端是一个可选档位，三者的审查与发布纪律完全一致。
 - `codex-engineering-mode` —— 目标先行的工程主导模式：先调查、定设计、写计划，再逐单元驱动 `codex-implementation-loop`。
 - [`cursor-implementation-loop`](#cursor-implementation-loop) —— Cursor Plugin 内含计划先行的实现循环和目标先行的 `cursor-engineering-mode` 包装器；父 agent 负责 review / 门禁 / 发布，implementer 子 agent 写代码。
 - [`web-slides`](#web-slides) —— 把素材 / 提纲做成点击驱动的 16:9 HTML 幻灯片，用于现场放映；内置 24 套主题 + 演讲者窗口，投屏时口播稿对观众不可见。
@@ -114,9 +114,16 @@ Codex 侧依赖链：`codex-engineering-mode` → `codex-implementation-loop` �
 
 ## codex-implementation-loop
 
-**把实现交给 Codex，但不把判断交出去。**
+**把实现交给 Codex、grok 或 cursor-agent，但不把判断交出去。**
 
-Codex 负责实现并跑聚焦测试；Claude 亲自审查真实 diff、跑全量门禁，只发布自己敢签名的改动。
+实现者负责实现并跑聚焦测试；Claude 亲自审查真实 diff、跑全量门禁，只发布自己敢签名的改动。
+
+**后端是一个可选档位。** 默认是 Codex（见下方环境准备）；无论哪个后端实现，都是同一套循环、同样的审查与门禁纪律。每个后端的 git 与发布边界机制不同，各有独立的 runtime 文档——首次派发前请先读所选后端的：
+
+- **grok** —— fail-closed 自定义沙箱、linked-worktree 定位、按机器的 tuple allowlist。见 [`references/runtime-grok.md`](./skills/codex-implementation-loop/references/runtime-grok.md)。
+- **cursor-agent** —— git-less-copy 架构：实现者在一个无 `.git`、禁网络的沙箱拷贝里改文件，编排者再把捕获的 patch 应用到真仓库（绝不带 `--force`/`--yolo`，那会绕过沙箱）。见 [`references/runtime-cursor.md`](./skills/codex-implementation-loop/references/runtime-cursor.md)。
+
+grok 与 cursor-agent 的默认实现模型都是 grok-4.6 / `xhigh`。
 
 ### 环境准备
 
