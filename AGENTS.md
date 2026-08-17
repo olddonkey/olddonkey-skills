@@ -13,9 +13,10 @@ update script has nothing to install.
 Components:
 
 - `skills/codex-implementation-loop/` — the original Codex loop skill. Bash
-  helpers in `scripts/`: `codex-dispatch.sh`, `run-gate.sh`, and the regression
-  harness `selftest.sh`. Codex-specific mechanics live in
-  `references/runtime-codex.md`; the shared observable interface is recorded in
+  helpers in `scripts/`: `codex-dispatch.sh`, `run-gate.sh`, `selftest.sh`,
+  `grok-dispatch.sh`, `grok-verify-worktree.sh`, and `grok-selftest.sh`.
+  Backend-specific mechanics live in `references/runtime-codex.md` and
+  `references/runtime-grok.md`; the shared observable interface is recorded in
   `references/dispatch-contract.md`.
 - `skills/codex-engineering-mode/` — goal-first wrapper over the loop. Shared
   playbooks in `references/playbooks/`, plus `scripts/tree-oid.sh` and its
@@ -38,8 +39,8 @@ root in this order — all suites are self-contained, need no network, and the
 Codex/Cursor CLIs are **not** required (they are only needed to dispatch a live
 run):
 
-1. `bash -n` syntax checks on all seven shipped scripts (three Codex-loop
-   scripts, two Cursor gate scripts, both installer scripts).
+1. `bash -n` syntax checks on all ten shipped scripts (six Codex-loop scripts,
+   two Cursor gate scripts, both installer scripts).
 2. **Byte-for-byte shared-file checks** (`diff -q`): `run-gate.sh` must stay
    identical between `skills/codex-implementation-loop/scripts/` and
    `cursor-implementation-loop/skills/cursor-implementation-loop/scripts/`; the
@@ -55,14 +56,16 @@ run):
    `selftest: PASS (217 checks)`. The dispatch checks that need `tomllib` run
    fully on python3 ≥ 3.11; on older hosts they self-skip while keeping a
    stable check count.
-5. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
+5. `bash skills/codex-implementation-loop/scripts/grok-selftest.sh` — expect
+   `selftest: PASS (276 checks)`.
+6. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (122 checks)`.
-6. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
-7. Packaging checks: both marketplace JSON manifests must parse; every
+7. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
+8. Packaging checks: both marketplace JSON manifests must parse; every
    `SKILL.md` (under `skills/` and `cursor-implementation-loop/skills/`) must
    have non-empty `name:` and `description:` frontmatter; engineering-mode and
    Codex-loop Markdown must have no dangling relative links.
-8. `tree-oid` job (runs on ubuntu **and** macos):
+9. `tree-oid` job (runs on ubuntu **and** macos):
    `bash skills/codex-engineering-mode/scripts/tree-oid-selftest.sh` and the
    Cursor copy — expect `selftest: PASS (202 checks)` each. Keep these scripts
    portable across GNU and BSD userlands.

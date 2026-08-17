@@ -22,6 +22,8 @@ Unit: <one-line name>
 ## Environment
 - You run in the real environment; .git is read-only — leave changes in
   the working tree, I commit and publish.
+- Do not modify, delete, or rename git state; do not commit or publish; and do
+  not run any git state-mutating command.
 - Do NOT use MCP servers, app connectors, or any external service — the
   sandbox does not bound them; work with local files and shell only.
 - Do NOT run the full test suite. Run only <focused subset>, or nothing;

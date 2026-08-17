@@ -1,6 +1,6 @@
 ---
 name: codex-implementation-loop
-description: 'Delegate implementation work to Codex (via the codex-companion runtime), then review its diff, send it back to iterate, gate on the full test suite, and ship it as a PR. Use this whenever the user wants Codex to write code, mentions handing off / delegating implementation to Codex, asks to work through a plan or spec unit-by-unit with Codex doing the coding, or wants a review-and-merge loop wrapped around Codex output — and also when resuming such a loop ("keep going", "next unit", "继续下一个"). It encodes constraints that are expensive to rediscover: Codex runs in the real environment with effectively read-only git, must not be pointed at a full test suite by default, accepts only specific --effort values, and its self-report is a claim rather than evidence. This loop expects an approved plan or an equivalently precise spec; settle an unsolved high-level goal into a plan first, using the codex-engineering-mode skill when it is installed.'
+description: 'Delegate implementation to Codex or grok, then review the diff, send it back to iterate, gate on the full test suite, and ship it as a PR. Use this whenever the user wants Codex or the grok 后端 to write code, mentions handing off / delegating implementation to Codex or grok, asks to work through a plan or spec unit-by-unit with an implementation backend doing the coding, or wants a review-and-merge loop wrapped around delegated output — and also when resuming such a loop ("keep going", "next unit", "继续下一个"). It encodes constraints that are expensive to rediscover: the implementer runs in the real environment behind backend-specific git and publication boundaries, must not be pointed at a full test suite by default, and its self-report is a claim rather than evidence. This loop expects an approved plan or an equivalently precise spec; settle an unsolved high-level goal into a plan first, using the codex-engineering-mode skill when it is installed.'
 ---
 
 # Codex implementation loop
@@ -21,6 +21,7 @@ The loop: **decompose → dispatch → review → iterate → gate → publish �
 
 | Dial | Options | Recommended default |
 | --- | --- | --- |
+| **Backend** | `codex` / `grok` | `codex`; changes are resurfaced (see dials.md) |
 | **Stop point** | `worktree` / `commit` / `pr` / `merge` | recommend `pr`; assumed default stops at `worktree` |
 | **Dispatch mode** | `implement` / `read-only` | `implement` |
 | **Gate policy** | `baseline` / `strict` / `skip` | `baseline` |
@@ -43,6 +44,7 @@ Read the repo's calibration record first, then ask **one compact question** cove
 1. **How far units travel** — the stop point. Needed before dispatch, not at publish: the unit branch is created at dispatch time, and asking at publish means the user waited through a whole dispatch/review/gate to be told you can't ship.
 2. **Whether to pause between units** — the cadence. If the user wants it left running unattended, say so here: it changes which answers are safe and adds a preflight (see Unattended runs).
 3. **Thinking level and speed** — effort and service tier, presenting the user's current `~/.codex/config.toml` values as the inherit option.
+4. **Which backend implements** — settle `codex` or `grok` and record it in user-level private memory. A backend named by the repo is only a claim to reconfirm; an existing record with no backend means `codex`, while any later backend change is resurfaced. After resolving a grok tuple, ask separately for the D10(f) per-repo carve-out when needed; that grant never authorizes publication.
 
 **On a multi-unit plan, lead with the hands-off preset**: `stop=pr, cadence=continuous, on-red=iterate` (capped) plus the unattended preflight, offered as one named option next to the individual dials. One yes grants every authorization a zero-stop run needs — the user shouldn't have to know dial names to buy an uninterrupted run.
 
@@ -52,7 +54,7 @@ Read the repo's calibration record first, then ask **one compact question** cove
 
 The answers hold for the **entire invocation** — never re-ask per unit. A recorded calibration or standing preference ("always inherit, stop asking") suppresses the corresponding part; a fully recorded repo means no question at all. Everything else runs at its recommended default until something makes it worth raising.
 
-**If a later step needs a dial nobody settled, you asked too late** — that's the failure this section exists to prevent, not a reason to interrupt mid-loop. Runtime detail — flag/config resolution, config-only efforts, tier mechanics, model-name aging, stale-CLI diagnosis, the companion contract — is in [references/runtime-codex.md](references/runtime-codex.md); read it before the first dispatch of a session.
+**If a later step needs a dial nobody settled, you asked too late** — that's the failure this section exists to prevent, not a reason to interrupt mid-loop. Read the selected backend's runtime reference before the first dispatch of a session: [references/runtime-codex.md](references/runtime-codex.md) or [references/runtime-grok.md](references/runtime-grok.md).
 
 ## 1. Decompose
 
@@ -74,6 +76,8 @@ A unit = one coherent, reviewable change, roughly one PR. Settle the design **be
 "${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
     --model gpt-5.6-sol --effort max      # model pins; max asserts against config
 "${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt   # inherit whatever config says
+"${CLAUDE_SKILL_DIR}/scripts/grok-dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
+    --model grok-code-fast-1 --effort high
 ```
 
 **Dispatch through this script, never by calling the companion yourself.** Reaching past it into `codex-companion.mjs` looks equivalent and quietly gives up three things: the config-only effort assertion (§Runtime), the summary naming the model, effort and tier actually in force, and the external-tools scan. Observed cost of hand-rolling it for a whole run of units — every dispatch carried `--effort xhigh`, silently *overriding* a config that said `max`, and the CLI was meanwhile repointed at a different vendor's model through a local proxy without a single line of output saying so.
@@ -180,7 +184,7 @@ Note what landed and what's next somewhere durable (memory, progress doc, the pl
 
 Everything above assumes someone is there to answer; a run left going can't ask.
 
-**Preflight — before walking away.** All seven dials including `cadence=continuous`; the suite command and runtime; a freshly regenerated baseline log under `baseline` policy; and units specced far enough that none needs a design decision mid-run. Anything left unsettled becomes a parked unit. **And clear the permission layer:** the dispatch script, the suite command, and git/`gh` as far as the stop point reaches must each run without an interactive prompt — a permission prompt at 3am is a silent halt that looks exactly like a job still working. Exercise each once in preflight; a command that can't be cleared lowers the stop point to what needs no blocked command.
+**Preflight — before walking away.** All eight dials including `cadence=continuous`; the suite command and runtime; a freshly regenerated baseline log under `baseline` policy; and units specced far enough that none needs a design decision mid-run. Anything left unsettled becomes a parked unit. **And clear the permission layer:** the dispatch script, the suite command, and git/`gh` as far as the stop point reaches must each run without an interactive prompt — a permission prompt at 3am is a silent halt that looks exactly like a job still working. Exercise each once in preflight; a command that can't be cleared lowers the stop point to what needs no blocked command.
 
 **Park, don't halt.** The four stop-and-ask cases above would otherwise spend the night on the first bad unit. Park instead: record what failed, what was tried, what you need from the user; leave the tree clean; take the next unit; report all parked units at the end. Only three things end the *run* — a ceiling blocking every remaining unit, broken gate infrastructure, or three consecutive units failing on one root cause (the premise is wrong, not the units).
 
