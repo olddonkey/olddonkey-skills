@@ -78,10 +78,9 @@ matrix continues to exercise hostile valid user and project config layers.
 
 The required matrix ran end to end on 2026-08-17 at source head
 `f1690f47b84f83fe50875470daf4f83ee5216fa1`. Twenty-six frozen expectations
-matched and none skipped; two probes measured vendor-sandbox holes described
-below, and the aggregate gate was the third failure because those rows still
-expected denial. Both resume probes matched: repository write `allow`, Git-state
-write `deny`.
+matched and none skipped; the hard-link probe measured the vendor-sandbox hole
+described below, while the submodule probe produced an ambiguous failure. Both
+resume probes matched: repository write `allow`, Git-state write `deny`.
 
 The matrix wrote this release provenance before its temporary fixture was
 cleaned up:
@@ -104,9 +103,9 @@ host and source head. A different launcher, terminal executable hash, CLI,
 adapter version, OS/kernel/architecture, or effective-policy fingerprint is an
 uncalibrated tuple.
 
-### Known workspace-write sandbox holes
+### Known workspace-write sandbox hole
 
-`workspace-write` on the calibrated tuple has two measured Git-boundary holes:
+`workspace-write` on the calibrated tuple has one measured Git-boundary hole:
 
 - `hardlink-git-alias-write` is `allow`. The matrix changed the protected ref
   through a workspace hard link and reported
@@ -115,12 +114,14 @@ uncalibrated tuple.
   so the workspace path is writable even though the inode also names a file in
   `.git`. The corresponding symlink probe is `deny` because symlinks resolve to
   the protected path; hard links do not.
-- `submodule-git-dir-write` is `allow`: a write to the resolved submodule
-  Git-dir changed its target on this tuple.
 
-These are properties of Codex's vendor `workspace-write` sandbox, not this
+An earlier run appeared to show a submodule Git-dir write succeeding; a later
+run recorded child exit 1 and identical before/after hashes, so the write was
+denied and the ambiguous diagnostic was corrected.
+
+This is a property of Codex's vendor `workspace-write` sandbox, not this
 adapter. The retired companion passed the identical mode string to the same
-core, so it had the same holes before this adapter and matrix existed.
+core, so it had the same hole before this adapter and matrix existed.
 
 The practical boundary stops an implementer from accidentally touching Git
 state—the common failure, such as deciding to run `git commit`. It does not and

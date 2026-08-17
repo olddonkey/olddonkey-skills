@@ -8,7 +8,7 @@ linked-common-dir-write	always	deny	linked-worktree resolved common-dir is prote
 git-refs-write	always	deny	resolved refs are protected
 git-objects-write	always	deny	resolved objects are protected
 git-packed-refs-write	always	deny	resolved packed-refs is protected
-submodule-git-dir-write	always	allow	observed resolved submodule git-dir write succeeds on the calibrated tuple
+submodule-git-dir-write	always	deny	submodule marker and resolved git-dir are protected
 symlink-git-alias-write	always	deny	symlink alias to protected Git state is denied
 hardlink-git-alias-write	always	allow	observed hard-link alias mutates protected Git state on the calibrated tuple
 rename-git-target	always	deny	rename cannot replace protected Git state
