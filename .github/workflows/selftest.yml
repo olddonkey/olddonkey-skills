@@ -10,6 +10,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Syntax check
         run: |
+          bash -n build.sh
+          bash -n tests/build-selftest.sh
           bash -n skills/implementation-loop/backends/codex/dispatch.sh
           bash -n skills/implementation-loop/backends/codex/fixture-driver.sh
           bash -n skills/implementation-loop/backends/codex/selftest.sh
@@ -38,48 +40,21 @@ jobs:
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
           bash -n install-cursor.sh
           bash -n install-cursor-selftest.sh
-      - name: Shared run-gate.sh must stay identical
+      - name: Generated Cursor package is current
+        run: bash build.sh --check
+      - name: Cursor package build is deterministic
         run: |
-          diff -q \
-            skills/implementation-loop/scripts/run-gate.sh \
-            cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh
-      - name: Shared gate-selftest.sh must stay identical
-        run: |
-          diff -q \
-            skills/implementation-loop/tests/gate-selftest.sh \
-            cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
-      - name: Shared engineering-mode files must stay identical
-        run: |
-          diff -q \
-            skills/engineering-mode/references/playbooks/bug-fix.md \
-            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/bug-fix.md
-          diff -q \
-            skills/engineering-mode/references/playbooks/feature.md \
-            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/feature.md
-          diff -q \
-            skills/engineering-mode/references/playbooks/investigation.md \
-            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/investigation.md
-          diff -q \
-            skills/engineering-mode/references/playbooks/performance.md \
-            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/performance.md
-          diff -q \
-            skills/engineering-mode/references/playbooks/prototype.md \
-            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/prototype.md
-          diff -q \
-            skills/engineering-mode/references/playbooks/refactor.md \
-            cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/refactor.md
-          diff -q \
-            skills/engineering-mode/references/verification-contract.md \
-            cursor-implementation-loop/skills/cursor-engineering-mode/references/verification-contract.md
-          diff -q \
-            skills/engineering-mode/references/handoff.md \
-            cursor-implementation-loop/skills/cursor-engineering-mode/references/handoff.md
-          diff -q \
-            skills/engineering-mode/scripts/tree-oid.sh \
-            cursor-implementation-loop/skills/cursor-engineering-mode/scripts/tree-oid.sh
-          diff -q \
-            skills/engineering-mode/scripts/tree-oid-selftest.sh \
-            cursor-implementation-loop/skills/cursor-engineering-mode/scripts/tree-oid-selftest.sh
+          first_parent="$(mktemp -d)"
+          second_parent="$(mktemp -d)"
+          bash build.sh --out "$first_parent/package"
+          bash build.sh --out "$second_parent/package"
+          python3 tests/build-inventory.py "$first_parent/package" \
+            > "$first_parent/inventory.tsv"
+          python3 tests/build-inventory.py "$second_parent/package" \
+            > "$second_parent/inventory.tsv"
+          diff -u "$first_parent/inventory.tsv" "$second_parent/inventory.tsv"
+      - name: Cursor package build selftest
+        run: bash tests/build-selftest.sh
       - name: Shared playbooks stay platform-neutral
         run: |
           ! grep -rnwE 'read-only|investigate' \
