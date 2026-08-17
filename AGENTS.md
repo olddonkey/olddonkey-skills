@@ -27,10 +27,16 @@ Components:
   selftest.
 - `skills/web-slides/` — a scaffolder (`scripts/scaffold.sh`) that generates a
   runnable Vite + React + TypeScript slide deck. The only runnable "app".
-- `cursor-implementation-loop/` — the Cursor plugin port. Ships two skills
-  (`cursor-implementation-loop`, `cursor-engineering-mode`) and two agents
-  (`agents/loop-implementer.md`, `agents/loop-independent-reviewer.md`).
-  Manifest: `.cursor-plugin/plugin.json`.
+- `cursor-implementation-loop/` — the generated Cursor plugin port. It ships
+  two skills (`cursor-implementation-loop`, `cursor-engineering-mode`) and two
+  agents (`agents/loop-implementer.md`, `agents/loop-independent-reviewer.md`).
+  Edit shared inputs under `skills/` or Cursor-authored inputs under
+  `hosts/cursor/`, then run `bash build.sh`; do not hand-edit the generated
+  tree. Manifest: `.cursor-plugin/plugin.json`.
+- `build.sh`, `hosts/cursor/`, `tests/build-{inventory.py,selftest.sh}` — the
+  deterministic Cursor-package generator, its host-only overlay, and its
+  external-inventory/selftest tooling. `bash build.sh --check` verifies the
+  committed tree and its recorded version decision without rewriting it.
 - `install-cursor.sh` / `install-cursor-selftest.sh` — root-level one-line
   installer for the Cursor plugin (`curl … install-cursor.sh | bash`), plus its
   own selftest.
@@ -43,19 +49,16 @@ root in this order — all suites are self-contained, need no network, and the
 Codex/Cursor CLIs are **not** required (they are only needed to dispatch a live
 run):
 
-1. `bash -n` syntax checks on every shipped shell script: backend modules and
-   fixture drivers, shared tests, the gate, all forwarding shims, the two Cursor
-   gate scripts, and both installer scripts.
-2. **Byte-for-byte shared-file checks** (`diff -q`):
-   `skills/implementation-loop/scripts/run-gate.sh` matches the Cursor package's
-   `scripts/run-gate.sh`, and `skills/implementation-loop/tests/gate-selftest.sh`
-   matches its `scripts/gate-selftest.sh` (the canonical suite resolves either
-   layout); the
-   six engineering-mode playbooks, `verification-contract.md`, `handoff.md`,
-   `tree-oid.sh`, and `tree-oid-selftest.sh` must stay identical between
-   `skills/engineering-mode/` and
-   `cursor-implementation-loop/skills/cursor-engineering-mode/`. **If you edit
-   one copy, mirror the other in the same commit.**
+1. `bash -n` syntax checks on every shipped shell script: the builder and its
+   selftest, backend modules and fixture drivers, shared tests, the gate, all
+   forwarding shims, the two generated Cursor gate scripts, and both installer
+   scripts.
+2. **Generated Cursor package checks:** `bash build.sh --check`, two builds into
+   separate temporary destinations with byte-identical external inventories,
+   then `bash tests/build-selftest.sh` (expect `selftest: PASS (21 checks)`).
+   The inventory records path, type, mode, and SHA-256 independently of the
+   embedded manifest. Edit `skills/` or `hosts/cursor/`, run `bash build.sh`,
+   and record the version decision in `hosts/cursor/version-decision.tsv`.
 3. Playbooks must stay platform-neutral: no `read-only` / `investigate` words
    and no `codex-dispatch` references anywhere under either
    `references/playbooks/` tree.
