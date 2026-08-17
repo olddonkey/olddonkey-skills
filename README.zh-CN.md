@@ -36,7 +36,7 @@
 
 由于实现循环现在支持 Codex、grok 和 cursor-agent 后端，这两个插件已去掉 `codex-` 前缀并改用新名称。已安装旧 Codex 前缀插件 ID 的用户应先卸载旧 ID，再安装 `implementation-loop` 和 `engineering-mode`。
 
-`engineering-mode` 依赖 `implementation-loop` 和官方 Codex companion 插件；Codex 环境还需要已登录的 Codex CLI，见下方[环境准备](#环境准备)。`web-slides` 除了生成的幻灯片项目需要 Node.js 之外没有额外依赖。
+`engineering-mode` 依赖 `implementation-loop`；Codex 后端需要已登录的 `codex` CLI，不再需要额外的 Claude Code 插件，见下方[环境准备](#环境准备)。`web-slides` 除了生成的幻灯片项目需要 Node.js 之外没有额外依赖。
 
 ### 手动安装
 
@@ -110,7 +110,7 @@ cp olddonkey-skills/cursor-implementation-loop/agents/*.md ~/.cursor/agents/
 
 **目标先行：**只给 engineering mode 一个结果目标；它会调查根因、选定设计、写出计划，再驱动同一套循环。Codex：`使用 engineering-mode 修复 webhook 重放导致的重复履约。` Cursor：`使用 cursor-engineering-mode 修复 webhook 重放导致的重复履约。`
 
-Codex 侧依赖链：`engineering-mode` → `implementation-loop` → 官方 Codex companion 插件。Cursor 侧的 `cursor-engineering-mode` 已内置于 `cursor-implementation-loop` 插件，无需单独安装；现有安装更新后即可获得：重新运行一行安装命令，或在 managed checkout 中执行 `git pull`。
+Codex 侧依赖链：`engineering-mode` → `implementation-loop` → 已登录的 `codex` CLI。Cursor 侧的 `cursor-engineering-mode` 已内置于 `cursor-implementation-loop` 插件，无需单独安装；现有安装更新后即可获得：重新运行一行安装命令，或在 managed checkout 中执行 `git pull`。
 
 ---
 
@@ -129,16 +129,8 @@ Codex 侧依赖链：`engineering-mode` → `implementation-loop` → 官方 Cod
 
 ### 环境准备
 
-循环基于官方 [OpenAI Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc)：
-
-```text
-/plugin marketplace add openai/codex-plugin-cc
-/plugin install codex@openai-codex
-/reload-plugins
-/codex:setup
-```
-
-`/codex:setup` 用于检查 Codex CLI 是否已安装并登录。该插件要求 Node.js 18.18 或更高版本；若本机有 npm，它可以主动提出帮你安装 CLI。也可以手动完成：
+循环通过 `codex exec` 直接调用 Codex CLI，不需要额外的 Claude Code
+插件。如尚未安装或登录，可执行：
 
 ```bash
 npm install -g @openai/codex
@@ -165,7 +157,7 @@ codex update
 
 1. Claude 把 plan、spec 或 TODO 拆成一个完整、可 review 的工程单元。
 2. Codex 在工作树中实现，并且只运行派发时指定的聚焦测试。
-3. Claude 阅读真实 diff、检查整个工作树，再把具体问题送回同一个 Codex thread 迭代。
+3. Claude 阅读真实 diff、检查整个工作树，再次派发具体问题；只有 resume 通过规定的真实后端矩阵后才复用同一个 Codex exact session，否则通过新的 prompt 携带上下文。
 4. Claude 亲自跑全套测试，并按照选定的门禁策略判定结果。
 5. Claude 停在配置好的边界：工作树、commit、PR，或者经过明确授权的 merge。
 
@@ -175,8 +167,8 @@ Codex 的总结只是检查地图，不是改动正确的证据；diff 和测试
 
 - **证据优先的 review。** 清单专门检查委派改动中常被普通 review 漏掉的问题：被改弱的测试、默认值导致的静默回归、无法发布的 gitignore 文件、悄悄新增的依赖，以及被软化的强制边界。
 - **有边界的自动化。** 七个控制项决定循环可以走多远、review 多深、修复由谁实现，以及门禁变红时怎么办。每个仓库只确定一次，不必每个单元重新争论。
-- **把昂贵的经验编码一次。** 工作流明确区分聚焦测试和全量门禁，按事件流识别卡死任务，并覆盖取消任务与清理孤儿进程。
-- **两个附带工具。** [`codex-dispatch.sh`](./skills/implementation-loop/scripts/codex-dispatch.sh) 自动定位当前 companion 运行时并展示派发设置；[`run-gate.sh`](./skills/implementation-loop/scripts/run-gate.sh) 保留测试套件的真实 exit code，并支持与基线失败项对比。
+- **把昂贵的经验编码一次。** 工作流明确区分聚焦测试和全量门禁，通过保留的 transcript 识别卡死的前台任务，并覆盖有界中断与清理孤儿进程。
+- **两个附带工具。** [`codex-dispatch.sh`](./skills/implementation-loop/scripts/codex-dispatch.sh) 通过 plain `codex exec` 固定策略、维护循环状态并校验 banner；[`run-gate.sh`](./skills/implementation-loop/scripts/run-gate.sh) 保留测试套件的真实 exit code，并支持与基线失败项对比。
 
 完整工作流见 [`SKILL.md`](./skills/implementation-loop/SKILL.md)。
 
@@ -198,9 +190,9 @@ Skill 为首次运行准备了保守选择；只需要指定你想改变的部�
 
 ### 兼容性与限制
 
-- 指令采用开放的 `SKILL.md` 格式，但当前运行时和附带的派发脚本只针对 **Claude Code + 官方 [OpenAI Codex 插件](https://github.com/openai/codex-plugin-cc)** 构建与测试。
-- 其他 agent 可以复用这套工作流，但需要为自己的派发运行时编写适配层；`codex-dispatch.sh` 目前会在 Claude Code 的插件目录中寻找 `codex-companion`。
-- 脚本需要 Bash、Node.js 和常见 Unix 命令行工具；开发环境为 macOS。
+- 指令采用开放的 `SKILL.md` 格式。Claude marketplace 承载这个 skill，而 Codex 后端通过 plain `codex exec` 直接调用已登录的 `codex` CLI。
+- 其他 agent 可以使用已附带的 grok、cursor-agent 适配器，或实现同一派发契约的新适配器。
+- 脚本需要 Bash、Python 3.11+、所选后端的 CLI 和常见 Unix 命令行工具；开发环境为 macOS。
 - Codex 与 Claude Code 使用同一份 checkout 和本机环境，其用量计入你的 ChatGPT 或 API 限额；详见 [Codex 定价](https://developers.openai.com/codex/pricing)。
 
 ---

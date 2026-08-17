@@ -1,6 +1,6 @@
 ---
 name: engineering-mode
-description: 'Own goal-first engineering outcomes: investigate, find root cause, design, plan, then delegate implementation unit-by-unit to implementation-loop with verification and honest reporting. Use to fix, build, or own an outcome end to end; investigate-and-fix; "make X work"; or plan-then-execute in one request. A request with an approved plan or equivalently precise spec that needs nothing beyond implementation belongs directly to implementation-loop. Requires implementation-loop and the Codex companion plugin to execute.'
+description: 'Own goal-first engineering outcomes: investigate, find root cause, design, plan, then delegate implementation unit-by-unit to implementation-loop with verification and honest reporting. Use to fix, build, or own an outcome end to end; investigate-and-fix; "make X work"; or plan-then-execute in one request. A request with an approved plan or equivalently precise spec that needs nothing beyond implementation belongs directly to implementation-loop. Requires implementation-loop and an authenticated backend CLI to execute.'
 ---
 
 # Engineering mode

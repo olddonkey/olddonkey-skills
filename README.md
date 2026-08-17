@@ -36,7 +36,7 @@ Inside Claude Code, add the marketplace once, then install the skills you want:
 
 These plugins were renamed by dropping the `codex-` prefix because the loop now supports Codex, grok, and cursor-agent backends. If the former Codex-prefixed plugin IDs are installed, uninstall them and install `implementation-loop` and `engineering-mode` instead.
 
-`engineering-mode` requires `implementation-loop` plus the official Codex companion plugin; the Codex setup also needs an authenticated Codex CLI — see [Setup](#setup) below. `web-slides` needs nothing beyond Node.js for the generated slide project.
+`engineering-mode` requires `implementation-loop`; the Codex backend needs an authenticated `codex` CLI and no additional Claude Code plugin — see [Setup](#setup) below. `web-slides` needs nothing beyond Node.js for the generated slide project.
 
 ### Manual
 
@@ -110,7 +110,7 @@ To uninstall a symlink install: `rm ~/.cursor/plugins/local/cursor-implementatio
 
 **Goal-first:** give engineering mode an outcome; it investigates the root cause, chooses a design, writes the plan, then drives that same loop. Codex: `Use engineering-mode to fix duplicate fulfillment caused by webhook replay.` Cursor: `Use cursor-engineering-mode to fix duplicate fulfillment caused by webhook replay.`
 
-Codex prerequisites: `engineering-mode` → `implementation-loop` → official Codex companion plugin. On Cursor, `cursor-engineering-mode` ships inside the `cursor-implementation-loop` plugin, so there is no separate install; existing installs receive it on update by rerunning the one-line installer or running `git pull` in the managed checkout.
+Codex prerequisites: `engineering-mode` → `implementation-loop` → authenticated `codex` CLI. On Cursor, `cursor-engineering-mode` ships inside the `cursor-implementation-loop` plugin, so there is no separate install; existing installs receive it on update by rerunning the one-line installer or running `git pull` in the managed checkout.
 
 ---
 
@@ -129,16 +129,8 @@ Both default to Grok 4.6 at `xhigh` as the implementer model, but `--model` is a
 
 ### Setup
 
-The loop drives the official [OpenAI Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc):
-
-```text
-/plugin marketplace add openai/codex-plugin-cc
-/plugin install codex@openai-codex
-/reload-plugins
-/codex:setup
-```
-
-`/codex:setup` checks whether the Codex CLI is installed and authenticated. The plugin requires Node.js 18.18 or later and can offer to install the CLI when npm is available. To set it up manually instead:
+The loop calls the Codex CLI directly through `codex exec`; no additional
+Claude Code plugin is required. Install and authenticate the CLI if needed:
 
 ```bash
 npm install -g @openai/codex
@@ -165,7 +157,7 @@ Natural-language invocation works with both marketplace and manual installations
 
 1. Claude turns a plan, spec, or TODO into one coherent, reviewable unit.
 2. Codex implements it in the working tree and runs only the focused tests named in the dispatch.
-3. Claude reads the actual diff, checks the whole working tree, and sends concrete findings back on the same Codex thread.
+3. Claude reads the actual diff, checks the whole working tree, and dispatches concrete findings again; it uses the same exact Codex session only after resume has passed the required real-backend matrix, and otherwise carries context in a fresh prompt.
 4. Claude runs the full test suite itself and interprets it under the chosen gate policy.
 5. Claude stops at the configured boundary: working tree, commit, PR, or an explicitly authorized merge.
 
@@ -175,8 +167,8 @@ Codex's summary is a map of where to look, not proof that the change is correct.
 
 - **Evidence-first review.** The checklist targets delegated-change failures that generic review often misses: weakened tests, silent default regressions, gitignored files, new dependencies, and softened enforcement points.
 - **Bounded autonomy.** Seven controls settle how far the loop may act, how deeply it reviews, who implements fixes, and what happens when the gate is red. They are chosen once per repository instead of re-litigated on every unit.
-- **Expensive lessons encoded once.** The workflow distinguishes focused tests from the full gate, detects stuck jobs by their event stream, and covers cancellation plus orphaned-process cleanup.
-- **Two bundled helpers.** [`codex-dispatch.sh`](./skills/implementation-loop/scripts/codex-dispatch.sh) locates the live companion runtime and makes dispatch settings visible; [`run-gate.sh`](./skills/implementation-loop/scripts/run-gate.sh) preserves the suite's real exit code and can compare failures with a baseline.
+- **Expensive lessons encoded once.** The workflow distinguishes focused tests from the full gate, detects stuck foreground runs from retained transcripts, and covers bounded interruption plus orphaned-process cleanup.
+- **Two bundled helpers.** [`codex-dispatch.sh`](./skills/implementation-loop/scripts/codex-dispatch.sh) runs plain `codex exec` with pinned policy, loop-owned state, and banner verification; [`run-gate.sh`](./skills/implementation-loop/scripts/run-gate.sh) preserves the suite's real exit code and can compare failures with a baseline.
 
 Read the complete workflow in [`SKILL.md`](./skills/implementation-loop/SKILL.md).
 
@@ -198,9 +190,9 @@ Model and effort inherit the user's Codex configuration unless explicitly overri
 
 ### Compatibility and limits
 
-- The instructions use the open `SKILL.md` format, but the current runtime and bundled dispatch script are built and tested for **Claude Code plus the official [OpenAI Codex plugin](https://github.com/openai/codex-plugin-cc)**.
-- Other agents can reuse the workflow, but they need an adapter for their own dispatch runtime; `codex-dispatch.sh` currently discovers `codex-companion` inside Claude Code's plugin directories.
-- The scripts require Bash, Node.js, and common Unix command-line tools. They were developed on macOS.
+- The instructions use the open `SKILL.md` format. The Claude marketplace hosts the skill, while the Codex backend calls an authenticated `codex` CLI directly through plain `codex exec`.
+- Other agents can reuse the workflow through the shipped grok and cursor-agent adapters or an adapter implementing the same dispatch contract.
+- The scripts require Bash, Python 3.11+, the selected backend CLI, and common Unix command-line tools. They were developed on macOS.
 - Codex runs on the same checkout and machine-local environment as Claude Code. Its usage counts toward your ChatGPT or API limits; see [Codex pricing](https://developers.openai.com/codex/pricing).
 
 ---

@@ -1,0 +1,31 @@
+#schema=1
+# id	applicability	expected	description
+provenance	always	pass	complete tuple and effective-policy provenance is written
+fresh-repo-write	always	allow	fresh workspace-write can modify a tracked repository file
+fresh-git-marker-write	always	deny	fresh workspace-write cannot modify the checkout git marker
+linked-git-dir-write	always	deny	linked-worktree resolved git-dir is protected
+linked-common-dir-write	always	deny	linked-worktree resolved common-dir is protected
+git-refs-write	always	deny	resolved refs are protected
+git-objects-write	always	deny	resolved objects are protected
+git-packed-refs-write	always	deny	resolved packed-refs is protected
+submodule-git-dir-write	always	deny	submodule marker and resolved git-dir are protected
+symlink-git-alias-write	always	deny	symlink alias to protected Git state is denied
+hardlink-git-alias-write	always	deny	hard-link alias to protected Git state is denied
+rename-git-target	always	deny	rename cannot replace protected Git state
+atomic-replace-git-target	always	deny	atomic replacement cannot replace protected Git state
+extra-writable-root-write	always	deny	inherited extra writable root is neutralized
+sibling-workspace-write	always	deny	sibling of the workspace is not writable
+symlink-workspace-write	always	allow	canonicalized symlink workspace still permits repository edits
+raw-tcp-host-control	always	allow	host raw-TCP positive control reaches the local listener
+raw-tcp-sandbox	always	deny	sandboxed raw TCP cannot reach the local listener
+readonly-repo-write	always	deny	fresh read-only mode cannot modify repository files
+resume-repo-write	always	allow	resumed workspace-write can modify repository files
+resume-git-write	always	deny	resumed workspace-write keeps Git state protected
+config-writable-roots-pin	always	deny	disagreeing configured writable roots do not take effect
+config-network-pin	always	deny	disagreeing configured network access does not take effect
+config-permissions-pin	always	deny	disagreeing configured sandbox permissions do not take effect
+config-approval-pin	always	pass	disagreeing approval policy resolves to never
+config-user-layer	always	pass	user-layer disagreement is overridden by adapter pins
+config-project-layer	always	pass	project-layer disagreement is overridden by adapter pins
+config-profile-layer	always	pass	active configured profile disagreement is overridden by adapter pins
+managed-layer-pin	managed-only	pass	managed-layer disagreement is overridden on a managed host

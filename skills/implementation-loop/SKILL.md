@@ -74,7 +74,7 @@ A unit = one coherent, reviewable change, roughly one PR. Settle the design **be
 # State the intent settled at kickoff on EVERY dispatch — model names age, and
 # ambient config can change under you between one unit and the next.
 "${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
-    --model gpt-5.6-sol --effort max      # model pins; max asserts against config
+    --model gpt-5.6-sol --effort max      # both are per-turn overrides
 "${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt   # inherit whatever config says
 "${CLAUDE_SKILL_DIR}/scripts/grok-dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
     --model grok-4.6 --effort xhigh
@@ -82,20 +82,20 @@ A unit = one coherent, reviewable change, roughly one PR. Settle the design **be
     --model cursor-grok-4.6-xhigh
 ```
 
-**Dispatch through this script, never by calling the companion yourself.** Reaching past it into `codex-companion.mjs` looks equivalent and quietly gives up three things: the config-only effort assertion (§Runtime), the summary naming the model, effort and tier actually in force, and the external-tools scan. Observed cost of hand-rolling it for a whole run of units — every dispatch carried `--effort xhigh`, silently *overriding* a config that said `max`, and the CLI was meanwhile repointed at a different vendor's model through a local proxy without a single line of output saying so.
+**Dispatch through this script, never by calling `codex exec` yourself.** The wrapper pins sandbox, approval, nested writable roots, network, and permissions on both fresh and resumed paths; redirects stdin from `/dev/null`; verifies the human policy banner; binds resume to loop-owned exact ids; protects state outside the child sandbox; captures the transcript/final message; and discloses host-side external tools. Hand-rolling only the visible model/prompt flags silently drops those boundaries.
 
 **Name model and effort on every dispatch rather than inheriting silently.** Kickoff settles the intent once; each dispatch then states it, so config drift — or the CLI being repointed at another vendor's model, which is not hypothetical — cannot change what implements your units without saying so. The summary the script prints is the confirmation that the intent actually landed.
 
-How each knob expresses intent — including the config-only effort assertion that fails closed rather than downgrading — is codex-specific mechanics: see the flag-semantics section of [references/runtime-codex.md](references/runtime-codex.md).
+How each knob and policy pin reaches the two calibrated argv shapes is codex-specific mechanics: see the flag-semantics section of [references/runtime-codex.md](references/runtime-codex.md).
 
 Hygiene — each failure mode here is silent:
 
-- **Run from the target repo root**; the companion works on the invoking directory. Read the `workspace:` line it prints.
+- **Run from the target repo root**; fresh dispatch pins that canonical directory with `-C`, while resume must change directory before launch. Read the `workspace:` line.
 - **Start from a clean tree** (`git status --short`), or Codex's changes are unattributable.
-- **One unit in flight** — Codex `--resume` binds to the most recent thread; cursor-agent iteration is always a fresh dispatch carrying review feedback in its prompt.
+- **One unit in flight** — the Codex workspace lock refuses overlap, and resume (when release-enabled) binds only the highest ready loop-owned exact id; cursor-agent iteration is always a fresh dispatch carrying review feedback in its prompt.
 - **Prompt in a file, outside the target repo** (`/tmp`) — shell-escaping corrupts long prompts, and in-repo files pollute the diff.
 - **Create the unit branch before dispatching** when the stop point involves one.
-- **Background at the harness level**; the companion's own `--background` detaches and can outlive a failed-looking launch.
+- **Background at the harness level**; `codex-dispatch.sh --background` is a hard error, so the foreground adapter's exit stays authoritative.
 
 The prompt is the whole spec: **why** (evidence, file:line), **exactly what to change**, **tests expected** (including which existing tests will break and how they update — never deleted), **what not to touch**, and the environment constraints. Copy-ready skeleton: [references/dispatch-prompt.md](references/dispatch-prompt.md).
 
@@ -105,9 +105,9 @@ Environment constraints to include verbatim-ish in every dispatch:
 - Git ownership stays with you. Codex sees effectively read-only Git state, grok uses its protected worktree transition, and cursor-agent sees no Git at all: its dispatcher applies only the captured git-less-copy patch to the real worktree. You commit and publish.
 - No full test suite by default — focused subset or nothing; you own the gate. Ask it to report files changed, tests added, subset run.
 
-The dispatch script prints a `warn` line naming any MCP servers or app connectors in the Codex config, because the sandbox does not bound tool calls. **That warning is disclosure, not a stop — do not ask the user how to proceed.** Note it in the unit report and continue. Whether to refuse instead (`CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1`) is a calibration setting, settled once per repo like any other dial, not a per-dispatch question. The scan is a tripwire, not a boundary — server-side-enabled Apps are invisible to it, and full isolation means disabling the tools in Codex itself.
+The dispatch script prints a `warn` line naming MCP servers, app connectors, plugins, and `notify` hooks found in the Codex config, because the sandbox does not bound host-side tool calls. **That warning is disclosure, not a stop — do not ask the user how to proceed.** Note it in the unit report and continue. Whether to refuse instead (`CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1`) is a calibration setting, settled once per repo like any other dial, not a per-dispatch question. The scan is a tripwire, not a boundary — server-side-enabled Apps and other injected tools can remain invisible, and full isolation means disabling the tools in Codex itself.
 
-Stuck jobs (no new events 15–20 min): cancel, read what it attempted, fix the prompt or split the unit — and kill orphaned test processes. Commands in [references/runtime-codex.md](references/runtime-codex.md).
+Stuck foreground runs (no new transcript output for 15–20 min): interrupt the harness-owned adapter, inspect its retained run state, fix the prompt or split the unit, and kill orphaned test processes. State and lifecycle details are in [references/runtime-codex.md](references/runtime-codex.md).
 
 **Absence of events is ambiguous — the watcher itself can be the broken thing, and it fails looking exactly like a healthy one.** A watcher that latches "the newest job log" *after* dispatching latches the very log it was meant to follow, then waits forever for a newer one: zero events, indefinitely, indistinguishable from a job still working. Capture that marker **before** dispatching, or hardcode it. Two habits make the failure loud instead of silent: **no event within ~2 minutes of arming means suspect the watcher first**, and **never let the watcher be the only completion signal** — the dispatch invocation's own exit is the authoritative one, so watcher output is progress detail, not the thing you wait on.
 
@@ -129,12 +129,16 @@ Read the actual diff; the summary only says where to look. Check the whole tree 
 
 ## 4. Iterate
 
-Send findings back on the same thread with specifics — what's wrong, why it matters, what you expect:
+Send findings back through the selected backend with specifics — what's wrong, why it matters, what you expect:
 
 ```bash
-"${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --resume --prompt-file /tmp/review-findings.txt
+"${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --prompt-file /tmp/review-findings.txt  # fresh while resume is release-disabled
 "${CLAUDE_SKILL_DIR}/scripts/cursor-dispatch.sh" --prompt-file /tmp/review-findings.txt  # fresh session; no --resume
 ```
+
+After the Codex required real-backend matrix is recorded and resume is
+release-enabled, the first command may add `--resume`; it selects only the
+highest ready loop-owned exact id and never an unrelated newest session.
 
 For cursor-agent, the already-applied worktree carries file state and the new
 prompt carries review context. `cursor-dispatch.sh --resume` deliberately

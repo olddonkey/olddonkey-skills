@@ -7,7 +7,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISPATCH="$SCRIPT_DIR/codex-dispatch.sh"
 GATE="$SCRIPT_DIR/run-gate.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/codex-loop-selftest.XXXXXX")" || exit 1
-trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+STATE_PARENT="$(mktemp -d "$SCRIPT_DIR/.codex-loop-selftest.XXXXXX")" || exit 1
+SLASH_TMP_PARENT="$(mktemp -d /tmp/codex-loop-selftest-home.XXXXXX)" || exit 1
+CRASH_CHILD_PID=""
+cleanup() {
+  if [[ -n "$CRASH_CHILD_PID" ]]; then
+    kill -TERM "-$CRASH_CHILD_PID" 2>/dev/null || true
+  fi
+  rm -rf "$TMP_ROOT" "$STATE_PARENT" "$SLASH_TMP_PARENT"
+}
+trap cleanup EXIT HUP INT TERM
 
 CHECKS=0
 FAILED_CHECKS=0
@@ -125,693 +134,742 @@ write_lines() { # $1=path, remaining args=lines
   printf '%s\n' "$@" > "$path"
 }
 
-BIN_DIR="$TMP_ROOT/bin"
-HOME_DIR="$TMP_ROOT/home"
-CONFIG_DIR="$TMP_ROOT/codex-home"
-mkdir -p "$BIN_DIR" "$HOME_DIR" "$CONFIG_DIR"
+run_split_case_in_dir() { # $1=name $2=working directory, remaining args=command
+  local name="$1" directory="$2"
+  shift 2
+  CASE_STDOUT="$TMP_ROOT/$name.stdout"
+  CASE_STDERR="$TMP_ROOT/$name.stderr"
+  CASE_OUTPUT="$CASE_STDERR"
+  if (cd "$directory" && exec "$@") > "$CASE_STDOUT" 2> "$CASE_STDERR"; then
+    CASE_STATUS=0
+  else
+    CASE_STATUS=$?
+  fi
+}
 
-write_lines "$BIN_DIR/node" \
+expect_stdout_exact() { # $1=expected $2=description
+  local expected_file="$TMP_ROOT/expected-stdout"
+  printf '%s' "$1" > "$expected_file"
+  if cmp -s "$expected_file" "$CASE_STDOUT"; then
+    pass "$2"
+  else
+    fail "$2 (stdout differed)"
+  fi
+}
+
+expect_file_mode() { # $1=path $2=octal mode $3=description
+  if python3 - "$1" "$2" <<'PY'
+import os
+import stat
+import sys
+
+path, expected = sys.argv[1:]
+info = os.lstat(path)
+ok = not stat.S_ISLNK(info.st_mode) and stat.S_IMODE(info.st_mode) == int(expected, 8)
+raise SystemExit(0 if ok else 1)
+PY
+  then
+    pass "$3"
+  else
+    fail "$3"
+  fi
+}
+
+expect_argv_count() { # $1=log $2=value $3=count $4=description
+  if python3 - "$1" "$2" "$3" <<'PY'
+import sys
+
+path, value, expected = sys.argv[1:]
+raw = open(path, "rb").read().split(b"\0")
+argv = [item.decode("utf-8") for item in raw if item]
+raise SystemExit(0 if argv.count(value) == int(expected) else 1)
+PY
+  then
+    pass "$4"
+  else
+    fail "$4"
+  fi
+}
+
+expect_argv_sequence() { # $1=log $2=description, remaining=sequence
+  local log="$1" description="$2"
+  shift 2
+  if python3 - "$log" "$@" <<'PY'
+import sys
+
+path, *needle = sys.argv[1:]
+raw = open(path, "rb").read().split(b"\0")
+argv = [item.decode("utf-8") for item in raw if item]
+found = any(argv[index:index + len(needle)] == needle for index in range(len(argv) - len(needle) + 1))
+raise SystemExit(0 if found else 1)
+PY
+  then
+    pass "$description"
+  else
+    fail "$description"
+  fi
+}
+
+expect_argv_sandbox() { # $1=log $2=fresh|resume $3=mode $4=description
+  if python3 - "$1" "$2" "$3" <<'PY'
+import sys
+
+path, kind, mode = sys.argv[1:]
+raw = open(path, "rb").read().split(b"\0")
+argv = [item.decode("utf-8") for item in raw if item]
+fresh = sum(1 for index, value in enumerate(argv[:-1]) if value == "-s" and argv[index + 1] == mode)
+resume = sum(
+    1
+    for index, value in enumerate(argv[:-1])
+    if value == "-c" and argv[index + 1] == f'sandbox_mode="{mode}"'
+)
+wrong = sum(
+    1
+    for index, value in enumerate(argv[:-1])
+    if value == "-s" or (value == "-c" and argv[index + 1].startswith("sandbox_mode="))
+)
+ok = wrong == 1 and ((kind == "fresh" and fresh == 1 and resume == 0) or (kind == "resume" and resume == 1 and fresh == 0))
+raise SystemExit(0 if ok else 1)
+PY
+  then
+    pass "$4"
+  else
+    fail "$4"
+  fi
+}
+
+expect_argv_no_forbidden() { # $1=log $2=description
+  if python3 - "$1" <<'PY'
+import sys
+
+forbidden = {
+    "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust",
+    "--add-dir", "--approve-for-me", "-p", "--profile", "--ignore-user-config",
+    "--ignore-rules", "--enable", "--disable",
+}
+raw = open(sys.argv[1], "rb").read().split(b"\0")
+argv = [item.decode("utf-8") for item in raw if item][:-1]
+bad = any(value in forbidden or any(value.startswith(prefix) for prefix in (
+    "--add-dir=", "--approve-for-me=", "--profile=", "--enable=", "--disable="
+)) for value in argv)
+raise SystemExit(1 if bad else 0)
+PY
+  then
+    pass "$2"
+  else
+    fail "$2"
+  fi
+}
+
+latest_run_state() { # $1=stderr path
+  LC_ALL=C sed -n 's/^run state: //p' "$1" | tail -1
+}
+
+BIN_DIR="$TMP_ROOT/bin"
+HOME_DIR="$STATE_PARENT/home"
+CODEX_HOME_DIR="$HOME_DIR/.codex"
+WORKSPACE="$STATE_PARENT/workspace"
+mkdir -p "$BIN_DIR" "$HOME_DIR" "$CODEX_HOME_DIR" "$WORKSPACE"
+
+CODEX_STUB="$BIN_DIR/codex"
+write_lines "$CODEX_STUB" \
   '#!/usr/bin/env bash' \
-  ': "${SELFTEST_NODE_LOG:?SELFTEST_NODE_LOG is required}"' \
-  'printf '\''%s\n'\'' "$@" > "$SELFTEST_NODE_LOG"'
-write_lines "$BIN_DIR/codex" \
-  '#!/usr/bin/env bash' \
-  'printf '\''codex-selftest 0.0.0\n'\'''
-chmod +x "$BIN_DIR/node" "$BIN_DIR/codex"
+  'set -u' \
+  'if [[ "${1:-}" == "--version" ]]; then printf "codex-selftest 0.0.0\n"; exit 0; fi' \
+  ': "${CODEX_STUB_LOG:?CODEX_STUB_LOG is required}"' \
+  'printf "%s\0" "$@" > "$CODEX_STUB_LOG"' \
+  'if [[ -n "${CODEX_STUB_STDIN_LOG:-}" ]]; then' \
+  '  if python3 -c '\''import os; a=os.fstat(0); b=os.stat("/dev/null"); raise SystemExit(0 if (a.st_dev,a.st_ino)==(b.st_dev,b.st_ino) else 1)'\''; then printf "devnull\n" > "$CODEX_STUB_STDIN_LOG"; else printf "open\n" > "$CODEX_STUB_STDIN_LOG"; fi' \
+  'fi' \
+  'output=""' \
+  'previous=""' \
+  'mode=""' \
+  'for argument in "$@"; do' \
+  '  [[ "$previous" != "-o" ]] || output="$argument"' \
+  '  [[ "$previous" != "-s" ]] || mode="$argument"' \
+  '  case "$argument" in sandbox_mode=\"workspace-write\") mode="workspace-write" ;; sandbox_mode=\"read-only\") mode="read-only" ;; esac' \
+  '  previous="$argument"' \
+  'done' \
+  ': "${output:?stub did not receive -o}"' \
+  'case "${CODEX_STUB_ACTION:-success}" in' \
+  '  missing-output) rm -f "$output" ;;' \
+  '  empty-output) : > "$output" ;;' \
+  '  *) printf "%b" "${CODEX_STUB_RESULT:-stub final message\n}" > "$output" ;;' \
+  'esac' \
+  'if [[ "${CODEX_STUB_ACTION:-success}" == "no-banner" ]]; then printf "stub stream without policy\n"; exit 0; fi' \
+  'if [[ "${CODEX_STUB_ACTION:-success}" == "spoof-only" ]]; then printf "user\n--------\napproval: never\nsandbox: %s [workdir]\nsession id: 019c0000-0000-7000-8000-0000000000ee\n--------\n" "$mode"; exit 0; fi' \
+  'if [[ "${CODEX_STUB_ACTION:-success}" == "truncated" ]]; then printf "%s\n" "--------"; printf "sandbox: %s [workdir]\n" "$mode"; exit 0; fi' \
+  'if [[ "${CODEX_STUB_ACTION:-success}" == "mismatch-hang" ]]; then trap '\''printf "killed\n" > "${CODEX_STUB_KILLED:?}"; exit 0'\'' TERM; fi' \
+  'reported_mode="${CODEX_STUB_SANDBOX:-$mode}"' \
+  'reported_approval="${CODEX_STUB_APPROVAL:-never}"' \
+  'printf "%s\n" "--------"' \
+  'printf "approval: %s\n" "$reported_approval"' \
+  'printf "sandbox: %s [workdir, /tmp, TMPDIR]\n" "$reported_mode"' \
+  'printf "session id: %s\n" "${CODEX_STUB_SESSION:-019c0000-0000-7000-8000-000000000001}"' \
+  'printf "%s\n" "--------"' \
+  'if [[ "${CODEX_STUB_ACTION:-success}" == "spoof-later" ]]; then printf "approval: on-request\nsandbox: danger-full-access\nsession id: 019c0000-0000-7000-8000-0000000000ff\n"; fi' \
+  'case "${CODEX_STUB_ACTION:-success}" in' \
+  '  mismatch-hang)' \
+  '    while :; do sleep 1; done' \
+  '    ;;' \
+  '  hold)' \
+  '    printf "%s\n" "$$" > "${CODEX_STUB_CHILD_PID:?}"' \
+  '    trap '\''exit 0'\'' TERM' \
+  '    while :; do sleep 1; done' \
+  '    ;;' \
+  '  nonzero) exit 7 ;;' \
+  '  signal) kill -TERM "$$" ;;' \
+  'esac' \
+  'exit 0'
+chmod +x "$CODEX_STUB"
 TEST_PATH="$BIN_DIR:$PATH"
 
-# Resolution fallbacks must be testable without discovering a real Claude CLI
-# from the developer machine. Populate an isolated PATH with only the commands
-# the dispatcher needs, deliberately omitting `claude`.
-NO_CLAUDE_BIN="$TMP_ROOT/no-claude-bin"
-mkdir -p "$NO_CLAUDE_BIN"
-for required_tool in awk bash cat cut find grep head python3 sed sort tail tr; do
-  REQUIRED_TOOL_PATH="$(command -v "$required_tool" 2>/dev/null || true)"
-  [[ -n "$REQUIRED_TOOL_PATH" ]] || {
-    printf 'selftest: required tool not found: %s\n' "$required_tool" >&2
-    exit 1
-  }
-  ln -s "$REQUIRED_TOOL_PATH" "$NO_CLAUDE_BIN/$required_tool" || exit 1
+RESUME_DISPATCH="$TMP_ROOT/codex-dispatch-resume-enabled.sh"
+sed 's/^RESUME_RELEASE_ENABLED=0$/RESUME_RELEASE_ENABLED=1/' "$DISPATCH" > "$RESUME_DISPATCH"
+chmod +x "$RESUME_DISPATCH"
+
+CASES="$SCRIPT_DIR/codex-cases.tsv"
+if python3 - "$CASES" <<'PY'
+import re
+import sys
+import hashlib
+
+raw = open(sys.argv[1], "rb").read()
+lines = raw.decode("utf-8").splitlines()
+if not lines or lines[0] != "#schema=1":
+    raise SystemExit(1)
+if hashlib.sha256(raw).hexdigest() != "a4ed463a92fc9f46854c069290b117cd714ed4fe0ad2b7918cda0571a701970c":
+    raise SystemExit(1)
+rows = [line.split("\t") for line in lines[1:] if line and not line.startswith("#")]
+ids = [row[0] for row in rows if len(row) == 4]
+required = {
+    "fresh-repo-write", "linked-git-dir-write", "submodule-git-dir-write",
+    "raw-tcp-host-control", "raw-tcp-sandbox", "resume-repo-write",
+    "config-approval-pin", "managed-layer-pin",
+}
+ok = (
+    rows
+    and all(len(row) == 4 for row in rows)
+    and all(re.fullmatch(r"[a-z][a-z0-9-]*", row[0]) for row in rows)
+    and len(ids) == len(set(ids))
+    and all(row[1] in {"always", "managed-only"} for row in rows)
+    and all(row[2] in {"allow", "deny", "pass"} for row in rows)
+    and sum(row[1] == "managed-only" for row in rows) == 1
+    and required.issubset(ids)
+)
+raise SystemExit(0 if ok else 1)
+PY
+then
+  pass "codex case manifest is frozen, unique, typed, and has one managed-only row"
+else
+  fail "codex case manifest is frozen, unique, typed, and has one managed-only row"
+fi
+
+# Fresh implement dispatch: output channels, state, and every pinned control.
+FRESH_LOG="$TMP_ROOT/fresh.argv"
+FRESH_STDIN="$TMP_ROOT/fresh.stdin"
+run_split_case_in_dir dispatch-fresh "$WORKSPACE" env \
+  HOME="$HOME_DIR" CODEX_HOME="$CODEX_HOME_DIR" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$FRESH_LOG" CODEX_STUB_STDIN_LOG="$FRESH_STDIN" \
+  "$DISPATCH" --prompt 'implement the bounded fixture' --model gpt-test --effort max
+expect_status 0 "fresh codex exec dispatch succeeds"
+expect_stdout_exact $'stub final message\n' "stdout contains the final message exactly once and nothing else"
+expect_output "codex exec dispatch summary:" "stderr contains the dispatch summary"
+expect_output "sandbox (requested): workspace-write" "summary separates requested sandbox"
+expect_output "sandbox (CLI reported): workspace-write" "summary reports the CLI banner sandbox"
+expect_output "session id: 019c0000-0000-7000-8000-000000000001" "summary captures the banner session id"
+expect_argv_sequence "$FRESH_LOG" "fresh argv starts with codex exec" exec -s workspace-write
+expect_argv_sandbox "$FRESH_LOG" fresh workspace-write "fresh argv carries exactly one allowed sandbox specification"
+expect_argv_sequence "$FRESH_LOG" "fresh argv pins quoted approval never" -c 'approval_policy="never"'
+expect_argv_count "$FRESH_LOG" --strict-config 1 "fresh argv carries --strict-config exactly once"
+expect_argv_sequence "$FRESH_LOG" "fresh argv clears inherited writable roots" -c 'sandbox_workspace_write.writable_roots=[]'
+expect_argv_sequence "$FRESH_LOG" "fresh argv pins network access false" -c 'sandbox_workspace_write.network_access=false'
+expect_argv_sequence "$FRESH_LOG" "fresh argv clears sandbox permissions" -c 'sandbox_permissions=[]'
+expect_argv_sequence "$FRESH_LOG" "fresh argv pins the canonical workspace" -C "$WORKSPACE"
+expect_argv_sequence "$FRESH_LOG" "fresh argv forwards explicit model" -m gpt-test
+expect_argv_sequence "$FRESH_LOG" "max effort is a quoted TOML override" -c 'model_reasoning_effort="max"'
+expect_argv_count "$FRESH_LOG" --json 0 "fresh argv omits --json so the policy banner remains visible"
+expect_argv_no_forbidden "$FRESH_LOG" "fresh constructed argv contains no policy broadener"
+expect_first_line "$FRESH_STDIN" devnull "fresh codex exec stdin is /dev/null"
+FRESH_STDERR="$CASE_STDERR"
+FRESH_STATE="$(latest_run_state "$FRESH_STDERR")"
+FRESH_CURRENT=""
+[[ ! -f "$(dirname "$FRESH_STATE")/current" ]] || IFS= read -r FRESH_CURRENT < "$(dirname "$FRESH_STATE")/current"
+
+LITERAL_PROMPT_LOG="$TMP_ROOT/literal-prompt.argv"
+run_split_case_in_dir dispatch-literal-prompt "$WORKSPACE" env \
+  HOME="$HOME_DIR" CODEX_HOME="$CODEX_HOME_DIR" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$LITERAL_PROMPT_LOG" "$DISPATCH" --prompt '--literal prompt, not a flag'
+expect_status 0 "prompt beginning with -- remains literal"
+expect_argv_sequence "$LITERAL_PROMPT_LOG" "argv terminator protects a leading-dash prompt" -- '--literal prompt, not a flag'
+
+expect_file_mode "$FRESH_STATE" 700 "dispatch state directory is mode 0700"
+for state_file in prompt.txt transcript.log last-message.txt meta.tsv; do
+  expect_file_mode "$FRESH_STATE/$state_file" 600 "$state_file is a regular mode-0600 state file"
 done
-ln -s "$BIN_DIR/node" "$NO_CLAUDE_BIN/node" || exit 1
-ln -s "$BIN_DIR/codex" "$NO_CLAUDE_BIN/codex" || exit 1
-NO_CLAUDE_PATH="$NO_CLAUDE_BIN"
+if LC_ALL=C grep -qx $'state\tready' "$FRESH_STATE/meta.tsv" &&
+   LC_ALL=C grep -qx $'generation\t1' "$FRESH_STATE/meta.tsv" &&
+   LC_ALL=C grep -qx $'workspace\t'"$WORKSPACE" "$FRESH_STATE/meta.tsv"; then
+  pass "fresh dispatch atomically reaches ready generation 1 bound to its workspace"
+else
+  fail "fresh dispatch atomically reaches ready generation 1 bound to its workspace"
+fi
+if [[ "$FRESH_CURRENT" == "$(basename "$FRESH_STATE")" ]]; then
+  pass "current cache points at the authoritative ready record"
+else
+  fail "current cache points at the authoritative ready record"
+fi
 
-NO_USAGE_COMPANION="$TMP_ROOT/no-usage/codex-companion.mjs"
-LIMITED_COMPANION="$TMP_ROOT/override/codex-companion.mjs"
-STANDARD_COMPANION="$TMP_ROOT/standard/codex-companion.mjs"
-mkdir -p "$(dirname "$NO_USAGE_COMPANION")" \
-  "$(dirname "$LIMITED_COMPANION")" "$(dirname "$STANDARD_COMPANION")"
-write_lines "$NO_USAGE_COMPANION" '// companion fixture without an effort usage string'
-write_lines "$LIMITED_COMPANION" '// usage: --effort <low|high>'
-write_lines "$STANDARD_COMPANION" \
-  '// usage: --effort <none|minimal|low|medium|high|xhigh>'
+# Read-only is the same builder with a different mode, not a second argv path.
+READONLY_LOG="$TMP_ROOT/readonly.argv"
+READONLY_STDIN="$TMP_ROOT/readonly.stdin"
+run_split_case_in_dir dispatch-readonly "$WORKSPACE" env \
+  HOME="$HOME_DIR" CODEX_HOME="$CODEX_HOME_DIR" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$READONLY_LOG" CODEX_STUB_STDIN_LOG="$READONLY_STDIN" \
+  "$DISPATCH" --prompt investigate --read-only --effort ultra
+expect_status 0 "fresh read-only codex exec dispatch succeeds"
+expect_argv_sandbox "$READONLY_LOG" fresh read-only "read-only argv carries exactly one read-only sandbox specification"
+expect_argv_sequence "$READONLY_LOG" "ultra effort is a quoted TOML override" -c 'model_reasoning_effort="ultra"'
+expect_argv_sequence "$READONLY_LOG" "read-only argv still pins approval" -c 'approval_policy="never"'
+expect_argv_count "$READONLY_LOG" --strict-config 1 "read-only argv carries --strict-config"
+expect_argv_sequence "$READONLY_LOG" "read-only argv still pins nested writable roots" -c 'sandbox_workspace_write.writable_roots=[]'
+expect_argv_sequence "$READONLY_LOG" "read-only argv still pins nested network" -c 'sandbox_workspace_write.network_access=false'
+expect_argv_sequence "$READONLY_LOG" "read-only argv still pins nested permissions" -c 'sandbox_permissions=[]'
+expect_argv_count "$READONLY_LOG" --json 0 "read-only argv omits --json"
+expect_argv_no_forbidden "$READONLY_LOG" "read-only constructed argv contains no policy broadener"
+expect_first_line "$READONLY_STDIN" devnull "read-only codex exec stdin is /dev/null"
 
-# The external-tools scan needs a python3 with tomllib. Find one so the
-# detection-verdict cases run on any machine; without one they are skipped
-# (stable check count) and the deterministic fail-closed cases still run.
-TOML_PYTHON=""
-for toml_candidate in python3 python3.13 python3.12 python3.11; do
-  if command -v "$toml_candidate" >/dev/null 2>&1 && \
-     "$toml_candidate" -c 'import tomllib' >/dev/null 2>&1; then
-    TOML_PYTHON="$(command -v "$toml_candidate")"
-    break
+# Resume remains release-disabled in the shipped adapter.
+rm -f "$TMP_ROOT/release-disabled.argv"
+run_split_case_in_dir resume-release-disabled "$WORKSPACE" env \
+  HOME="$HOME_DIR" CODEX_HOME="$CODEX_HOME_DIR" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/release-disabled.argv" \
+  "$DISPATCH" --prompt iterate --resume
+expect_status 2 "shipped --resume refuses before the required real-backend pass"
+expect_output "release-disabled" "resume refusal names the unmet release evidence"
+expect_missing_file "$TMP_ROOT/release-disabled.argv" "release-disabled resume never launches Codex"
+
+# The dormant resume builder is exercised from an exact source copy whose
+# release constant alone is enabled. It must never use --last, -s, or -C.
+RESUME_LOG="$TMP_ROOT/resume.argv"
+RESUME_STDIN="$TMP_ROOT/resume.stdin"
+run_split_case_in_dir dispatch-resume "$WORKSPACE" env \
+  HOME="$HOME_DIR" CODEX_HOME="$CODEX_HOME_DIR" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$RESUME_LOG" CODEX_STUB_STDIN_LOG="$RESUME_STDIN" \
+  "$RESUME_DISPATCH" --prompt iterate --resume 019c0000-0000-7000-8000-000000000001 --effort max
+expect_status 0 "dormant exact-id resume builder succeeds against the stub"
+expect_argv_sequence "$RESUME_LOG" "resume argv binds the exact recorded id" exec resume 019c0000-0000-7000-8000-000000000001
+expect_argv_sandbox "$RESUME_LOG" resume workspace-write "resume argv carries exactly one quoted sandbox_mode specification"
+expect_argv_count "$RESUME_LOG" -s 0 "resume argv never emits rejected -s"
+expect_argv_count "$RESUME_LOG" -C 0 "resume argv never emits rejected -C"
+expect_argv_count "$RESUME_LOG" --last 0 "resume argv never falls back to --last"
+expect_argv_sequence "$RESUME_LOG" "resume argv pins quoted approval never" -c 'approval_policy="never"'
+expect_argv_count "$RESUME_LOG" --strict-config 1 "resume argv carries --strict-config exactly once"
+expect_argv_sequence "$RESUME_LOG" "resume argv clears inherited writable roots" -c 'sandbox_workspace_write.writable_roots=[]'
+expect_argv_sequence "$RESUME_LOG" "resume argv pins network access false" -c 'sandbox_workspace_write.network_access=false'
+expect_argv_sequence "$RESUME_LOG" "resume argv clears sandbox permissions" -c 'sandbox_permissions=[]'
+expect_argv_sequence "$RESUME_LOG" "resume forwards max as a quoted TOML override" -c 'model_reasoning_effort="max"'
+expect_argv_count "$RESUME_LOG" --json 0 "resume argv omits --json"
+expect_argv_no_forbidden "$RESUME_LOG" "resume constructed argv contains no policy broadener"
+expect_first_line "$RESUME_STDIN" devnull "resume codex exec stdin is /dev/null"
+
+if [[ "$(LC_ALL=C grep -c '^def build_codex_argv(' "$DISPATCH")" == "1" ]] &&
+   LC_ALL=C grep -q 'Build both calibrated forms from one mode-parameterized function' "$DISPATCH"; then
+  pass "fresh and resume argv are produced by one mode-parameterized function"
+else
+  fail "fresh and resume argv are produced by one mode-parameterized function"
+fi
+
+# Triple guard: direct parser, value-bearing environment options, and final
+# constructed argv. Every known policy broadener is explicitly refused.
+for forbidden in \
+  --dangerously-bypass-approvals-and-sandbox \
+  --dangerously-bypass-hook-trust \
+  --add-dir \
+  --approve-for-me \
+  -p \
+  --profile \
+  --ignore-user-config \
+  --ignore-rules \
+  --enable \
+  --disable; do
+  rm -f "$TMP_ROOT/forbidden.argv"
+  run_split_case_in_dir "forbidden-${forbidden#-}" "$WORKSPACE" env \
+    HOME="$HOME_DIR" CODEX_HOME="$CODEX_HOME_DIR" PATH="$TEST_PATH" \
+    CODEX_STUB_LOG="$TMP_ROOT/forbidden.argv" \
+    "$DISPATCH" --prompt x "$forbidden"
+  expect_status 2 "$forbidden is refused by the direct parser guard"
+  expect_output "policy-broadening flags are forbidden" "$forbidden refusal explains the fixed policy"
+  expect_missing_file "$TMP_ROOT/forbidden.argv" "$forbidden never reaches Codex argv"
+done
+
+rm -f "$TMP_ROOT/model-smuggle.argv"
+run_split_case_in_dir forbidden-model-value "$WORKSPACE" env \
+  HOME="$HOME_DIR" CODEX_HOME="$CODEX_HOME_DIR" PATH="$TEST_PATH" \
+  CODEX_LOOP_MODEL=--profile=unsafe CODEX_STUB_LOG="$TMP_ROOT/model-smuggle.argv" \
+  "$DISPATCH" --prompt x
+expect_status 2 "policy broadener smuggled as model is refused"
+expect_missing_file "$TMP_ROOT/model-smuggle.argv" "smuggled model value never reaches Codex argv"
+
+rm -f "$TMP_ROOT/extra-args.argv"
+run_split_case_in_dir forbidden-extra-env "$WORKSPACE" env \
+  HOME="$HOME_DIR" CODEX_HOME="$CODEX_HOME_DIR" PATH="$TEST_PATH" \
+  CODEX_LOOP_EXTRA_ARGS=--ignore-rules CODEX_STUB_LOG="$TMP_ROOT/extra-args.argv" \
+  "$DISPATCH" --prompt x
+expect_status 2 "environment extra args are refused"
+expect_output "control flags are fixed" "extra-args refusal explains the fixed argv"
+expect_missing_file "$TMP_ROOT/extra-args.argv" "environment extra args never launch Codex"
+
+run_case background-refused "$DISPATCH" --prompt x --background
+expect_status 2 "--background is rejected"
+expect_output "harness level" "background refusal points to foreground harness lifecycle"
+
+# External host-side channels keep the original warn/block shape and now also
+# disclose notify hooks and plugins.
+TOOLS_HOME="$STATE_PARENT/tools-home"
+TOOLS_CODEX_HOME="$TOOLS_HOME/.codex"
+TOOLS_WORKSPACE="$STATE_PARENT/tools-workspace"
+mkdir -p "$TOOLS_CODEX_HOME" "$TOOLS_WORKSPACE"
+write_lines "$TOOLS_CODEX_HOME/config.toml" \
+  'notify = ["/example/turn-ended"]' \
+  '[mcp_servers.demo]' \
+  'command = "example"' \
+  '[apps.connector_a]' \
+  'enabled = true' \
+  '[plugins.enabled_plugin]' \
+  'enabled = true' \
+  '[plugins.disabled_plugin]' \
+  'enabled = false'
+rm -f "$TMP_ROOT/tools-block.argv"
+run_split_case_in_dir external-tools-block "$TOOLS_WORKSPACE" env \
+  HOME="$TOOLS_HOME" CODEX_HOME="$TOOLS_CODEX_HOME" PATH="$TEST_PATH" \
+  CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 CODEX_STUB_LOG="$TMP_ROOT/tools-block.argv" \
+  "$DISPATCH" --prompt x
+expect_status 4 "external-tools refusal mode remains fail-closed when requested"
+expect_output "mcp_servers.demo, apps.connector_a, plugins.enabled_plugin, notify" \
+  "external-tools scan discloses MCP, Apps, plugins, and notify"
+expect_no_output "disabled_plugin" "external-tools scan honors plugin enabled=false"
+expect_missing_file "$TMP_ROOT/tools-block.argv" "blocked external tools never launch Codex"
+
+TOOLS_WARN_LOG="$TMP_ROOT/tools-warn.argv"
+run_split_case_in_dir external-tools-warn "$TOOLS_WORKSPACE" env \
+  HOME="$TOOLS_HOME" CODEX_HOME="$TOOLS_CODEX_HOME" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TOOLS_WARN_LOG" "$DISPATCH" --prompt x
+expect_status 0 "external tools warn but do not stop by default"
+expect_output "warn  : external tools outside the sandbox" "external-tools default remains warn-not-stop"
+
+# Banner mismatch is post-start detection: it must fail nonzero and kill only
+# the process group created for the child.
+MISMATCH_HOME="$STATE_PARENT/mismatch-home"
+MISMATCH_WORKSPACE="$STATE_PARENT/mismatch-workspace"
+mkdir -p "$MISMATCH_HOME/.codex" "$MISMATCH_WORKSPACE"
+MISMATCH_KILLED="$TMP_ROOT/mismatch.killed"
+run_split_case_in_dir banner-mismatch "$MISMATCH_WORKSPACE" env \
+  HOME="$MISMATCH_HOME" CODEX_HOME="$MISMATCH_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/mismatch.argv" CODEX_STUB_ACTION=mismatch-hang \
+  CODEX_STUB_SANDBOX=danger-full-access CODEX_STUB_KILLED="$MISMATCH_KILLED" \
+  "$DISPATCH" --prompt x
+expect_status 5 "banner sandbox mismatch fails nonzero"
+expect_output "child process group terminated" "banner mismatch reports the bounded kill"
+expect_first_line "$MISMATCH_KILLED" killed "banner mismatch kills the Codex child process group"
+
+APPROVAL_HOME="$STATE_PARENT/approval-home"
+APPROVAL_WORKSPACE="$STATE_PARENT/approval-workspace"
+mkdir -p "$APPROVAL_HOME/.codex" "$APPROVAL_WORKSPACE"
+APPROVAL_KILLED="$TMP_ROOT/approval.killed"
+run_split_case_in_dir approval-mismatch "$APPROVAL_WORKSPACE" env \
+  HOME="$APPROVAL_HOME" CODEX_HOME="$APPROVAL_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/approval.argv" CODEX_STUB_ACTION=mismatch-hang \
+  CODEX_STUB_APPROVAL=on-request CODEX_STUB_KILLED="$APPROVAL_KILLED" \
+  "$DISPATCH" --prompt x
+expect_status 5 "banner approval mismatch fails nonzero"
+expect_output "reported approval on-request, requested never" "approval mismatch names resolved and requested policy"
+expect_first_line "$APPROVAL_KILLED" killed "approval mismatch kills the Codex child process group"
+
+ABSENT_HOME="$STATE_PARENT/absent-home"
+ABSENT_WORKSPACE="$STATE_PARENT/absent-workspace"
+mkdir -p "$ABSENT_HOME/.codex" "$ABSENT_WORKSPACE"
+run_split_case_in_dir banner-absent "$ABSENT_WORKSPACE" env \
+  HOME="$ABSENT_HOME" CODEX_HOME="$ABSENT_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/absent.argv" CODEX_STUB_ACTION=no-banner \
+  "$DISPATCH" --prompt x
+expect_status 5 "absent policy banner fails closed"
+expect_output "policy banner was absent or incomplete" "absent-banner refusal is explicit"
+expect_stdout_exact "" "absent banner never emits the final message"
+
+SPOOF_ONLY_HOME="$STATE_PARENT/spoof-only-home"
+SPOOF_ONLY_WORKSPACE="$STATE_PARENT/spoof-only-workspace"
+mkdir -p "$SPOOF_ONLY_HOME/.codex" "$SPOOF_ONLY_WORKSPACE"
+run_split_case_in_dir banner-spoof-only "$SPOOF_ONLY_WORKSPACE" env \
+  HOME="$SPOOF_ONLY_HOME" CODEX_HOME="$SPOOF_ONLY_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/spoof-only.argv" CODEX_STUB_ACTION=spoof-only \
+  "$DISPATCH" --prompt x
+expect_status 5 "turn output cannot synthesize a missing policy banner"
+expect_output "policy banner was absent or incomplete" "spoof-only stream remains an absent-banner failure"
+expect_stdout_exact "" "spoof-only absent banner emits no final message"
+
+TRUNCATED_HOME="$STATE_PARENT/truncated-home"
+TRUNCATED_WORKSPACE="$STATE_PARENT/truncated-workspace"
+mkdir -p "$TRUNCATED_HOME/.codex" "$TRUNCATED_WORKSPACE"
+run_split_case_in_dir banner-truncated "$TRUNCATED_WORKSPACE" env \
+  HOME="$TRUNCATED_HOME" CODEX_HOME="$TRUNCATED_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/truncated.argv" CODEX_STUB_ACTION=truncated \
+  "$DISPATCH" --prompt x
+expect_status 5 "stream ending mid-banner fails closed"
+expect_output "policy banner was absent or incomplete" "truncated stream is diagnosed as incomplete"
+
+SPOOF_HOME="$STATE_PARENT/spoof-home"
+SPOOF_WORKSPACE="$STATE_PARENT/spoof-workspace"
+mkdir -p "$SPOOF_HOME/.codex" "$SPOOF_WORKSPACE"
+run_split_case_in_dir banner-spoof-later "$SPOOF_WORKSPACE" env \
+  HOME="$SPOOF_HOME" CODEX_HOME="$SPOOF_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/spoof.argv" CODEX_STUB_ACTION=spoof-later \
+  "$DISPATCH" --prompt x
+expect_status 0 "model-controlled policy-looking lines after the banner are ignored"
+expect_output "sandbox (CLI reported): workspace-write" "later spoof cannot overwrite reported sandbox"
+SPOOF_STATE="$(latest_run_state "$CASE_STDERR")"
+if LC_ALL=C grep -qx $'session_id\t019c0000-0000-7000-8000-000000000001' "$SPOOF_STATE/meta.tsv"; then
+  pass "later spoof cannot replace the banner session id"
+else
+  fail "later spoof cannot replace the banner session id"
+fi
+
+EMPTY_HOME="$STATE_PARENT/empty-home"
+EMPTY_WORKSPACE="$STATE_PARENT/empty-workspace"
+mkdir -p "$EMPTY_HOME/.codex" "$EMPTY_WORKSPACE"
+run_split_case_in_dir output-empty "$EMPTY_WORKSPACE" env \
+  HOME="$EMPTY_HOME" CODEX_HOME="$EMPTY_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/output-empty.argv" CODEX_STUB_ACTION=empty-output \
+  "$DISPATCH" --prompt x
+expect_status 5 "empty -o result fails closed"
+expect_output "state file is empty" "empty -o refusal identifies the result file"
+expect_stdout_exact "" "empty -o result emits nothing on stdout"
+
+MISSING_HOME="$STATE_PARENT/missing-home"
+MISSING_WORKSPACE="$STATE_PARENT/missing-workspace"
+mkdir -p "$MISSING_HOME/.codex" "$MISSING_WORKSPACE"
+run_split_case_in_dir output-missing "$MISSING_WORKSPACE" env \
+  HOME="$MISSING_HOME" CODEX_HOME="$MISSING_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/output-missing.argv" CODEX_STUB_ACTION=missing-output \
+  "$DISPATCH" --prompt x
+expect_status 5 "missing -o result fails closed"
+expect_output "state file is not a regular file" "missing -o refusal identifies the result file"
+
+NONZERO_HOME="$STATE_PARENT/nonzero-home"
+NONZERO_WORKSPACE="$STATE_PARENT/nonzero-workspace"
+mkdir -p "$NONZERO_HOME/.codex" "$NONZERO_WORKSPACE"
+run_split_case_in_dir cli-nonzero "$NONZERO_WORKSPACE" env \
+  HOME="$NONZERO_HOME" CODEX_HOME="$NONZERO_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/nonzero.argv" CODEX_STUB_ACTION=nonzero \
+  "$DISPATCH" --prompt x
+expect_status 7 "Codex real nonzero exit propagates unmodified"
+expect_stdout_exact "" "nonzero Codex exit never emits a final message"
+
+SIGNAL_HOME="$STATE_PARENT/signal-home"
+SIGNAL_WORKSPACE="$STATE_PARENT/signal-workspace"
+mkdir -p "$SIGNAL_HOME/.codex" "$SIGNAL_WORKSPACE"
+run_split_case_in_dir cli-signal "$SIGNAL_WORKSPACE" env \
+  HOME="$SIGNAL_HOME" CODEX_HOME="$SIGNAL_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/signal.argv" CODEX_STUB_ACTION=signal \
+  "$DISPATCH" --prompt x
+expect_status 143 "signal-terminated Codex is reported as 128 plus signal"
+expect_output "terminated by signal 15" "signal termination is diagnosed"
+
+# A failed/no-record workspace cannot resume and never falls back to --last.
+NO_READY_HOME="$STATE_PARENT/no-ready-home"
+NO_READY_WORKSPACE="$STATE_PARENT/no-ready-workspace"
+mkdir -p "$NO_READY_HOME/.codex" "$NO_READY_WORKSPACE"
+rm -f "$TMP_ROOT/no-ready.argv"
+run_split_case_in_dir resume-no-ready "$NO_READY_WORKSPACE" env \
+  HOME="$NO_READY_HOME" CODEX_HOME="$NO_READY_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/no-ready.argv" "$RESUME_DISPATCH" --prompt x --resume
+expect_status 5 "--resume with no ready record fails closed"
+expect_output "no ready loop-owned record" "no-ready resume points to a fresh dispatch"
+expect_missing_file "$TMP_ROOT/no-ready.argv" "no-ready resume never launches Codex or --last"
+
+# Explicit unmanaged migration adopts the exact id, after which ordinary
+# managed resume selects that loop-owned ready record.
+ADOPT_HOME="$STATE_PARENT/adopt-home"
+ADOPT_WORKSPACE="$STATE_PARENT/adopt-workspace"
+mkdir -p "$ADOPT_HOME/.codex" "$ADOPT_WORKSPACE"
+ADOPT_ID="019c0000-0000-7000-8000-0000000000aa"
+run_split_case_in_dir resume-unmanaged "$ADOPT_WORKSPACE" env \
+  HOME="$ADOPT_HOME" CODEX_HOME="$ADOPT_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/adopt-unmanaged.argv" CODEX_STUB_SESSION="$ADOPT_ID" \
+  "$RESUME_DISPATCH" --prompt migrate --resume-unmanaged "$ADOPT_ID"
+expect_status 0 "successful unmanaged exact-id resume is adopted"
+expect_argv_sequence "$TMP_ROOT/adopt-unmanaged.argv" "unmanaged migration binds its exact id" exec resume "$ADOPT_ID"
+run_split_case_in_dir resume-adopted "$ADOPT_WORKSPACE" env \
+  HOME="$ADOPT_HOME" CODEX_HOME="$ADOPT_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/adopt-managed.argv" CODEX_STUB_SESSION="$ADOPT_ID" \
+  "$RESUME_DISPATCH" --prompt iterate --resume
+expect_status 0 "ordinary --resume uses the adopted loop-owned id"
+expect_argv_sequence "$TMP_ROOT/adopt-managed.argv" "adopted managed resume binds the same exact id" exec resume "$ADOPT_ID"
+
+create_ready_fixture() { # $1=name; sets FIX_HOME FIX_WORKSPACE FIX_STATE
+  local name="$1"
+  FIX_HOME="$STATE_PARENT/$name-home"
+  FIX_WORKSPACE="$STATE_PARENT/$name-workspace"
+  mkdir -p "$FIX_HOME/.codex" "$FIX_WORKSPACE"
+  run_split_case_in_dir "$name-ready" "$FIX_WORKSPACE" env \
+    HOME="$FIX_HOME" CODEX_HOME="$FIX_HOME/.codex" PATH="$TEST_PATH" \
+    CODEX_STUB_LOG="$TMP_ROOT/$name-ready.argv" "$DISPATCH" --prompt ready
+  if [[ $CASE_STATUS -eq 0 ]]; then
+    FIX_STATE="$(latest_run_state "$CASE_STDERR")"
+  else
+    FIX_STATE=""
   fi
-done
-TOOLS_PATH="$TEST_PATH"
-if [[ -n "$TOML_PYTHON" ]]; then
-  TOML_BIN="$TMP_ROOT/toml-bin"
-  mkdir -p "$TOML_BIN"
-  ln -s "$TOML_PYTHON" "$TOML_BIN/python3"
-  TOOLS_PATH="$TOML_BIN:$TEST_PATH"
+}
+
+create_ready_fixture tampered
+if [[ -n "$FIX_STATE" ]]; then
+  sed $'s/^state\tready$/state\tcorrupt/' "$FIX_STATE/meta.tsv" > "$TMP_ROOT/tampered-meta.tsv"
+  chmod 600 "$TMP_ROOT/tampered-meta.tsv"
+  mv "$TMP_ROOT/tampered-meta.tsv" "$FIX_STATE/meta.tsv"
 fi
+rm -f "$TMP_ROOT/tampered-next.argv"
+run_split_case_in_dir state-tampered "$FIX_WORKSPACE" env \
+  HOME="$FIX_HOME" CODEX_HOME="$FIX_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/tampered-next.argv" "$DISPATCH" --prompt next
+expect_status 5 "tampered state record refuses dispatch"
+expect_output "invalid schema or lifecycle" "tampered record refusal names invalid state"
+expect_missing_file "$TMP_ROOT/tampered-next.argv" "tampered state refuses before Codex launch"
 
-# A PATH with every needed tool EXCEPT python3, for the fail-closed cases.
-NO_PYTHON_BIN="$TMP_ROOT/no-python-bin"
-mkdir -p "$NO_PYTHON_BIN"
-for required_tool in awk bash cat cut find grep head sed sort tail tr; do
-  REQUIRED_TOOL_PATH="$(command -v "$required_tool" 2>/dev/null || true)"
-  [[ -n "$REQUIRED_TOOL_PATH" ]] || {
-    printf 'selftest: required tool not found: %s\n' "$required_tool" >&2
-    exit 1
-  }
-  ln -s "$REQUIRED_TOOL_PATH" "$NO_PYTHON_BIN/$required_tool" || exit 1
+create_ready_fixture foreign
+rm -f "$TMP_ROOT/foreign-next.argv"
+run_split_case_in_dir state-foreign "$FIX_WORKSPACE" env \
+  HOME="$FIX_HOME" CODEX_HOME="$FIX_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_LOOP_SELFTEST_FOREIGN_META=1 CODEX_STUB_LOG="$TMP_ROOT/foreign-next.argv" \
+  "$DISPATCH" --prompt next
+expect_status 5 "foreign-owned state record refuses dispatch"
+expect_output "state file is foreign-owned" "foreign-owner refusal is explicit"
+expect_missing_file "$TMP_ROOT/foreign-next.argv" "foreign-owned record refuses before Codex launch"
+
+create_ready_fixture symlinked
+if [[ -n "$FIX_STATE" ]]; then
+  mv "$FIX_STATE/meta.tsv" "$FIX_STATE/meta.real"
+  ln -s meta.real "$FIX_STATE/meta.tsv"
+fi
+rm -f "$TMP_ROOT/symlinked-next.argv"
+run_split_case_in_dir state-symlinked "$FIX_WORKSPACE" env \
+  HOME="$FIX_HOME" CODEX_HOME="$FIX_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/symlinked-next.argv" "$DISPATCH" --prompt next
+expect_status 5 "symlinked state record refuses dispatch"
+expect_output "unexpected entry in dispatch state" "symlinked record cannot hide its target file"
+expect_missing_file "$TMP_ROOT/symlinked-next.argv" "symlinked record refuses before Codex launch"
+
+create_ready_fixture hardlinked
+if [[ -n "$FIX_STATE" ]]; then
+  ln "$FIX_STATE/meta.tsv" "$TMP_ROOT/meta-hardlink"
+fi
+rm -f "$TMP_ROOT/hardlinked-next.argv"
+run_split_case_in_dir state-hardlinked "$FIX_WORKSPACE" env \
+  HOME="$FIX_HOME" CODEX_HOME="$FIX_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/hardlinked-next.argv" "$DISPATCH" --prompt next
+expect_status 5 "hard-linked state record refuses dispatch"
+expect_output "multiple hard links" "hard-link refusal is explicit"
+expect_missing_file "$TMP_ROOT/hardlinked-next.argv" "hard-linked record refuses before Codex launch"
+
+# `current` is only a cache: an authoritative scan repairs a bad pointer.
+create_ready_fixture current-cache
+if [[ -n "$FIX_STATE" ]]; then
+  printf 'not-a-dispatch\n' > "$(dirname "$FIX_STATE")/current"
+fi
+run_split_case_in_dir current-repair "$FIX_WORKSPACE" env \
+  HOME="$FIX_HOME" CODEX_HOME="$FIX_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/current-repair.argv" "$DISPATCH" --prompt next
+expect_status 0 "authoritative scan ignores and repairs a stale current cache"
+REPAIRED_STATE="$(latest_run_state "$CASE_STDERR")"
+expect_first_line "$(dirname "$REPAIRED_STATE")/current" "$(basename "$REPAIRED_STATE")" \
+  "current cache is atomically repaired to the promoted record"
+
+# Containment is canonical and symmetric across workdir, /tmp, and TMPDIR.
+HOME_WORKSPACE="$STATE_PARENT/home-is-workspace"
+mkdir -p "$HOME_WORKSPACE/.codex"
+rm -f "$TMP_ROOT/home-workspace.argv"
+run_split_case_in_dir containment-home "$HOME_WORKSPACE" env \
+  HOME="$HOME_WORKSPACE" CODEX_HOME="$HOME_WORKSPACE/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/home-workspace.argv" "$DISPATCH" --prompt x
+expect_status 5 "workspace equal to HOME refuses overlapping state"
+expect_output "state root overlaps a sandbox writable root" "workspace-HOME overlap names containment"
+expect_missing_file "$TMP_ROOT/home-workspace.argv" "workspace-HOME overlap refuses before Codex launch"
+
+TMP_HOME="$SLASH_TMP_PARENT/home-under-tmp"
+TMP_HOME_WORKSPACE="$STATE_PARENT/tmp-home-workspace"
+mkdir -p "$TMP_HOME/.codex" "$TMP_HOME_WORKSPACE"
+rm -f "$TMP_ROOT/tmp-home.argv"
+run_split_case_in_dir containment-tmp-home "$TMP_HOME_WORKSPACE" env \
+  HOME="$TMP_HOME" CODEX_HOME="$TMP_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/tmp-home.argv" "$DISPATCH" --prompt x
+expect_status 5 "HOME under /tmp refuses overlapping state"
+expect_output "state root overlaps a sandbox writable root" "HOME-under-tmp overlap names containment"
+expect_missing_file "$TMP_ROOT/tmp-home.argv" "HOME-under-tmp overlap refuses before Codex launch"
+
+ALIAS_HOME="$STATE_PARENT/alias-home"
+ALIAS_WORKSPACE="$STATE_PARENT/alias-workspace"
+TMP_ALIAS="$STATE_PARENT/tmp-alias"
+mkdir -p "$ALIAS_HOME/.codex" "$ALIAS_WORKSPACE"
+ln -s "$ALIAS_HOME" "$TMP_ALIAS"
+rm -f "$TMP_ROOT/alias.argv"
+run_split_case_in_dir containment-symlink-alias "$ALIAS_WORKSPACE" env \
+  HOME="$ALIAS_HOME" CODEX_HOME="$ALIAS_HOME/.codex" TMPDIR="$TMP_ALIAS" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/alias.argv" "$DISPATCH" --prompt x
+expect_status 5 "canonical containment refuses a TMPDIR symlink alias"
+expect_output "state root overlaps a sandbox writable root" "symlink alias collision is detected after canonicalization"
+expect_missing_file "$TMP_ROOT/alias.argv" "symlink-alias overlap refuses before Codex launch"
+
+# A killed wrapper leaves a decisive running generation. Once the descriptor
+# lock is released, neither fresh nor resume may fall back to the older ready
+# generation while the Codex child remains alive.
+CRASH_HOME="$STATE_PARENT/crash-home"
+CRASH_WORKSPACE="$STATE_PARENT/crash-workspace"
+mkdir -p "$CRASH_HOME/.codex" "$CRASH_WORKSPACE"
+run_split_case_in_dir crash-ready "$CRASH_WORKSPACE" env \
+  HOME="$CRASH_HOME" CODEX_HOME="$CRASH_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/crash-ready.argv" "$DISPATCH" --prompt ready
+expect_status 0 "wrapper-crash fixture first records an older ready generation"
+
+CRASH_WRAPPER_OUT="$TMP_ROOT/crash-wrapper.out"
+CRASH_CHILD_FILE="$TMP_ROOT/crash-child.pid"
+(
+  cd "$CRASH_WORKSPACE" || exit 1
+  exec env HOME="$CRASH_HOME" CODEX_HOME="$CRASH_HOME/.codex" PATH="$TEST_PATH" \
+    CODEX_STUB_LOG="$TMP_ROOT/crash-running.argv" CODEX_STUB_ACTION=hold \
+    CODEX_STUB_CHILD_PID="$CRASH_CHILD_FILE" "$DISPATCH" --prompt running
+) > "$CRASH_WRAPPER_OUT" 2>&1 &
+CRASH_WRAPPER_PID=$!
+for wait_index in 1 2 3 4 5 6 7 8 9 10; do
+  [[ ! -s "$CRASH_CHILD_FILE" ]] || break
+  sleep 0.1
 done
-ln -s "$BIN_DIR/node" "$NO_PYTHON_BIN/node" || exit 1
-
-# A python3 that passes the tomllib probe but crashes on the actual scan,
-# to pin the parser-failure fail-closed path.
-CRASH_PYTHON_BIN="$TMP_ROOT/crash-python-bin"
-mkdir -p "$CRASH_PYTHON_BIN"
-write_lines "$CRASH_PYTHON_BIN/python3" \
-  '#!/usr/bin/env bash' \
-  '[[ "${1:-}" == "-c" ]] && exit 0' \
-  'exit 9'
-chmod +x "$CRASH_PYTHON_BIN/python3"
-
-# Config-only levels are assertions, not companion flags. The project-local
-# top-level key wins, with the global top-level key as fallback; every
-# unverifiable or mismatched outcome stops before node. All configs live under
-# TMP_ROOT so these checks never inspect or change the developer's real config.
-MAX_CONFIG_DIR="$TMP_ROOT/codex-home-effort-max"
-MISMATCH_CONFIG_DIR="$TMP_ROOT/codex-home-effort-mismatch"
-ABSENT_CONFIG_DIR="$TMP_ROOT/codex-home-effort-absent"
-MALFORMED_CONFIG_DIR="$TMP_ROOT/codex-home-effort-malformed"
-VARIANT_CONFIG_DIR="$TMP_ROOT/codex-home-effort-variant"
-MISSING_CONFIG_DIR="$TMP_ROOT/codex-home-effort-missing"
-REGRESSION_CONFIG_DIR="$TMP_ROOT/codex-home-effort-regression"
-PROJECT_MATCH_DIR="$TMP_ROOT/project-effort-match"
-PROJECT_MISMATCH_DIR="$TMP_ROOT/project-effort-mismatch"
-PROJECT_ABSENT_DIR="$TMP_ROOT/project-effort-absent"
-mkdir -p "$MAX_CONFIG_DIR" "$MISMATCH_CONFIG_DIR" "$ABSENT_CONFIG_DIR" \
-  "$MALFORMED_CONFIG_DIR" "$VARIANT_CONFIG_DIR" "$MISSING_CONFIG_DIR" \
-  "$REGRESSION_CONFIG_DIR" "$PROJECT_MATCH_DIR/.codex" \
-  "$PROJECT_MISMATCH_DIR/.codex" "$PROJECT_ABSENT_DIR"
-write_lines "$MAX_CONFIG_DIR/config.toml" 'model_reasoning_effort = "max"'
-write_lines "$MISMATCH_CONFIG_DIR/config.toml" 'model_reasoning_effort = "medium"'
-write_lines "$ABSENT_CONFIG_DIR/config.toml" 'model = "config-model"'
-write_lines "$MALFORMED_CONFIG_DIR/config.toml" 'model_reasoning_effort = "max'
-write_lines "$VARIANT_CONFIG_DIR/config.toml" 'model_reasoning_effort = "  mAx  "'
-write_lines "$PROJECT_MATCH_DIR/.codex/config.toml" 'model_reasoning_effort = "max"'
-write_lines "$PROJECT_MISMATCH_DIR/.codex/config.toml" 'model_reasoning_effort = "low"'
-
-if [[ -n "$TOML_PYTHON" ]]; then
-  MAX_NODE_LOG="$TMP_ROOT/effort-max.node"
-  run_case dispatch-effort-max env \
-    HOME="$HOME_DIR" CODEX_HOME="$MAX_CONFIG_DIR" \
-    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-    SELFTEST_NODE_LOG="$MAX_NODE_LOG" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort max
-  expect_status 0 "config-only max dispatch proceeds when config matches"
-  expect_first_line "$MAX_NODE_LOG" "$STANDARD_COMPANION" \
-    "config-only max dispatch reaches node"
-  expect_no_file_line "$MAX_NODE_LOG" "--effort" \
-    "config-only max is not forwarded to the companion"
-  expect_output "effort: max (assertion matched config.toml top-level; other config layers not resolved)" \
-    "config-only max summary qualifies the matched global top-level assertion"
-  expect_no_output "inherited from config.toml; verified" \
-    "config-only max summary does not claim unqualified verification"
-
-  PROJECT_MATCH_NODE_LOG="$TMP_ROOT/effort-project-match.node"
-  run_case_in_dir dispatch-effort-project-match "$PROJECT_MATCH_DIR" env \
-    HOME="$HOME_DIR" CODEX_HOME="$MISMATCH_CONFIG_DIR" \
-    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-    SELFTEST_NODE_LOG="$PROJECT_MATCH_NODE_LOG" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort max
-  expect_status 0 "matching project config-only effort takes precedence over global mismatch"
-  expect_first_line "$PROJECT_MATCH_NODE_LOG" "$STANDARD_COMPANION" \
-    "matching project config-only effort reaches node"
-  expect_no_file_line "$PROJECT_MATCH_NODE_LOG" "--effort" \
-    "matching project config-only effort is not forwarded"
-  expect_output "effort: max (assertion matched project .codex/config.toml top-level; other config layers not resolved)" \
-    "project config-only summary qualifies the matched project top-level assertion"
-
-  PROJECT_MISMATCH_NODE_LOG="$TMP_ROOT/effort-project-mismatch.node"
-  run_case_in_dir dispatch-effort-project-mismatch "$PROJECT_MISMATCH_DIR" env \
-    HOME="$HOME_DIR" CODEX_HOME="$MAX_CONFIG_DIR" \
-    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-    SELFTEST_NODE_LOG="$PROJECT_MISMATCH_NODE_LOG" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort max
-  expect_status 2 "project config-only mismatch fails despite matching global config"
-  expect_output "project-effort-mismatch/.codex/config.toml has top-level model_reasoning_effort = 'low'" \
-    "project config-only mismatch identifies the winning project value"
-  expect_missing_file "$PROJECT_MISMATCH_NODE_LOG" \
-    "project config-only mismatch dispatches nothing"
-
-  PROJECT_ABSENT_NODE_LOG="$TMP_ROOT/effort-project-absent.node"
-  run_case_in_dir dispatch-effort-project-absent "$PROJECT_ABSENT_DIR" env \
-    HOME="$HOME_DIR" CODEX_HOME="$MAX_CONFIG_DIR" \
-    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-    SELFTEST_NODE_LOG="$PROJECT_ABSENT_NODE_LOG" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort max
-  expect_status 0 "absent project config falls through to matching global effort"
-  expect_first_line "$PROJECT_ABSENT_NODE_LOG" "$STANDARD_COMPANION" \
-    "global fallback after absent project config reaches node"
-  expect_no_file_line "$PROJECT_ABSENT_NODE_LOG" "--effort" \
-    "global fallback config-only effort is not forwarded"
-  expect_output "effort: max (assertion matched config.toml top-level; other config layers not resolved)" \
-    "global fallback summary qualifies the matched global top-level assertion"
-
-  MISMATCH_NODE_LOG="$TMP_ROOT/effort-mismatch.node"
-  run_case dispatch-effort-mismatch env \
-    HOME="$HOME_DIR" CODEX_HOME="$MISMATCH_CONFIG_DIR" \
-    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-    SELFTEST_NODE_LOG="$MISMATCH_NODE_LOG" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort max
-  expect_status 2 "config-only max fails closed when config says medium"
-  expect_output "requested config-only effort 'max'" \
-    "config-only mismatch names the requested level"
-  expect_output "model_reasoning_effort = 'medium'" \
-    "config-only mismatch names the actual level"
-  expect_missing_file "$MISMATCH_NODE_LOG" \
-    "config-only mismatch dispatches nothing"
-
-  ABSENT_NODE_LOG="$TMP_ROOT/effort-absent.node"
-  run_case dispatch-effort-absent env \
-    HOME="$HOME_DIR" CODEX_HOME="$ABSENT_CONFIG_DIR" \
-    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-    SELFTEST_NODE_LOG="$ABSENT_NODE_LOG" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort max
-  expect_status 2 "config-only max fails closed when the config key is absent"
-  expect_output "top-level model_reasoning_effort is absent" \
-    "config-only absent-key failure identifies what could not be determined"
-  expect_missing_file "$ABSENT_NODE_LOG" \
-    "config-only absent-key failure dispatches nothing"
-
-  MALFORMED_NODE_LOG="$TMP_ROOT/effort-malformed.node"
-  run_case dispatch-effort-malformed env \
-    HOME="$HOME_DIR" CODEX_HOME="$MALFORMED_CONFIG_DIR" \
-    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-    SELFTEST_NODE_LOG="$MALFORMED_NODE_LOG" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort max
-  expect_status 2 "config-only max fails closed on malformed TOML"
-  expect_output "is not valid TOML" \
-    "config-only malformed failure identifies the parse problem"
-  expect_missing_file "$MALFORMED_NODE_LOG" \
-    "config-only malformed failure dispatches nothing"
-
-  SPACED_MAX_NODE_LOG="$TMP_ROOT/effort-spaced-max.node"
-  run_case dispatch-effort-spaced-max env \
-    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_CONFIG_DIR" \
-    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-    SELFTEST_NODE_LOG="$SPACED_MAX_NODE_LOG" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort '  MAX  '
-  expect_status 0 "config-only effort trims and folds case on flag and config"
-  expect_no_file_line "$SPACED_MAX_NODE_LOG" "--effort" \
-    "normalized config-only effort is not forwarded"
-  expect_output "effort: max (assertion matched config.toml top-level; other config layers not resolved)" \
-    "normalized config-only effort reports the canonical global assertion"
-
-  MIXED_MAX_NODE_LOG="$TMP_ROOT/effort-mixed-max.node"
-  run_case dispatch-effort-mixed-max env \
-    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_CONFIG_DIR" \
-    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-    SELFTEST_NODE_LOG="$MIXED_MAX_NODE_LOG" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort Max
-  expect_status 0 "config-only mixed-case Max resolves like max"
-  expect_no_file_line "$MIXED_MAX_NODE_LOG" "--effort" \
-    "mixed-case config-only effort is not forwarded"
-
-  ENV_MAX_NODE_LOG="$TMP_ROOT/effort-env-max.node"
-  run_case dispatch-effort-env-max env \
-    HOME="$HOME_DIR" CODEX_HOME="$MAX_CONFIG_DIR" CODEX_LOOP_EFFORT=max \
-    CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-    SELFTEST_NODE_LOG="$ENV_MAX_NODE_LOG" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest
-  expect_status 0 "CODEX_LOOP_EFFORT=max uses the config-only assertion path"
-  expect_no_file_line "$ENV_MAX_NODE_LOG" "--effort" \
-    "config-only effort from the environment is not forwarded"
-  expect_output "effort: max (assertion matched config.toml top-level; other config layers not resolved)" \
-    "config-only environment summary reports the matched global assertion"
+if [[ -s "$CRASH_CHILD_FILE" ]]; then
+  CRASH_CHILD_PID="$(sed -n '1p' "$CRASH_CHILD_FILE")"
+  pass "wrapper-crash fixture leaves a live Codex child"
 else
-  skip_checks \
-    "config-only max dispatch proceeds when config matches" \
-    "config-only max dispatch reaches node" \
-    "config-only max is not forwarded to the companion" \
-    "config-only max summary qualifies the matched global top-level assertion" \
-    "config-only max summary does not claim unqualified verification" \
-    "matching project config-only effort takes precedence over global mismatch" \
-    "matching project config-only effort reaches node" \
-    "matching project config-only effort is not forwarded" \
-    "project config-only summary qualifies the matched project top-level assertion" \
-    "project config-only mismatch fails despite matching global config" \
-    "project config-only mismatch identifies the winning project value" \
-    "project config-only mismatch dispatches nothing" \
-    "absent project config falls through to matching global effort" \
-    "global fallback after absent project config reaches node" \
-    "global fallback config-only effort is not forwarded" \
-    "global fallback summary qualifies the matched global top-level assertion" \
-    "config-only max fails closed when config says medium" \
-    "config-only mismatch names the requested level" \
-    "config-only mismatch names the actual level" \
-    "config-only mismatch dispatches nothing" \
-    "config-only max fails closed when the config key is absent" \
-    "config-only absent-key failure identifies what could not be determined" \
-    "config-only absent-key failure dispatches nothing" \
-    "config-only max fails closed on malformed TOML" \
-    "config-only malformed failure identifies the parse problem" \
-    "config-only malformed failure dispatches nothing" \
-    "config-only effort trims and folds case on flag and config" \
-    "normalized config-only effort is not forwarded" \
-    "normalized config-only effort reports the canonical global assertion" \
-    "config-only mixed-case Max resolves like max" \
-    "mixed-case config-only effort is not forwarded" \
-    "CODEX_LOOP_EFFORT=max uses the config-only assertion path" \
-    "config-only effort from the environment is not forwarded" \
-    "config-only environment summary reports the matched global assertion"
+  fail "wrapper-crash fixture leaves a live Codex child"
 fi
+kill -KILL "$CRASH_WRAPPER_PID" 2>/dev/null || true
+wait "$CRASH_WRAPPER_PID" 2>/dev/null || true
 
-MISSING_NODE_LOG="$TMP_ROOT/effort-missing.node"
-run_case dispatch-effort-missing env \
-  HOME="$HOME_DIR" CODEX_HOME="$MISSING_CONFIG_DIR" \
-  CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-  SELFTEST_NODE_LOG="$MISSING_NODE_LOG" PATH="$TOOLS_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort max
-expect_status 2 "config-only max fails closed when config.toml is missing"
-expect_output "requested config-only effort 'max'" \
-  "config-only missing-file failure names the requested level"
-expect_output "$MISSING_CONFIG_DIR/config.toml does not exist" \
-  "config-only missing-file failure identifies the missing config"
-expect_missing_file "$MISSING_NODE_LOG" \
-  "config-only missing-file failure dispatches nothing"
+rm -f "$TMP_ROOT/crash-next.argv"
+run_split_case_in_dir crash-next-fresh "$CRASH_WORKSPACE" env \
+  HOME="$CRASH_HOME" CODEX_HOME="$CRASH_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/crash-next.argv" "$DISPATCH" --prompt next
+expect_status 5 "next fresh dispatch refuses the highest running generation"
+expect_output "highest generation is still running" "fresh refusal names the running record"
+expect_missing_file "$TMP_ROOT/crash-next.argv" "fresh dispatch does not fall back past the running record"
 
-NO_PARSER_NODE_LOG="$TMP_ROOT/effort-no-parser.node"
-run_case dispatch-effort-no-parser env \
-  HOME="$HOME_DIR" CODEX_HOME="$MAX_CONFIG_DIR" \
-  CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-  SELFTEST_NODE_LOG="$NO_PARSER_NODE_LOG" PATH="$NO_PYTHON_BIN" \
-  bash "$DISPATCH" --prompt selftest --effort max
-expect_status 2 "config-only max fails closed without a TOML parser"
-expect_output "python3 with tomllib (3.11+) is unavailable" \
-  "config-only no-parser failure explains what could not be determined"
-expect_missing_file "$NO_PARSER_NODE_LOG" \
-  "config-only no-parser failure dispatches nothing"
-
-XHIGH_NODE_LOG="$TMP_ROOT/effort-xhigh.node"
-run_case dispatch-effort-xhigh env \
-  HOME="$HOME_DIR" CODEX_HOME="$REGRESSION_CONFIG_DIR" \
-  CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-  SELFTEST_NODE_LOG="$XHIGH_NODE_LOG" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort xhigh
-expect_status 0 "companion-accepted xhigh still dispatches"
-expect_file_line "$XHIGH_NODE_LOG" "--effort" \
-  "companion-accepted xhigh still forwards the effort flag"
-expect_file_line "$XHIGH_NODE_LOG" "xhigh" \
-  "companion-accepted xhigh still forwards its value"
-expect_output "effort: xhigh (explicit)" \
-  "companion-accepted xhigh is still reported as explicit"
-
-BOGUS_NODE_LOG="$TMP_ROOT/effort-bogus.node"
-run_case dispatch-effort-bogus env \
-  HOME="$HOME_DIR" CODEX_HOME="$REGRESSION_CONFIG_DIR" \
-  CODEX_LOOP_COMPANION="$STANDARD_COMPANION" \
-  SELFTEST_NODE_LOG="$BOGUS_NODE_LOG" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort bogus
-expect_status 2 "unknown effort bogus is still rejected"
-expect_output "invalid --effort 'bogus'; this companion accepts:" \
-  "unknown effort bogus keeps the invalid-effort diagnostic"
-expect_missing_file "$BOGUS_NODE_LOG" \
-  "unknown effort bogus dispatches nothing"
-
-# A grep miss must use the built-in effort snapshot, not terminate under -e.
-run_case dispatch-snapshot env \
-  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" \
-  CODEX_LOOP_COMPANION="$NO_USAGE_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/snapshot.node" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort definitely-invalid
-expect_status 2 "dispatch grep miss reaches effort validation"
-expect_output "this companion accepts: none minimal low medium high xhigh" \
-  "dispatch grep miss uses fallback effort snapshot"
-
-# The explicit override wins, rejects values outside its live list, and runs
-# through the selected file for a valid value.
-run_case dispatch-override-invalid env \
-  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/override-invalid.node" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort medium
-expect_status 2 "dispatch override rejects an invalid live effort"
-expect_output "this companion accepts: low high" \
-  "dispatch override reads its companion's effort list"
-
-write_lines "$CONFIG_DIR/config.toml" \
-  'model = "config-model"' \
-  'service_tier = "fast"'
-OVERRIDE_NODE_LOG="$TMP_ROOT/override-valid.node"
-run_case dispatch-override-valid env \
-  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$OVERRIDE_NODE_LOG" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort high
-expect_status 0 "dispatch override accepts a valid effort"
-expect_first_line "$OVERRIDE_NODE_LOG" "$LIMITED_COMPANION" \
-  "dispatch sends the explicit override to node"
-expect_output "companion: $LIMITED_COMPANION (explicit override)" \
-  "dispatch reports explicit override resolution"
-expect_output "model : config-model (config.toml top-level; other config layers not resolved)" \
-  "dispatch reads and qualifies the CODEX_HOME config display"
-
-# Keys inside [section] tables (a profile block, a server block) are not
-# top-level config and must never be displayed as the effective value.
-PROFILE_CONFIG_DIR="$TMP_ROOT/codex-home-profile"
-mkdir -p "$PROFILE_CONFIG_DIR"
-write_lines "$PROFILE_CONFIG_DIR/config.toml" \
-  '[profiles.speedy]' \
-  'model = "profile-model"'
-run_case dispatch-profile-table env \
-  HOME="$HOME_DIR" CODEX_HOME="$PROFILE_CONFIG_DIR" \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/profile-table.node" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort high
-expect_status 0 "dispatch runs with a section-table-only config"
-expect_output "model : <Codex CLI default>" \
-  "dispatch does not display a section-table key as effective config"
-
-# MCP servers / app connectors run outside the exec sandbox in EVERY mode,
-# so any dispatch stops until the exposure is acknowledged once. Detection
-# uses a real TOML parser (tomllib); these verdict cases run through the
-# shim PATH when an interpreter exists and are skipped (stable count)
-# otherwise — the fail-closed cases below run everywhere.
-TOOLS_CONFIG_DIR="$TMP_ROOT/codex-home-tools"
-mkdir -p "$TOOLS_CONFIG_DIR"
-write_lines "$TOOLS_CONFIG_DIR/config.toml" \
-  'model = "config-model"' \
-  '[mcp_servers.filewriter]' \
-  'command = "definitely-not-run"' \
-  '[mcp_servers.filewriter.env]' \
-  'KEY = "value"'
-if [[ -n "$TOML_PYTHON" ]]; then
-  # Default behavior is disclose-and-proceed: the finding is surfaced on
-  # every dispatch, but only CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 refuses.
-  run_case dispatch-external-tools-warn env \
-    HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
-    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-    SELFTEST_NODE_LOG="$TMP_ROOT/tools-warn.node" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort high
-  expect_status 0 "dispatch warns and proceeds by default on external tools"
-  expect_output "warn  : external tools outside the sandbox: mcp_servers.filewriter" \
-    "dispatch names the enabled external tool in its warning"
-  expect_no_output "filewriter.env" \
-    "dispatch dedupes nested tables to one entry per server"
-
-  run_case dispatch-external-tools-blocked env \
-    HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
-    CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 \
-    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-    SELFTEST_NODE_LOG="$TMP_ROOT/tools-blocked.node" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort high
-  expect_status 4 "dispatch refuses external tools when blocking is requested"
-  expect_output "mcp_servers.filewriter" \
-    "blocking dispatch names the external tool"
-
-  # read-only bounds files and shell, NOT tool calls — no exemption.
-  run_case dispatch-external-tools-readonly env \
-    HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
-    CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 \
-    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-    SELFTEST_NODE_LOG="$TMP_ROOT/tools-ro.node" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort high --read-only
-  expect_status 4 "read-only dispatch is blocked by external tools too"
-
-  # A server disabled with `enabled = false` in its ROOT table is not an
-  # exposure; the same key in a nested per-tool table must not hide the
-  # connector, whose other tools remain callable.
-  DISABLED_TOOLS_DIR="$TMP_ROOT/codex-home-tools-disabled"
-  mkdir -p "$DISABLED_TOOLS_DIR"
-  write_lines "$DISABLED_TOOLS_DIR/config.toml" \
-    '[mcp_servers.filewriter]' \
-    'command = "definitely-not-run"' \
-    'enabled = false'
-  run_case dispatch-external-tools-disabled env \
-    HOME="$HOME_DIR" CODEX_HOME="$DISABLED_TOOLS_DIR" \
-    CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 \
-    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-    SELFTEST_NODE_LOG="$TMP_ROOT/tools-disabled.node" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort high
-  expect_status 0 "dispatch does not block on a server disabled with enabled=false"
-
-  PARTIAL_TOOLS_DIR="$TMP_ROOT/codex-home-tools-partial"
-  mkdir -p "$PARTIAL_TOOLS_DIR"
-  write_lines "$PARTIAL_TOOLS_DIR/config.toml" \
-    '[apps.connector_a.tools.disabled_tool]' \
-    'enabled = false' \
-    '[apps.connector_a.tools.enabled_tool]' \
-    'approval_mode = "approve"'
-  run_case dispatch-external-tools-partial env \
-    HOME="$HOME_DIR" CODEX_HOME="$PARTIAL_TOOLS_DIR" \
-    CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 \
-    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-    SELFTEST_NODE_LOG="$TMP_ROOT/tools-partial.node" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort high
-  expect_status 4 "dispatch still blocks when only one tool of a connector is disabled"
-  expect_output "apps.connector_a" \
-    "dispatch lists the connector whose other tools remain callable"
-
-  # Legal TOML the CLI honors: indented headers, dotted keys (with or
-  # without whitespace around the dots), and inline tables.
-  VARIANT_TOOLS_DIR="$TMP_ROOT/codex-home-tools-variants"
-  mkdir -p "$VARIANT_TOOLS_DIR"
-  write_lines "$VARIANT_TOOLS_DIR/config.toml" \
-    '  [mcp_servers.demo]' \
-    '  command = "printf"'
-  run_case dispatch-tools-indented env \
-    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
-    CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 \
-    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-    SELFTEST_NODE_LOG="$TMP_ROOT/tools-indented.node" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort high
-  expect_status 4 "dispatch blocks on an indented server table header"
-
-  write_lines "$VARIANT_TOOLS_DIR/config.toml" \
-    'mcp_servers.demo.command = "printf"'
-  run_case dispatch-tools-dotted env \
-    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
-    CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 \
-    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-    SELFTEST_NODE_LOG="$TMP_ROOT/tools-dotted.node" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort high
-  expect_status 4 "dispatch blocks on a top-level dotted-key server definition"
-  expect_output "mcp_servers.demo" \
-    "dispatch names the dotted-key server"
-
-  write_lines "$VARIANT_TOOLS_DIR/config.toml" \
-    'mcp_servers . demo . command = "printf"'
-  run_case dispatch-tools-spaced-dotted env \
-    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
-    CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 \
-    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-    SELFTEST_NODE_LOG="$TMP_ROOT/tools-spaced.node" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort high
-  expect_status 4 "dispatch blocks on a dotted key with whitespace around the dots"
-  expect_output "mcp_servers.demo" \
-    "dispatch names the whitespace-dotted server"
-
-  write_lines "$VARIANT_TOOLS_DIR/config.toml" \
-    'mcp_servers = { demo = { command = "printf" } }'
-  run_case dispatch-tools-inline env \
-    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
-    CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 \
-    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-    SELFTEST_NODE_LOG="$TMP_ROOT/tools-inline.node" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort high
-  expect_status 4 "dispatch blocks on an inline-table server definition"
-
-  write_lines "$VARIANT_TOOLS_DIR/config.toml" \
-    'mcp_servers.demo.command = "printf"' \
-    'mcp_servers.demo.enabled = false'
-  run_case dispatch-tools-dotted-disabled env \
-    HOME="$HOME_DIR" CODEX_HOME="$VARIANT_TOOLS_DIR" \
-    CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 \
-    CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-    SELFTEST_NODE_LOG="$TMP_ROOT/tools-dotted-disabled.node" PATH="$TOOLS_PATH" \
-    bash "$DISPATCH" --prompt selftest --effort high
-  expect_status 0 "dispatch does not block on a dotted-key server disabled at its root"
-else
-  skip_checks \
-    "dispatch warns and proceeds by default on external tools" \
-    "dispatch names the enabled external tool in its warning" \
-    "dispatch dedupes nested tables to one entry per server" \
-    "dispatch refuses external tools when blocking is requested" \
-    "blocking dispatch names the external tool" \
-    "read-only dispatch is blocked by external tools too" \
-    "dispatch does not block on a server disabled with enabled=false" \
-    "dispatch still blocks when only one tool of a connector is disabled" \
-    "dispatch lists the connector whose other tools remain callable" \
-    "dispatch blocks on an indented server table header" \
-    "dispatch blocks on a top-level dotted-key server definition" \
-    "dispatch names the dotted-key server" \
-    "dispatch blocks on a dotted key with whitespace around the dots" \
-    "dispatch names the whitespace-dotted server" \
-    "dispatch blocks on an inline-table server definition" \
-    "dispatch does not block on a dotted-key server disabled at its root"
+rm -f "$TMP_ROOT/crash-resume.argv"
+run_split_case_in_dir crash-next-resume "$CRASH_WORKSPACE" env \
+  HOME="$CRASH_HOME" CODEX_HOME="$CRASH_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/crash-resume.argv" "$RESUME_DISPATCH" --prompt next --resume
+expect_status 5 "next resume refuses the highest running generation"
+expect_output "highest generation is still running" "resume refusal names the running record"
+expect_missing_file "$TMP_ROOT/crash-resume.argv" "resume does not fall back to the older ready record or --last"
+if [[ -n "$CRASH_CHILD_PID" ]]; then
+  kill -TERM "-$CRASH_CHILD_PID" 2>/dev/null || true
+  CRASH_CHILD_PID=""
 fi
-
-# An unverifiable config warns by default and refuses only under the
-# blocking flag — the warning must appear on EVERY such dispatch, since
-# nothing else discloses that the check did not run.
-run_case dispatch-tools-noverify env \
-  HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/tools-noverify.node" PATH="$NO_PYTHON_BIN" \
-  bash "$DISPATCH" --prompt selftest --effort high
-expect_status 0 "dispatch proceeds when no TOML parser is available"
-expect_output "warn  : Codex config not verified" \
-  "dispatch warns on every unverified-config dispatch"
-
-run_case dispatch-tools-noverify-blocked env \
-  HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
-  CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/tools-noverify-blocked.node" PATH="$NO_PYTHON_BIN" \
-  bash "$DISPATCH" --prompt selftest --effort high
-expect_status 4 "dispatch refuses an unverifiable config when blocking is requested"
-expect_output "cannot verify the Codex config" \
-  "blocking dispatch explains the unverifiable config"
-
-EMPTY_CODEX_HOME="$TMP_ROOT/codex-home-empty"
-mkdir -p "$EMPTY_CODEX_HOME"
-run_case dispatch-tools-noconfig env \
-  HOME="$HOME_DIR" CODEX_HOME="$EMPTY_CODEX_HOME" \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/tools-noconfig.node" PATH="$NO_PYTHON_BIN" \
-  bash "$DISPATCH" --prompt selftest --effort high
-expect_status 0 "dispatch without any config file needs no parser and proceeds"
-
-run_case dispatch-tools-parser-crash env \
-  HOME="$HOME_DIR" CODEX_HOME="$TOOLS_CONFIG_DIR" \
-  CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/tools-crash.node" \
-  PATH="$CRASH_PYTHON_BIN:$NO_PYTHON_BIN" \
-  bash "$DISPATCH" --prompt selftest --effort high
-expect_status 4 "blocking dispatch fails closed when the TOML parser itself crashes"
-expect_output "cannot verify the Codex config" \
-  "dispatch reports the parser crash as unverifiable"
-
-# The prompt must reach the companion as ONE argument behind a `--`
-# terminator: the companion re-splits a lone trailing argument, so a prompt
-# that merely MENTIONS --write would otherwise become a real write flag.
-INJECTION_PROMPT='Investigate this. Do not use --write and only report.'
-INJECTION_NODE_LOG="$TMP_ROOT/injection.node"
-run_case dispatch-prompt-injection env \
-  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$INJECTION_NODE_LOG" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --read-only --prompt "$INJECTION_PROMPT" --effort high
-expect_status 0 "read-only dispatch accepts a prompt that mentions --write"
-expect_file_line "$INJECTION_NODE_LOG" "--" \
-  "dispatch passes an argument terminator before the prompt"
-expect_file_line "$INJECTION_NODE_LOG" "$INJECTION_PROMPT" \
-  "dispatch keeps the prompt as a single untampered argument"
-
-run_case dispatch-extra-rejected env \
-  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" \
-  CODEX_LOOP_COMPANION="$LIMITED_COMPANION" \
-  SELFTEST_NODE_LOG="$TMP_ROOT/extra.node" PATH="$TEST_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort high -- --write
-expect_status 1 "dispatch rejects passthrough arguments after --"
-expect_output "unknown argument: --" \
-  "dispatch reports the removed passthrough separator as unknown"
-
-# The Claude CLI view is preferred and resolves enabled entries with
-# managed > local > project > user precedence, independent of JSON list order.
-CLAUDE_BIN="$TMP_ROOT/claude-bin"
-CLAUDE_DISABLED_ROOT="$TMP_ROOT/claude-disabled"
-CLAUDE_USER_ROOT="$TMP_ROOT/claude-user"
-CLAUDE_PROJECT_ROOT="$TMP_ROOT/claude-project"
-CLAUDE_LOCAL_ROOT="$TMP_ROOT/claude-local"
-CLAUDE_MANAGED_ROOT="$TMP_ROOT/claude-managed"
-mkdir -p "$CLAUDE_BIN" \
-  "$CLAUDE_DISABLED_ROOT/scripts" "$CLAUDE_USER_ROOT/scripts" \
-  "$CLAUDE_PROJECT_ROOT/scripts" "$CLAUDE_LOCAL_ROOT/scripts" \
-  "$CLAUDE_MANAGED_ROOT/scripts"
-write_lines "$CLAUDE_BIN/claude" \
-  '#!/usr/bin/env bash' \
-  '[[ "$*" == "plugin list --json" ]] || exit 64' \
-  'printf '\''%s\n'\'' "${SELFTEST_CLAUDE_JSON:-}"'
-chmod +x "$CLAUDE_BIN/claude"
-for companion_root in \
-  "$CLAUDE_DISABLED_ROOT" "$CLAUDE_USER_ROOT" \
-  "$CLAUDE_PROJECT_ROOT" "$CLAUDE_LOCAL_ROOT" \
-  "$CLAUDE_MANAGED_ROOT"; do
-  write_lines "$companion_root/scripts/codex-companion.mjs" '// --effort <low|high>'
-done
-CLAUDE_PLUGIN_JSON="$(printf \
-  '[{"id":"codex@openai-codex","scope":"local","enabled":false,"installPath":"%s"},{"id":"codex@openai-codex","scope":"user","enabled":true,"installPath":"%s"},{"id":"codex@openai-codex","scope":"project","enabled":true,"installPath":"%s"},{"id":"codex@openai-codex","scope":"local","enabled":true,"installPath":"%s"},{"id":"codex@openai-codex","scope":"managed","enabled":true,"installPath":"%s"}]' \
-  "$CLAUDE_DISABLED_ROOT" "$CLAUDE_USER_ROOT" "$CLAUDE_PROJECT_ROOT" \
-  "$CLAUDE_LOCAL_ROOT" "$CLAUDE_MANAGED_ROOT")"
-CLAUDE_NODE_LOG="$TMP_ROOT/claude-list.node"
-run_case dispatch-claude-list env \
-  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" CODEX_LOOP_COMPANION="" \
-  SELFTEST_CLAUDE_JSON="$CLAUDE_PLUGIN_JSON" SELFTEST_NODE_LOG="$CLAUDE_NODE_LOG" \
-  PATH="$CLAUDE_BIN:$NO_CLAUDE_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort low
-expect_status 0 "dispatch accepts the enabled managed install from the Claude CLI"
-expect_first_line "$CLAUDE_NODE_LOG" "$CLAUDE_MANAGED_ROOT/scripts/codex-companion.mjs" \
-  "dispatch applies managed > local > project > user precedence to the Claude CLI list"
-expect_output "(claude plugin list)" "dispatch reports Claude-CLI resolution"
-
-# With `claude` absent, installed_plugins.json remains authoritative over a
-# newer cache entry. Disabled entries are skipped and managed beats user.
-ACTIVE_ROOT="$HOME_DIR/.claude/plugins/cache/openai-codex/codex/1.0.6"
-STALE_ROOT="$HOME_DIR/.claude/plugins/cache/openai-codex/codex/9.9.9"
-DISABLED_ROOT="$HOME_DIR/.claude/plugins/cache/openai-codex/codex/0.0.1"
-MANAGED_ROOT="$HOME_DIR/.claude/plugins/cache/openai-codex/codex/managed"
-mkdir -p \
-  "$ACTIVE_ROOT/scripts" "$STALE_ROOT/scripts" "$DISABLED_ROOT/scripts" \
-  "$MANAGED_ROOT/scripts" "$HOME_DIR/.claude/plugins"
-write_lines "$ACTIVE_ROOT/scripts/codex-companion.mjs" '// --effort <low|high>'
-write_lines "$STALE_ROOT/scripts/codex-companion.mjs" '// --effort <low|high>'
-write_lines "$DISABLED_ROOT/scripts/codex-companion.mjs" '// --effort <low|high>'
-write_lines "$MANAGED_ROOT/scripts/codex-companion.mjs" '// --effort <low|high>'
-printf '{"plugins":{"codex@openai-codex":[{"scope":"user","enabled":true,"installPath":"%s"},{"scope":"local","enabled":false,"installPath":"%s"},{"scope":"project","installPath":"%s"},{"scope":"managed","enabled":true,"installPath":"%s"}]}}\n' \
-  "$STALE_ROOT" "$DISABLED_ROOT" "$ACTIVE_ROOT" "$MANAGED_ROOT" \
-  > "$HOME_DIR/.claude/plugins/installed_plugins.json"
-ACTIVE_NODE_LOG="$TMP_ROOT/active.node"
-run_case dispatch-active env \
-  HOME="$HOME_DIR" CODEX_HOME="$CONFIG_DIR" CODEX_LOOP_COMPANION="" \
-  SELFTEST_NODE_LOG="$ACTIVE_NODE_LOG" PATH="$NO_CLAUDE_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort low
-expect_status 0 "dispatch falls through cleanly when the Claude CLI is absent"
-expect_first_line "$ACTIVE_NODE_LOG" "$MANAGED_ROOT/scripts/codex-companion.mjs" \
-  "dispatch applies managed-over-user precedence and skips a disabled local install"
-expect_output "(active install)" "dispatch reports active-install resolution"
-
-# A missing cache plus malformed plugin manifest must still reach marketplaces.
-MARKET_HOME="$TMP_ROOT/market-home"
-MARKET_COMPANION="$MARKET_HOME/.claude/plugins/marketplaces/codex/scripts/codex-companion.mjs"
-mkdir -p "$(dirname "$MARKET_COMPANION")" "$MARKET_HOME/.claude/plugins"
-write_lines "$MARKET_COMPANION" '// --effort <low|high>'
-write_lines "$MARKET_HOME/.claude/plugins/installed_plugins.json" '{not valid json'
-MARKET_NODE_LOG="$TMP_ROOT/market.node"
-run_case dispatch-marketplace env \
-  HOME="$MARKET_HOME" CODEX_HOME="$CONFIG_DIR" CODEX_LOOP_COMPANION="" \
-  SELFTEST_NODE_LOG="$MARKET_NODE_LOG" PATH="$NO_CLAUDE_PATH" \
-  bash "$DISPATCH" --prompt selftest --effort low
-expect_status 0 "dispatch reaches marketplace fallback when cache is missing"
-expect_first_line "$MARKET_NODE_LOG" "$MARKET_COMPANION" \
-  "dispatch sends the marketplace companion to node"
-expect_output "(marketplace fallback)" "dispatch reports marketplace resolution"
 
 # Without a baseline, run-gate keeps the suite's pass-through behavior.
 run_case gate-pass bash "$GATE" --log "$TMP_ROOT/gate-pass.log" -- \

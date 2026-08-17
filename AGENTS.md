@@ -15,7 +15,8 @@ Components:
 - `skills/implementation-loop/` — the backend-neutral implementation loop skill. Bash
   helpers in `scripts/`: `codex-dispatch.sh`, `run-gate.sh`, `selftest.sh`,
   `grok-dispatch.sh`, `grok-verify-worktree.sh`, `grok-selftest.sh`,
-  `cursor-dispatch.sh`, `cursor-selftest.sh`, and `integration-test.sh`.
+  `cursor-dispatch.sh`, `cursor-selftest.sh`, and `integration-test.sh`; the
+  frozen Codex integration matrix lives in `scripts/codex-cases.tsv`.
   Backend-specific mechanics live in `references/runtime-codex.md` and
   the shipped `references/runtime-grok.md` and `references/runtime-cursor.md`
   backend references; the shared observable interface is recorded in
@@ -55,9 +56,8 @@ run):
    and no `codex-dispatch` references anywhere under either
    `references/playbooks/` tree.
 4. `bash skills/implementation-loop/scripts/selftest.sh` — expect
-   `selftest: PASS (217 checks)`. The dispatch checks that need `tomllib` run
-   fully on python3 ≥ 3.11; on older hosts they self-skip while keeping a
-   stable check count.
+   `selftest: PASS (288 checks)`. The Codex cases use python3 for secure state,
+   argv, and fixture validation; python3 3.11+ is part of the repo toolchain.
 5. `bash skills/implementation-loop/scripts/grok-selftest.sh` — expect
    `selftest: PASS (276 checks)`.
 6. `bash skills/implementation-loop/scripts/cursor-selftest.sh` — expect
@@ -77,10 +77,13 @@ run):
 ## Manual backend integration gate
 
 `skills/implementation-loop/scripts/integration-test.sh` is the manual,
-opt-in pre-release gate for backend changes. It exercises the real grok and
-cursor-agent sandboxes, needs authenticated CLIs, and makes real API calls. Run
-it with `--backend grok|cursor|all`; unavailable or logged-out backends are
-reported as skips. CI only runs `bash -n` on this script and never executes it.
+opt-in pre-release gate for backend changes. It exercises the real codex, grok,
+and cursor-agent sandboxes, needs authenticated CLIs, and makes real API calls.
+`--backend grok|cursor|codex|all` is repeatable and deduplicated; `--require
+codex` implies codex and fails unless every frozen non-managed Codex case runs
+exactly once with no skip/failure and complete provenance. Unavailable or
+logged-out backends otherwise remain skips. CI only runs `bash -n` on this
+script and never executes it.
 
 ## Running the web-slides app (non-obvious gotchas)
 
