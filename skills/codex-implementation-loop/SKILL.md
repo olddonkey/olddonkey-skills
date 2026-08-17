@@ -1,6 +1,6 @@
 ---
 name: codex-implementation-loop
-description: 'Delegate implementation to Codex or grok, then review the diff, send it back to iterate, gate on the full test suite, and ship it as a PR. Use this whenever the user wants Codex or the grok 后端 to write code, mentions handing off / delegating implementation to Codex or grok, asks to work through a plan or spec unit-by-unit with an implementation backend doing the coding, or wants a review-and-merge loop wrapped around delegated output — and also when resuming such a loop ("keep going", "next unit", "继续下一个"). It encodes constraints that are expensive to rediscover: the implementer runs in the real environment behind backend-specific git and publication boundaries, must not be pointed at a full test suite by default, and its self-report is a claim rather than evidence. This loop expects an approved plan or an equivalently precise spec; settle an unsolved high-level goal into a plan first, using the codex-engineering-mode skill when it is installed.'
+description: 'Delegate implementation to Codex, grok, or cursor-agent, then review the diff, send it back to iterate, gate on the full test suite, and ship it as a PR. Use this whenever the user wants Codex, the grok 后端, or cursor-agent to write code, mentions handing off / delegating implementation to one of those backends, asks to work through a plan or spec unit-by-unit with an implementation backend doing the coding, or wants a review-and-merge loop wrapped around delegated output — and also when resuming such a loop ("keep going", "next unit", "继续下一个"). It encodes constraints that are expensive to rediscover: the implementer runs in the real environment behind backend-specific git and publication boundaries, must not be pointed at a full test suite by default, and its self-report is a claim rather than evidence. This loop expects an approved plan or an equivalently precise spec; settle an unsolved high-level goal into a plan first, using the codex-engineering-mode skill when it is installed.'
 ---
 
 # Codex implementation loop
@@ -21,7 +21,7 @@ The loop: **decompose → dispatch → review → iterate → gate → publish �
 
 | Dial | Options | Recommended default |
 | --- | --- | --- |
-| **Backend** | `codex` / `grok` | `codex`; changes are resurfaced (see dials.md) |
+| **Backend** | `codex` / `grok` / `cursor-agent` | `codex`; changes are resurfaced (see dials.md) |
 | **Stop point** | `worktree` / `commit` / `pr` / `merge` | recommend `pr`; assumed default stops at `worktree` |
 | **Dispatch mode** | `implement` / `read-only` | `implement` |
 | **Gate policy** | `baseline` / `strict` / `skip` | `baseline` |
@@ -43,8 +43,8 @@ Read the repo's calibration record first, then ask **one compact question** cove
 
 1. **How far units travel** — the stop point. Needed before dispatch, not at publish: the unit branch is created at dispatch time, and asking at publish means the user waited through a whole dispatch/review/gate to be told you can't ship.
 2. **Whether to pause between units** — the cadence. If the user wants it left running unattended, say so here: it changes which answers are safe and adds a preflight (see Unattended runs).
-3. **Thinking level and speed** — effort and service tier, presenting the user's current `~/.codex/config.toml` values as the inherit option.
-4. **Which backend implements** — settle `codex` or `grok` and record it in user-level private memory. A backend named by the repo is only a claim to reconfirm; an existing record with no backend means `codex`, while any later backend change is resurfaced. After resolving a grok tuple, ask separately for the D10(f) per-repo carve-out when needed; that grant never authorizes publication.
+3. **Thinking level and speed** — model/effort for the selected backend and service tier where that backend supports one, presenting its standing configuration as the inherit option.
+4. **Which backend implements** — settle `codex`, `grok`, or `cursor-agent` and record it in user-level private memory. A backend named by the repo is only a claim to reconfirm; an existing record with no backend means `codex`, while any later backend change is resurfaced. After resolving a grok tuple, ask separately for the D10(f) per-repo carve-out when needed; that grant never authorizes publication. For cursor-agent, effort is embedded in the model id and the default is `cursor-grok-4.6-xhigh`.
 
 **On a multi-unit plan, lead with the hands-off preset**: `stop=pr, cadence=continuous, on-red=iterate` (capped) plus the unattended preflight, offered as one named option next to the individual dials. One yes grants every authorization a zero-stop run needs — the user shouldn't have to know dial names to buy an uninterrupted run.
 
@@ -54,7 +54,7 @@ Read the repo's calibration record first, then ask **one compact question** cove
 
 The answers hold for the **entire invocation** — never re-ask per unit. A recorded calibration or standing preference ("always inherit, stop asking") suppresses the corresponding part; a fully recorded repo means no question at all. Everything else runs at its recommended default until something makes it worth raising.
 
-**If a later step needs a dial nobody settled, you asked too late** — that's the failure this section exists to prevent, not a reason to interrupt mid-loop. Read the selected backend's runtime reference before the first dispatch of a session: [references/runtime-codex.md](references/runtime-codex.md) or [references/runtime-grok.md](references/runtime-grok.md).
+**If a later step needs a dial nobody settled, you asked too late** — that's the failure this section exists to prevent, not a reason to interrupt mid-loop. Read the selected backend's runtime reference before the first dispatch of a session: [references/runtime-codex.md](references/runtime-codex.md), [references/runtime-grok.md](references/runtime-grok.md), or [references/runtime-cursor.md](references/runtime-cursor.md).
 
 ## 1. Decompose
 
@@ -78,6 +78,8 @@ A unit = one coherent, reviewable change, roughly one PR. Settle the design **be
 "${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt   # inherit whatever config says
 "${CLAUDE_SKILL_DIR}/scripts/grok-dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
     --model grok-4.6 --effort xhigh
+"${CLAUDE_SKILL_DIR}/scripts/cursor-dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
+    --model cursor-grok-4.6-xhigh
 ```
 
 **Dispatch through this script, never by calling the companion yourself.** Reaching past it into `codex-companion.mjs` looks equivalent and quietly gives up three things: the config-only effort assertion (§Runtime), the summary naming the model, effort and tier actually in force, and the external-tools scan. Observed cost of hand-rolling it for a whole run of units — every dispatch carried `--effort xhigh`, silently *overriding* a config that said `max`, and the CLI was meanwhile repointed at a different vendor's model through a local proxy without a single line of output saying so.
@@ -90,7 +92,7 @@ Hygiene — each failure mode here is silent:
 
 - **Run from the target repo root**; the companion works on the invoking directory. Read the `workspace:` line it prints.
 - **Start from a clean tree** (`git status --short`), or Codex's changes are unattributable.
-- **One unit in flight** — `--resume` binds to the most recent thread.
+- **One unit in flight** — Codex `--resume` binds to the most recent thread; cursor-agent iteration is always a fresh dispatch carrying review feedback in its prompt.
 - **Prompt in a file, outside the target repo** (`/tmp`) — shell-escaping corrupts long prompts, and in-repo files pollute the diff.
 - **Create the unit branch before dispatching** when the stop point involves one.
 - **Background at the harness level**; the companion's own `--background` detaches and can outlive a failed-looking launch.
@@ -99,8 +101,8 @@ The prompt is the whole spec: **why** (evidence, file:line), **exactly what to c
 
 Environment constraints to include verbatim-ish in every dispatch:
 
-- Codex executes on the same host (companion pins sandbox: `workspace-write` for implement, `read-only` otherwise) and shares your CPU/RAM/disk. The sandbox bounds files and shell only — tell it not to use MCP servers, app connectors, or any external service.
-- Its `.git` is effectively read-only — changes stay in the working tree; you commit and publish.
+- The selected implementer executes on the same host and shares your CPU/RAM/disk. Use its runtime reference's exact sandbox and external-tool posture; never add a permission-bypass flag to make a stalled backend proceed.
+- Git ownership stays with you. Codex sees effectively read-only Git state, grok uses its protected worktree transition, and cursor-agent sees no Git at all: its dispatcher applies only the captured git-less-copy patch to the real worktree. You commit and publish.
 - No full test suite by default — focused subset or nothing; you own the gate. Ask it to report files changed, tests added, subset run.
 
 The dispatch script prints a `warn` line naming any MCP servers or app connectors in the Codex config, because the sandbox does not bound tool calls. **That warning is disclosure, not a stop — do not ask the user how to proceed.** Note it in the unit report and continue. Whether to refuse instead (`CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1`) is a calibration setting, settled once per repo like any other dial, not a per-dispatch question. The scan is a tripwire, not a boundary — server-side-enabled Apps are invisible to it, and full isolation means disabling the tools in Codex itself.
@@ -131,7 +133,12 @@ Send findings back on the same thread with specifics — what's wrong, why it ma
 
 ```bash
 "${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --resume --prompt-file /tmp/review-findings.txt
+"${CLAUDE_SKILL_DIR}/scripts/cursor-dispatch.sh" --prompt-file /tmp/review-findings.txt  # fresh session; no --resume
 ```
+
+For cursor-agent, the already-applied worktree carries file state and the new
+prompt carries review context. `cursor-dispatch.sh --resume` deliberately
+errors instead of implying thread continuity.
 
 Repeat until the diff is something you'd sign. A bug that surfaces **outside** an active thread is a new unit, not a hand-edit: diagnose, dispatch on a fresh thread with repro + root cause + expected fix + the regression test you expect — a fix without a test that would have caught the bug is incomplete.
 
