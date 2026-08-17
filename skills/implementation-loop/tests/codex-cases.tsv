@@ -24,8 +24,9 @@ resume-git-write	always	deny	resumed workspace-write keeps Git state protected
 config-writable-roots-pin	always	deny	disagreeing configured writable roots do not take effect
 config-network-pin	always	deny	disagreeing configured network access does not take effect
 config-schema-pins	always	pass	every fixed adapter config override is accepted by the real CLI schema
+config-fixture-schema	always	pass	hostile user and project fixture files are accepted by the real CLI schema
 config-approval-pin	always	pass	disagreeing approval policy resolves to never
 config-user-layer	always	pass	user-layer disagreement is overridden by adapter pins
 config-project-layer	always	pass	project-layer disagreement is overridden by adapter pins
-config-profile-layer	always	pass	active configured profile disagreement is overridden by adapter pins
+# retired config-profile-layer: profiles require --profile, which the adapter denies; covered by the codex selftest direct-parser guard
 managed-layer-pin	managed-only	pass	managed-layer disagreement is overridden on a managed host

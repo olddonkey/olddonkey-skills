@@ -358,14 +358,15 @@ raw = open(sys.argv[1], "rb").read()
 lines = raw.decode("utf-8").splitlines()
 if not lines or lines[0] != "#schema=1":
     raise SystemExit(1)
-if hashlib.sha256(raw).hexdigest() != "b503670de17ce6f8ea91530fdb850457676e85d71969ce797dcbfd9df1e153c7":
+if hashlib.sha256(raw).hexdigest() != "fbdc069f0b29cd133f64d7400ab3cdb2236560411eb7548a0d12ea46fd50cd0d":
     raise SystemExit(1)
 rows = [line.split("\t") for line in lines[1:] if line and not line.startswith("#")]
 ids = [row[0] for row in rows if len(row) == 4]
 required = {
     "fresh-repo-write", "linked-git-dir-write", "submodule-git-dir-write",
     "raw-tcp-host-control", "raw-tcp-sandbox", "resume-repo-write",
-    "config-approval-pin", "config-schema-pins", "managed-layer-pin",
+    "config-approval-pin", "config-schema-pins", "config-fixture-schema",
+    "managed-layer-pin",
 }
 ok = (
     rows

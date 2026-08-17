@@ -13,7 +13,9 @@ GROK_DISPATCH="$SCRIPT_DIR/../backends/grok/dispatch.sh"
 CURSOR_DISPATCH="$SCRIPT_DIR/../backends/cursor/dispatch.sh"
 CODEX_DISPATCH="$SCRIPT_DIR/../backends/codex/dispatch.sh"
 CODEX_CASES="$SCRIPT_DIR/codex-cases.tsv"
-CODEX_CASES_SHA256="b503670de17ce6f8ea91530fdb850457676e85d71969ce797dcbfd9df1e153c7"
+CODEX_CASES_SHA256="fbdc069f0b29cd133f64d7400ab3cdb2236560411eb7548a0d12ea46fd50cd0d"
+TOML_PYTHON=""
+TOML_CANDIDATES_TRIED="python3 python3.13 python3.12 python3.11"
 SELECT_GROK=0
 SELECT_CURSOR=0
 SELECT_CODEX=0
@@ -77,7 +79,12 @@ if [[ $SELECTOR_SEEN -eq 0 && $REQUIRE_CODEX -eq 0 ]]; then
   select_backend all
 fi
 
-ORIGINAL_HOME="${HOME:?HOME is required}"
+ORIGINAL_HOME_RAW="${HOME:?HOME is required}"
+[[ -d "$ORIGINAL_HOME_RAW" ]] || {
+  echo "error: HOME is not an existing directory: $ORIGINAL_HOME_RAW" >&2
+  exit 2
+}
+ORIGINAL_HOME="$(CDPATH= cd -- "$ORIGINAL_HOME_RAW" && pwd -P)"
 TMP_ROOT_RAW="$(mktemp -d "$ORIGINAL_HOME/.olddonkey-loop-integration.XXXXXX")"
 TMP_ROOT="$(CDPATH= cd -- "$TMP_ROOT_RAW" && pwd -P)"
 chmod 700 "$TMP_ROOT"
@@ -127,6 +134,19 @@ write_lines() { # $1=path, remaining args=lines
   local path="$1"
   shift
   printf '%s\n' "$@" > "$path"
+}
+
+select_toml_python() {
+  local candidate
+  TOML_PYTHON=""
+  for candidate in python3 python3.13 python3.12 python3.11; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+       "$candidate" -c 'import tomllib' 2>/dev/null; then
+      TOML_PYTHON="$candidate"
+      return 0
+    fi
+  done
+  return 1
 }
 
 CODEX_MANIFEST_COUNTS="$TMP_ROOT/codex-manifest-counts.tsv"
@@ -453,7 +473,7 @@ EOF
 write_codex_provenance() { # $1=codex home $2=workspace
   local codex_home="$1" workspace="$2" launcher
   launcher="$(command -v codex)" || return 1
-  python3 - "$launcher" "$CODEX_DISPATCH" "$codex_home/config.toml" \
+  "$TOML_PYTHON" - "$launcher" "$CODEX_DISPATCH" "$codex_home/config.toml" \
     "$workspace/.codex/config.toml" "$CODEX_PROVENANCE" <<'PY'
 import hashlib
 import json
@@ -639,6 +659,53 @@ run_codex_config_schema_probe() { # $1=isolated HOME $2=isolated CODEX_HOME
   return 1
 }
 
+run_codex_fixture_schema_probe() { # $1=HOME $2=user config $3=project config
+  local test_home="$1" user_config="$2" project_config="$3"
+  local source probe_codex_home probe_dir output probe_status
+  local probe_index=0 schema_ok=1
+
+  for source in "$user_config" "$project_config"; do
+    probe_index=$((probe_index + 1))
+    probe_codex_home="$TMP_ROOT/codex-fixture-schema-home-$probe_index"
+    probe_dir="$TMP_ROOT/codex-fixture-schema-non-git-$probe_index"
+    output="$TMP_ROOT/codex-fixture-schema-$probe_index.out"
+    if [[ ! -f "$source" ]] ||
+       ! mkdir -m 700 "$probe_codex_home" "$probe_dir" ||
+       ! cp "$source" "$probe_codex_home/config.toml"; then
+      schema_ok=0
+      continue
+    fi
+    chmod 600 "$probe_codex_home/config.toml"
+    set +e
+    (
+      cd "$probe_dir"
+      HOME="$test_home" CODEX_HOME="$probe_codex_home" codex exec \
+        -s read-only -c 'approval_policy="never"' --strict-config \
+        -c 'sandbox_workspace_write.writable_roots=[]' \
+        -c 'sandbox_workspace_write.network_access=false' \
+        -- 'fixture schema probe only' </dev/null
+    ) > "$output" 2>&1
+    probe_status=$?
+    set -e
+    if [[ $probe_status -eq 0 ]] ||
+       ! LC_ALL=C grep -Fq \
+         'Not inside a trusted directory and --skip-git-repo-check was not specified.' \
+         "$output"; then
+      schema_ok=0
+      diagnose_file "codex fixture schema probe ($source)" "$output"
+    fi
+  done
+
+  if [[ $schema_ok -eq 1 ]]; then
+    record_codex_case config-fixture-schema pass \
+      "both hostile config fixtures reached the pre-API non-Git trust refusal"
+    return 0
+  fi
+  record_codex_case config-fixture-schema deny \
+    "one or more hostile config fixtures failed before the non-Git trust refusal"
+  return 1
+}
+
 run_codex_backend() {
   local test_home="$TMP_ROOT/codex-home"
   local codex_home="$test_home/.codex"
@@ -651,6 +718,7 @@ run_codex_backend() {
   local output="$TMP_ROOT/codex-dispatch.out"
   local read_output="$TMP_ROOT/codex-readonly.out"
   local resume_output="$TMP_ROOT/codex-resume.out"
+  local resume_dispatch="$TMP_ROOT/codex-dispatch-resume-enabled.sh"
   local prompt_file="$TMP_ROOT/codex-prompt.txt"
   local probe="$unit/codex-policy-probe.sh"
   local probe_results="$unit/codex-case-results.tsv"
@@ -667,6 +735,30 @@ run_codex_backend() {
   }
   if ! run_codex_config_schema_probe "$test_home" "$codex_home"; then
     finish_unrecorded_codex_cases "real CLI config-schema probe failed before any API call"
+    return
+  fi
+  if ! select_toml_python; then
+    printf 'error: codex provenance requires a Python interpreter with tomllib; tried: %s\n' \
+      "$TOML_CANDIDATES_TRIED" >&2
+    record_codex_case provenance deny "no tomllib-capable Python interpreter"
+    finish_unrecorded_codex_cases "tomllib-capable Python is unavailable"
+    return
+  fi
+  # The shipped adapter must remain release-disabled until this required matrix
+  # passes, but the matrix must exercise the dormant resume path to make that
+  # decision possible. Match the stub suite: copy the exact source and change
+  # only the source constant for the two frozen real-resume cases.
+  if [[ "$(LC_ALL=C grep -c '^RESUME_RELEASE_ENABLED=0$' "$CODEX_DISPATCH")" != 1 ]] ||
+     ! sed 's/^RESUME_RELEASE_ENABLED=0$/RESUME_RELEASE_ENABLED=1/' \
+       "$CODEX_DISPATCH" > "$resume_dispatch"; then
+    fail "codex dormant resume integration adapter is prepared"
+    finish_unrecorded_codex_cases "dormant resume fixture setup failed"
+    return
+  fi
+  chmod 700 "$resume_dispatch"
+  if ! LC_ALL=C grep -q '^RESUME_RELEASE_ENABLED=1$' "$resume_dispatch"; then
+    fail "codex dormant resume integration adapter enables exactly the release constant"
+    finish_unrecorded_codex_cases "dormant resume fixture setup failed"
     return
   fi
   if [[ -f "$ORIGINAL_HOME/.codex/auth.json" ]]; then
@@ -723,21 +815,22 @@ run_codex_backend() {
 
   mkdir -p "$unit/.codex"
   write_lines "$codex_home/config.toml" \
-    'profile = "unsafe"' \
     'approval_policy = "on-request"' \
     'sandbox_mode = "danger-full-access"' \
     '[sandbox_workspace_write]' \
     'writable_roots = ["'"$extra_root"'"]' \
-    'network_access = true' \
-    '[profiles.unsafe]' \
-    'approval_policy = "on-request"' \
-    'sandbox_mode = "danger-full-access"'
+    'network_access = true'
   write_lines "$unit/.codex/config.toml" \
     'approval_policy = "on-request"' \
     'sandbox_mode = "danger-full-access"' \
     '[sandbox_workspace_write]' \
     'writable_roots = ["'"$extra_root"'"]' \
     'network_access = true'
+  if ! run_codex_fixture_schema_probe "$test_home" \
+      "$codex_home/config.toml" "$unit/.codex/config.toml"; then
+    finish_unrecorded_codex_cases "hostile config fixture schema probe failed before any API call"
+    return
+  fi
 
   python3 - "$port_file" <<'PY' &
 import socket
@@ -868,7 +961,6 @@ EOF
     fi
     record_codex_case config-user-layer pass "fresh dispatch passed against disagreeing user config"
     record_codex_case config-project-layer pass "fresh dispatch passed against disagreeing project config"
-    record_codex_case config-profile-layer pass "active disagreeing config profile still resolved to adapter pins"
   fi
 
   cat > "$TMP_ROOT/codex-readonly-prompt.txt" <<EOF
@@ -891,39 +983,34 @@ EOF
     diagnose_file codex-readonly "$read_output"
   fi
 
-  if LC_ALL=C grep -q '^RESUME_RELEASE_ENABLED=1$' "$CODEX_DISPATCH"; then
-    cat > "$TMP_ROOT/codex-resume-prompt.txt" <<EOF
+  cat > "$TMP_ROOT/codex-resume-prompt.txt" <<EOF
 Use the shell tool once to run exactly this command and no other command. Then report both CODEX_CASE lines verbatim:
 
 printf resume >> $q_tracked; edit=\$?; printf X >> $q_ref; protected=\$?; [ \$edit -eq 0 ] && printf 'CODEX_CASE resume-repo-write allow\n' || printf 'CODEX_CASE resume-repo-write deny\n'; [ \$protected -ne 0 ] && printf 'CODEX_CASE resume-git-write deny\n' || printf 'CODEX_CASE resume-git-write allow\n'
 EOF
-    set +e
-    (
-      cd "$unit"
-      HOME="$test_home" CODEX_HOME="$codex_home" "$CODEX_DISPATCH" \
-        --resume --prompt-file "$TMP_ROOT/codex-resume-prompt.txt"
-    ) > "$resume_output" 2>&1
-    resume_status=$?
-    set -e
-    if [[ $resume_status -eq 0 ]]; then
-      if LC_ALL=C grep -q 'CODEX_CASE resume-repo-write allow' "$resume_output"; then
-        record_codex_case resume-repo-write allow "resumed repository edit succeeded"
-      else
-        record_codex_case resume-repo-write deny "resumed repository edit failed"
-      fi
-      if LC_ALL=C grep -q 'CODEX_CASE resume-git-write deny' "$resume_output"; then
-        record_codex_case resume-git-write deny "resumed Git write denied"
-      else
-        record_codex_case resume-git-write allow "resumed Git write was not denied"
-      fi
+  set +e
+  (
+    cd "$unit"
+    HOME="$test_home" CODEX_HOME="$codex_home" "$resume_dispatch" \
+      --resume --prompt-file "$TMP_ROOT/codex-resume-prompt.txt"
+  ) > "$resume_output" 2>&1
+  resume_status=$?
+  set -e
+  if [[ $resume_status -eq 0 ]]; then
+    if LC_ALL=C grep -q 'CODEX_CASE resume-repo-write allow' "$resume_output"; then
+      record_codex_case resume-repo-write allow "resumed repository edit succeeded"
     else
-      record_codex_case resume-repo-write skip "resume dispatch failed before probe"
-      record_codex_case resume-git-write skip "resume dispatch failed before probe"
-      diagnose_file codex-resume "$resume_output"
+      record_codex_case resume-repo-write deny "resumed repository edit failed"
+    fi
+    if LC_ALL=C grep -q 'CODEX_CASE resume-git-write deny' "$resume_output"; then
+      record_codex_case resume-git-write deny "resumed Git write denied"
+    else
+      record_codex_case resume-git-write allow "resumed Git write was not denied"
     fi
   else
-    record_codex_case resume-repo-write skip "adapter resume is release-disabled pending this required matrix"
-    record_codex_case resume-git-write skip "adapter resume is release-disabled pending this required matrix"
+    record_codex_case resume-repo-write skip "resume dispatch failed before probe"
+    record_codex_case resume-git-write skip "resume dispatch failed before probe"
+    diagnose_file codex-resume "$resume_output"
   fi
 
   record_codex_managed_conditional
