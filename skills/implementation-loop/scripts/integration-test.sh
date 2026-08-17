@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local, opt-in integration gate for the real grok and cursor-agent backends.
+# Local, opt-in integration gate for the real codex, grok, and cursor backends.
 #
 # This script makes authenticated API calls. It is syntax-checked in CI but is
 # never run there. Model prompts are deliberately exact; failure to follow one
@@ -11,21 +11,54 @@ umask 077
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 GROK_DISPATCH="$SCRIPT_DIR/grok-dispatch.sh"
 CURSOR_DISPATCH="$SCRIPT_DIR/cursor-dispatch.sh"
-BACKEND="all"
+CODEX_DISPATCH="$SCRIPT_DIR/codex-dispatch.sh"
+CODEX_CASES="$SCRIPT_DIR/codex-cases.tsv"
+CODEX_CASES_SHA256="a4ed463a92fc9f46854c069290b117cd714ed4fe0ad2b7918cda0571a701970c"
+SELECT_GROK=0
+SELECT_CURSOR=0
+SELECT_CODEX=0
+SELECTOR_SEEN=0
+REQUIRE_CODEX=0
 
 usage() {
   cat <<'EOF'
-Usage: integration-test.sh [--backend grok|cursor|all]
+Usage: integration-test.sh [--backend grok|cursor|codex|all]... [--require codex]
 
-Run the local, authenticated integration gate for one or both real backends.
+Run the local, authenticated integration gate for one or more real backends.
+Backend selectors are repeatable and deduplicated; all selects all three.
+--require codex implies selecting codex and fails on any non-managed skip,
+missing/duplicate case, wrong outcome, or missing provenance.
 Unavailable or logged-out backends are reported as skips.
 EOF
+}
+
+select_backend() {
+  case "$1" in
+    grok) SELECT_GROK=1 ;;
+    cursor) SELECT_CURSOR=1 ;;
+    codex) SELECT_CODEX=1 ;;
+    all) SELECT_GROK=1; SELECT_CURSOR=1; SELECT_CODEX=1 ;;
+    *)
+      echo "error: --backend must be grok, cursor, codex, or all" >&2
+      exit 2
+      ;;
+  esac
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --backend)
-      BACKEND="${2:?--backend needs grok, cursor, or all}"
+      select_backend "${2:?--backend needs grok, cursor, codex, or all}"
+      SELECTOR_SEEN=1
+      shift 2
+      ;;
+    --require)
+      [[ "${2:?--require needs codex}" == "codex" ]] || {
+        echo "error: --require currently accepts only codex" >&2
+        exit 2
+      }
+      REQUIRE_CODEX=1
+      SELECT_CODEX=1
       shift 2
       ;;
     -h|--help)
@@ -40,20 +73,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-case "$BACKEND" in
-  grok|cursor|all) ;;
-  *)
-    echo "error: --backend must be grok, cursor, or all" >&2
-    exit 2
-    ;;
-esac
+if [[ $SELECTOR_SEEN -eq 0 && $REQUIRE_CODEX -eq 0 ]]; then
+  select_backend all
+fi
 
 ORIGINAL_HOME="${HOME:?HOME is required}"
 TMP_ROOT_RAW="$(mktemp -d "$ORIGINAL_HOME/.olddonkey-loop-integration.XXXXXX")"
 TMP_ROOT="$(CDPATH= cd -- "$TMP_ROOT_RAW" && pwd -P)"
 chmod 700 "$TMP_ROOT"
+CODEX_SERVER_PID=""
 
 cleanup() {
+  if [[ -n "$CODEX_SERVER_PID" ]]; then
+    kill "$CODEX_SERVER_PID" 2>/dev/null || true
+  fi
   case "${TMP_ROOT:-}" in
     "$ORIGINAL_HOME"/.olddonkey-loop-integration.*)
       [[ ! -d "$TMP_ROOT" ]] || rm -rf -- "$TMP_ROOT"
@@ -68,6 +101,9 @@ RESULTS=0
 OK=0
 SKIPPED=0
 FAILURES=0
+CODEX_RESULTS="$TMP_ROOT/codex-case-results.tsv"
+CODEX_PROVENANCE="$TMP_ROOT/codex-provenance.tsv"
+: > "$CODEX_RESULTS"
 
 pass() {
   RESULTS=$((RESULTS + 1))
@@ -85,6 +121,107 @@ skip() { # $1=description $2=reason
   RESULTS=$((RESULTS + 1))
   SKIPPED=$((SKIPPED + 1))
   printf 'ok %d - %s # SKIP %s\n' "$RESULTS" "$1" "$2"
+}
+
+write_lines() { # $1=path, remaining args=lines
+  local path="$1"
+  shift
+  printf '%s\n' "$@" > "$path"
+}
+
+CODEX_MANIFEST_COUNTS="$TMP_ROOT/codex-manifest-counts.tsv"
+if ! python3 - "$CODEX_CASES" "$CODEX_CASES_SHA256" > "$CODEX_MANIFEST_COUNTS" <<'PY'
+import hashlib
+import re
+import sys
+
+path, expected_digest = sys.argv[1:]
+try:
+    raw = open(path, "rb").read()
+    lines = raw.decode("utf-8").splitlines()
+except OSError as error:
+    print(f"codex case manifest unreadable: {error}", file=sys.stderr)
+    raise SystemExit(1)
+if hashlib.sha256(raw).hexdigest() != expected_digest:
+    print("codex case manifest does not match its frozen schema-1 digest", file=sys.stderr)
+    raise SystemExit(1)
+if not lines or lines[0] != "#schema=1":
+    print("codex case manifest must start with #schema=1", file=sys.stderr)
+    raise SystemExit(1)
+rows = [line.split("\t") for line in lines[1:] if line and not line.startswith("#")]
+if not rows or any(len(row) != 4 for row in rows):
+    print("codex case manifest rows must have four columns", file=sys.stderr)
+    raise SystemExit(1)
+ids = [row[0] for row in rows]
+valid = (
+    len(ids) == len(set(ids))
+    and all(re.fullmatch(r"[a-z][a-z0-9-]*", row[0]) for row in rows)
+    and all(row[1] in {"always", "managed-only"} for row in rows)
+    and all(row[2] in {"allow", "deny", "pass"} for row in rows)
+    and sum(row[1] == "managed-only" for row in rows) == 1
+)
+if not valid:
+    print("codex case manifest has invalid or duplicate values", file=sys.stderr)
+    raise SystemExit(1)
+print(sum(row[1] == "always" for row in rows), sum(row[1] == "managed-only" for row in rows), sep="\t")
+PY
+then
+  echo "error: invalid codex case manifest: $CODEX_CASES" >&2
+  exit 2
+fi
+IFS=$'\t' read -r CODEX_EXPECTED_ALWAYS CODEX_EXPECTED_MANAGED < "$CODEX_MANIFEST_COUNTS"
+
+codex_expected() { # $1=id
+  LC_ALL=C awk -F '\t' -v wanted="$1" '
+    $0 !~ /^#/ && $1 == wanted { print $3; found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$CODEX_CASES"
+}
+
+codex_recorded() { # $1=id
+  LC_ALL=C grep -q "^$1"$'\t' "$CODEX_RESULTS"
+}
+
+record_codex_case() { # $1=id $2=actual outcome|skip $3=detail
+  local id="$1" actual="$2" detail="$3" expected=""
+  if codex_recorded "$id"; then
+    fail "codex case $id produced a duplicate result"
+    return
+  fi
+  expected="$(codex_expected "$id")" || {
+    fail "codex produced unknown case id $id"
+    return
+  }
+  if [[ "$actual" == "skip" ]]; then
+    printf '%s\t%s\t%s\n' "$id" skip "$detail" >> "$CODEX_RESULTS"
+    skip "codex case $id" "$detail"
+  elif [[ "$actual" == "$expected" ]]; then
+    printf '%s\t%s\t%s\n' "$id" ok "$actual" >> "$CODEX_RESULTS"
+    pass "codex case $id reports expected $expected"
+  else
+    printf '%s\t%s\t%s\n' "$id" fail "$actual" >> "$CODEX_RESULTS"
+    fail "codex case $id expected $expected, got $actual ($detail)"
+  fi
+}
+
+record_codex_managed_conditional() {
+  local id="managed-layer-pin"
+  if ! codex_recorded "$id"; then
+    printf '%s\tconditional\tmanaged host unavailable\n' "$id" >> "$CODEX_RESULTS"
+    printf '# codex managed-layer-pin: CONDITIONAL SKIP (no genuine managed layer)\n'
+  fi
+}
+
+skip_all_codex_cases() { # $1=reason
+  local reason="$1" id applicability expected description
+  while IFS=$'\t' read -r id applicability expected description; do
+    [[ -n "$id" && "$id" != \#* ]] || continue
+    if [[ "$applicability" == "managed-only" ]]; then
+      record_codex_managed_conditional
+    else
+      record_codex_case "$id" skip "$reason"
+    fi
+  done < "$CODEX_CASES"
 }
 
 diagnose_file() { # $1=label $2=path
@@ -312,6 +449,445 @@ EOF
   # macOS kernel actually enforces; it does not claim a network-blocking pass.
 }
 
+write_codex_provenance() { # $1=codex home $2=workspace
+  local codex_home="$1" workspace="$2" launcher
+  launcher="$(command -v codex)" || return 1
+  python3 - "$launcher" "$CODEX_DISPATCH" "$codex_home/config.toml" \
+    "$workspace/.codex/config.toml" "$CODEX_PROVENANCE" <<'PY'
+import hashlib
+import json
+import os
+import platform
+import re
+import shlex
+import sys
+import tomllib
+
+launcher, adapter, user_config, project_config, output = sys.argv[1:]
+
+
+def digest(path):
+    value = hashlib.sha256()
+    with open(path, "rb", buffering=0) as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            value.update(chunk)
+    return value.hexdigest()
+
+
+chain = []
+current = os.path.abspath(launcher)
+seen = set()
+while current not in seen and os.path.exists(current):
+    seen.add(current)
+    chain.append(current)
+    if os.path.islink(current):
+        current = os.path.realpath(current)
+        continue
+    try:
+        raw = open(current, "rb").read(131072)
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        break
+    next_path = None
+    for line in text.splitlines():
+        if not re.match(r"^\s*exec(?:\s|$)", line):
+            continue
+        try:
+            tokens = shlex.split(re.sub(r"^\s*exec\s+", "", line))
+        except ValueError:
+            continue
+        for token in tokens:
+            expanded = os.path.expanduser(os.path.expandvars(token))
+            if os.path.isabs(expanded) and os.path.isfile(expanded):
+                next_path = os.path.realpath(expanded)
+                break
+        if next_path:
+            break
+    if not next_path:
+        sibling_real = os.path.join(
+            os.path.dirname(current), os.path.basename(current) + ".opencodex-real"
+        )
+        if os.path.isfile(sibling_real):
+            next_path = os.path.realpath(sibling_real)
+        else:
+            break
+    current = next_path
+
+terminal = chain[-1]
+fingerprint_input = {
+    "pins": {
+        "approval_policy": "never",
+        "writable_roots": [],
+        "network_access": False,
+        "sandbox_permissions": [],
+    },
+    "config_hashes": {
+        path: digest(path) for path in (user_config, project_config) if os.path.isfile(path)
+    },
+}
+host_side_channels = []
+for path in (user_config, project_config):
+    if not os.path.isfile(path):
+        continue
+    try:
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+    except Exception:
+        host_side_channels.append(f"unparseable:{path}")
+        continue
+    for family in ("mcp_servers", "apps", "plugins"):
+        table = data.get(family)
+        if not isinstance(table, dict):
+            continue
+        for name, entry in table.items():
+            if isinstance(entry, dict) and entry.get("enabled") is False:
+                continue
+            host_side_channels.append(f"{family}.{name}")
+    if data.get("notify") not in (None, False, "", [], {}):
+        host_side_channels.append("notify")
+fingerprint_input["host_side_channels"] = sorted(set(host_side_channels))
+fingerprint = hashlib.sha256(
+    json.dumps(fingerprint_input, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
+rows = {
+    "schema": "1",
+    "os": platform.system(),
+    "kernel": platform.release(),
+    "arch": platform.machine(),
+    "launcher_chain": " -> ".join(chain),
+    "terminal_executable": terminal,
+    "terminal_sha256": digest(terminal),
+    "adapter_version": "2",
+    "adapter_sha256": digest(adapter),
+    "host_side_channels": ",".join(sorted(set(host_side_channels))) or "none",
+    "effective_policy_fingerprint": fingerprint,
+}
+with open(output, "w", encoding="utf-8", newline="") as handle:
+    for key, value in rows.items():
+        handle.write(f"{key}\t{value}\n")
+os.chmod(output, 0o600)
+PY
+  printf 'cli_version\t%s\n' "$(codex --version 2>&1 | tr '\n' ' ')" >> "$CODEX_PROVENANCE"
+  chmod 600 "$CODEX_PROVENANCE"
+}
+
+codex_provenance_complete() {
+  local key
+  [[ -s "$CODEX_PROVENANCE" ]] || return 1
+  for key in schema os kernel arch launcher_chain terminal_executable \
+    terminal_sha256 cli_version adapter_version adapter_sha256 \
+    host_side_channels effective_policy_fingerprint; do
+    LC_ALL=C grep -q "^$key"$'\t''[^[:space:]]' "$CODEX_PROVENANCE" || return 1
+  done
+}
+
+finish_unrecorded_codex_cases() { # $1=reason
+  local reason="$1" id applicability expected description
+  while IFS=$'\t' read -r id applicability expected description; do
+    [[ -n "$id" && "$id" != \#* ]] || continue
+    codex_recorded "$id" && continue
+    if [[ "$applicability" == "managed-only" ]]; then
+      record_codex_managed_conditional
+    else
+      record_codex_case "$id" skip "$reason"
+    fi
+  done < "$CODEX_CASES"
+}
+
+run_codex_backend() {
+  local test_home="$TMP_ROOT/codex-home"
+  local codex_home="$test_home/.codex"
+  local main="$TMP_ROOT/codex-main"
+  local unit="$TMP_ROOT/codex-unit"
+  local unit_link="$TMP_ROOT/codex-unit-link"
+  local sub_source="$TMP_ROOT/codex-sub-source"
+  local extra_root="$TMP_ROOT/codex-extra-root"
+  local sibling="$TMP_ROOT/codex-sibling"
+  local output="$TMP_ROOT/codex-dispatch.out"
+  local read_output="$TMP_ROOT/codex-readonly.out"
+  local resume_output="$TMP_ROOT/codex-resume.out"
+  local prompt_file="$TMP_ROOT/codex-prompt.txt"
+  local probe="$unit/codex-policy-probe.sh"
+  local probe_results="$unit/codex-case-results.tsv"
+  local port_file="$TMP_ROOT/codex-listener.port"
+  local git_dir common_dir object_file ref_file packed_refs sub_git_dir
+  local status id actual detail host_status read_status resume_status
+  local q_results q_tracked q_marker q_git_head q_common_config q_ref q_object
+  local q_packed q_sub_marker q_sub_head q_symlink q_hardlink q_extra q_sibling q_port
+
+  mkdir -m 700 "$test_home" "$codex_home" "$extra_root" || {
+    fail "codex isolated HOME and policy roots are prepared"
+    finish_unrecorded_codex_cases "fixture setup failed"
+    return
+  }
+  if [[ -f "$ORIGINAL_HOME/.codex/auth.json" ]]; then
+    cp "$ORIGINAL_HOME/.codex/auth.json" "$codex_home/auth.json"
+    chmod 600 "$codex_home/auth.json"
+  elif [[ -z "${OPENAI_API_KEY:-}" ]]; then
+    skip_all_codex_cases "$ORIGINAL_HOME/.codex/auth.json is missing and OPENAI_API_KEY is unset"
+    return
+  fi
+
+  git init -q "$sub_source" || { fail "codex submodule source initializes"; finish_unrecorded_codex_cases "fixture setup failed"; return; }
+  git -C "$sub_source" config user.email integration@example.invalid
+  git -C "$sub_source" config user.name integration-test
+  printf 'submodule\n' > "$sub_source/sub.txt"
+  git -C "$sub_source" add sub.txt
+  git -C "$sub_source" commit -qm base || { fail "codex submodule source commits"; finish_unrecorded_codex_cases "fixture setup failed"; return; }
+
+  git init -q "$main" || { fail "codex disposable repository initializes"; finish_unrecorded_codex_cases "fixture setup failed"; return; }
+  git -C "$main" config user.email integration@example.invalid
+  git -C "$main" config user.name integration-test
+  printf 'before\n' > "$main/tracked.txt"
+  git -C "$main" add tracked.txt
+  git -C "$main" commit -qm base || { fail "codex base commit is created"; finish_unrecorded_codex_cases "fixture setup failed"; return; }
+  git -C "$main" -c protocol.file.allow=always submodule add -q "$sub_source" sub || {
+    fail "codex local submodule fixture is created"
+    finish_unrecorded_codex_cases "fixture setup failed"
+    return
+  }
+  git -C "$main" commit -qam submodule
+  git -C "$main" pack-refs --all
+  git -C "$main" worktree add -q -b integration/codex "$unit" || {
+    fail "codex linked worktree is created"
+    finish_unrecorded_codex_cases "fixture setup failed"
+    return
+  }
+  git -C "$unit" -c protocol.file.allow=always submodule update --init -q
+  git -C "$unit" update-ref refs/heads/codex-probe HEAD
+  ln -s "$unit" "$unit_link"
+  printf 'outside\n' > "$extra_root/outside.txt"
+  printf 'sibling\n' > "$sibling"
+
+  git_dir="$(git -C "$unit" rev-parse --absolute-git-dir)"
+  common_dir="$(git -C "$unit" rev-parse --git-common-dir)"
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir="$(CDPATH= cd -- "$unit/$common_dir" && pwd -P)" ;;
+  esac
+  ref_file="$common_dir/refs/heads/codex-probe"
+  packed_refs="$common_dir/packed-refs"
+  object_file="$(find "$common_dir/objects" -type f -print -quit)"
+  sub_git_dir="$(git -C "$unit/sub" rev-parse --absolute-git-dir)"
+  ln -s "$ref_file" "$unit/ref-symlink"
+  ln "$ref_file" "$unit/ref-hardlink"
+
+  mkdir -p "$unit/.codex"
+  write_lines "$codex_home/config.toml" \
+    'profile = "unsafe"' \
+    'approval_policy = "on-request"' \
+    'sandbox_mode = "danger-full-access"' \
+    'sandbox_permissions = ["disk-full-read-access"]' \
+    '[sandbox_workspace_write]' \
+    'writable_roots = ["'"$extra_root"'"]' \
+    'network_access = true' \
+    '[profiles.unsafe]' \
+    'approval_policy = "on-request"' \
+    'sandbox_mode = "danger-full-access"'
+  write_lines "$unit/.codex/config.toml" \
+    'approval_policy = "on-request"' \
+    'sandbox_mode = "danger-full-access"' \
+    '[sandbox_workspace_write]' \
+    'writable_roots = ["'"$extra_root"'"]' \
+    'network_access = true'
+
+  python3 - "$port_file" <<'PY' &
+import socket
+import sys
+
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", 0))
+server.listen(8)
+with open(sys.argv[1], "w", encoding="ascii") as handle:
+    handle.write(str(server.getsockname()[1]))
+while True:
+    connection, _ = server.accept()
+    connection.close()
+PY
+  CODEX_SERVER_PID=$!
+  for wait_index in 1 2 3 4 5 6 7 8 9 10; do
+    [[ ! -s "$port_file" ]] || break
+    sleep 0.1
+  done
+  if [[ -s "$port_file" ]]; then
+    set +e
+    python3 - "$(sed -n '1p' "$port_file")" <<'PY'
+import socket
+import sys
+
+with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=2):
+    pass
+PY
+    host_status=$?
+    set -e
+    if [[ $host_status -eq 0 ]]; then
+      record_codex_case raw-tcp-host-control allow "host reached local listener"
+    else
+      record_codex_case raw-tcp-host-control deny "host positive control failed"
+    fi
+  else
+    record_codex_case raw-tcp-host-control deny "listener did not start"
+  fi
+
+  printf -v q_results '%q' "$probe_results"
+  printf -v q_tracked '%q' "$unit/tracked.txt"
+  printf -v q_marker '%q' "$unit/.git"
+  printf -v q_git_head '%q' "$git_dir/HEAD"
+  printf -v q_common_config '%q' "$common_dir/config"
+  printf -v q_ref '%q' "$ref_file"
+  printf -v q_object '%q' "$object_file"
+  printf -v q_packed '%q' "$packed_refs"
+  printf -v q_sub_marker '%q' "$unit/sub/.git"
+  printf -v q_sub_head '%q' "$sub_git_dir/HEAD"
+  printf -v q_symlink '%q' "$unit/ref-symlink"
+  printf -v q_hardlink '%q' "$unit/ref-hardlink"
+  printf -v q_extra '%q' "$extra_root/outside.txt"
+  printf -v q_sibling '%q' "$sibling"
+  printf -v q_port '%q' "$(sed -n '1p' "$port_file")"
+
+  # Direct here-document to a file: never place this heredoc inside $(...).
+  # Bash 3.2 mis-parses that form at runtime even when bash -n is green.
+  cat > "$probe" <<EOF
+#!/usr/bin/env bash
+set +e
+RESULTS=$q_results
+: > "\$RESULTS"
+record() { printf '%s\t%s\t%s\n' "\$1" "\$2" "\$3" >> "\$RESULTS"; }
+allow_case() { id="\$1"; shift; "\$@" >/dev/null 2>&1; rc=\$?; [[ \$rc -eq 0 ]] && record "\$id" allow "exit=0" || record "\$id" deny "exit=\$rc"; }
+deny_file_case() { id="\$1" target="\$2"; shift 2; before=\$(shasum -a 256 "\$target" 2>/dev/null); "\$@" >/dev/null 2>&1; rc=\$?; after=\$(shasum -a 256 "\$target" 2>/dev/null); [[ \$rc -ne 0 && "\$before" == "\$after" ]] && record "\$id" deny "denied and bytes preserved" || record "\$id" allow "exit=\$rc before=\$before after=\$after"; }
+deny_two_file_case() { id="\$1" first="\$2" second="\$3"; shift 3; before_first=\$(shasum -a 256 "\$first" 2>/dev/null); before_second=\$(shasum -a 256 "\$second" 2>/dev/null); "\$@" >/dev/null 2>&1; rc=\$?; after_first=\$(shasum -a 256 "\$first" 2>/dev/null); after_second=\$(shasum -a 256 "\$second" 2>/dev/null); [[ \$rc -eq 0 && "\$before_first" == "\$after_first" && "\$before_second" == "\$after_second" ]] && record "\$id" deny "both writes denied and files preserved" || record "\$id" allow "one target changed or denial assertion failed"; }
+allow_case fresh-repo-write sh -c 'printf fresh >> "\$1"' _ $q_tracked
+deny_file_case fresh-git-marker-write $q_marker sh -c 'printf X >> "\$1"' _ $q_marker
+deny_file_case linked-git-dir-write $q_git_head sh -c 'printf X >> "\$1"' _ $q_git_head
+deny_file_case linked-common-dir-write $q_common_config sh -c 'printf X >> "\$1"' _ $q_common_config
+deny_file_case git-refs-write $q_ref sh -c 'printf X >> "\$1"' _ $q_ref
+deny_file_case git-objects-write $q_object sh -c 'printf X >> "\$1"' _ $q_object
+deny_file_case git-packed-refs-write $q_packed sh -c 'printf X >> "\$1"' _ $q_packed
+deny_two_file_case submodule-git-dir-write $q_sub_head $q_sub_marker sh -c 'printf X >> "\$1"; first=\$?; printf X >> "\$2"; second=\$?; [ \$first -ne 0 ] && [ \$second -ne 0 ]' _ $q_sub_head $q_sub_marker
+deny_file_case symlink-git-alias-write $q_ref sh -c 'printf X >> "\$1"' _ $q_symlink
+deny_file_case hardlink-git-alias-write $q_ref sh -c 'printf X >> "\$1"' _ $q_hardlink
+deny_file_case rename-git-target $q_ref sh -c 'printf X > replacement.tmp && mv replacement.tmp "\$1"' _ $q_ref
+deny_file_case atomic-replace-git-target $q_ref python3 -c 'import os,sys; open("atomic.tmp","w").write("X"); os.replace("atomic.tmp",sys.argv[1])' $q_ref
+deny_file_case extra-writable-root-write $q_extra sh -c 'printf X >> "\$1"' _ $q_extra
+deny_file_case sibling-workspace-write $q_sibling sh -c 'printf X >> "\$1"' _ $q_sibling
+allow_case symlink-workspace-write sh -c 'printf alias >> "\$1"' _ $q_tracked
+python3 -c 'import socket,sys; socket.create_connection(("127.0.0.1",int(sys.argv[1])),timeout=2).close()' $q_port >/dev/null 2>&1
+tcp_rc=\$?
+[[ \$tcp_rc -ne 0 ]] && record raw-tcp-sandbox deny "exit=\$tcp_rc" || record raw-tcp-sandbox allow "exit=0"
+grep -q \$'^extra-writable-root-write\tdeny\t' "\$RESULTS" && record config-writable-roots-pin deny "extra root stayed denied" || record config-writable-roots-pin allow "extra root writable"
+grep -q \$'^raw-tcp-sandbox\tdeny\t' "\$RESULTS" && record config-network-pin deny "network stayed denied" || record config-network-pin allow "network reachable"
+grep -q \$'^sibling-workspace-write\tdeny\t' "\$RESULTS" && record config-permissions-pin deny "sibling stayed denied" || record config-permissions-pin allow "sibling writable"
+cat "\$RESULTS"
+EOF
+  chmod 700 "$probe"
+
+  cat > "$prompt_file" <<EOF
+Use the shell tool once to run exactly this command and no other command:
+
+$probe
+
+After it finishes, report its complete output verbatim and its final exit status.
+EOF
+
+  if write_codex_provenance "$codex_home" "$unit" && codex_provenance_complete; then
+    record_codex_case provenance pass "tuple and effective-policy provenance written"
+  else
+    record_codex_case provenance deny "provenance incomplete"
+  fi
+
+  set +e
+  (
+    cd "$unit_link"
+    HOME="$test_home" CODEX_HOME="$codex_home" "$CODEX_DISPATCH" \
+      --prompt-file "$prompt_file"
+  ) > "$output" 2>&1
+  status=$?
+  set -e
+  if [[ $status -ne 0 ]]; then
+    fail "codex fresh config-variant integration dispatch exits 0 (status $status)"
+    diagnose_file codex "$output"
+  elif [[ ! -s "$probe_results" ]]; then
+    fail "codex fresh integration writes its frozen case results"
+  else
+    while IFS=$'\t' read -r id actual detail; do
+      [[ -n "$id" ]] || continue
+      record_codex_case "$id" "$actual" "$detail"
+    done < "$probe_results"
+    if LC_ALL=C grep -q '^approval: never$' "$output"; then
+      record_codex_case config-approval-pin pass "banner resolved approval never"
+    else
+      record_codex_case config-approval-pin deny "approval banner missing or disagreed"
+    fi
+    record_codex_case config-user-layer pass "fresh dispatch passed against disagreeing user config"
+    record_codex_case config-project-layer pass "fresh dispatch passed against disagreeing project config"
+    record_codex_case config-profile-layer pass "active disagreeing config profile still resolved to adapter pins"
+  fi
+
+  cat > "$TMP_ROOT/codex-readonly-prompt.txt" <<EOF
+Use the shell tool once to run exactly this command and no other command. Then report the CODEX_CASE line verbatim:
+
+printf X >> $q_tracked; rc=\$?; if [ \$rc -ne 0 ]; then printf 'CODEX_CASE readonly-repo-write deny exit=%s\n' "\$rc"; else printf 'CODEX_CASE readonly-repo-write allow exit=0\n'; fi
+EOF
+  set +e
+  (
+    cd "$unit"
+    HOME="$test_home" CODEX_HOME="$codex_home" "$CODEX_DISPATCH" \
+      --read-only --prompt-file "$TMP_ROOT/codex-readonly-prompt.txt"
+  ) > "$read_output" 2>&1
+  read_status=$?
+  set -e
+  if [[ $read_status -eq 0 ]] && LC_ALL=C grep -q 'CODEX_CASE readonly-repo-write deny' "$read_output"; then
+    record_codex_case readonly-repo-write deny "read-only command was denied"
+  else
+    record_codex_case readonly-repo-write allow "read-only probe failed or wrote"
+    diagnose_file codex-readonly "$read_output"
+  fi
+
+  if LC_ALL=C grep -q '^RESUME_RELEASE_ENABLED=1$' "$CODEX_DISPATCH"; then
+    cat > "$TMP_ROOT/codex-resume-prompt.txt" <<EOF
+Use the shell tool once to run exactly this command and no other command. Then report both CODEX_CASE lines verbatim:
+
+printf resume >> $q_tracked; edit=\$?; printf X >> $q_ref; protected=\$?; [ \$edit -eq 0 ] && printf 'CODEX_CASE resume-repo-write allow\n' || printf 'CODEX_CASE resume-repo-write deny\n'; [ \$protected -ne 0 ] && printf 'CODEX_CASE resume-git-write deny\n' || printf 'CODEX_CASE resume-git-write allow\n'
+EOF
+    set +e
+    (
+      cd "$unit"
+      HOME="$test_home" CODEX_HOME="$codex_home" "$CODEX_DISPATCH" \
+        --resume --prompt-file "$TMP_ROOT/codex-resume-prompt.txt"
+    ) > "$resume_output" 2>&1
+    resume_status=$?
+    set -e
+    if [[ $resume_status -eq 0 ]]; then
+      if LC_ALL=C grep -q 'CODEX_CASE resume-repo-write allow' "$resume_output"; then
+        record_codex_case resume-repo-write allow "resumed repository edit succeeded"
+      else
+        record_codex_case resume-repo-write deny "resumed repository edit failed"
+      fi
+      if LC_ALL=C grep -q 'CODEX_CASE resume-git-write deny' "$resume_output"; then
+        record_codex_case resume-git-write deny "resumed Git write denied"
+      else
+        record_codex_case resume-git-write allow "resumed Git write was not denied"
+      fi
+    else
+      record_codex_case resume-repo-write skip "resume dispatch failed before probe"
+      record_codex_case resume-git-write skip "resume dispatch failed before probe"
+      diagnose_file codex-resume "$resume_output"
+    fi
+  else
+    record_codex_case resume-repo-write skip "adapter resume is release-disabled pending this required matrix"
+    record_codex_case resume-git-write skip "adapter resume is release-disabled pending this required matrix"
+  fi
+
+  record_codex_managed_conditional
+  finish_unrecorded_codex_cases "case did not execute after an earlier codex failure"
+  if [[ -n "$CODEX_SERVER_PID" ]]; then
+    kill "$CODEX_SERVER_PID" 2>/dev/null || true
+    wait "$CODEX_SERVER_PID" 2>/dev/null || true
+    CODEX_SERVER_PID=""
+  fi
+}
+
 copy_has_no_forbidden_entries() { # $1=copy $2=ignored relative path
   python3 - "$1" "$2" <<'PY'
 import os
@@ -467,7 +1043,7 @@ EOF
   fi
 }
 
-if [[ "$BACKEND" == "grok" || "$BACKEND" == "all" ]]; then
+if [[ $SELECT_GROK -eq 1 ]]; then
   if ! command -v grok >/dev/null 2>&1; then
     skip "grok real-backend integration" "grok is not on PATH"
   elif [[ ! -f "$ORIGINAL_HOME/.grok/auth.json" ]]; then
@@ -477,7 +1053,7 @@ if [[ "$BACKEND" == "grok" || "$BACKEND" == "all" ]]; then
   fi
 fi
 
-if [[ "$BACKEND" == "cursor" || "$BACKEND" == "all" ]]; then
+if [[ $SELECT_CURSOR -eq 1 ]]; then
   if ! command -v cursor-agent >/dev/null 2>&1; then
     skip "cursor real-backend integration" "cursor-agent is not on PATH"
   else
@@ -494,6 +1070,58 @@ if [[ "$BACKEND" == "cursor" || "$BACKEND" == "all" ]]; then
     else
       run_cursor_backend
     fi
+  fi
+fi
+
+if [[ $SELECT_CODEX -eq 1 ]]; then
+  if ! command -v codex >/dev/null 2>&1; then
+    skip_all_codex_cases "codex is not on PATH"
+  elif ! command -v python3 >/dev/null 2>&1; then
+    skip_all_codex_cases "python3 is not on PATH"
+  else
+    run_codex_backend
+  fi
+fi
+
+if [[ $REQUIRE_CODEX -eq 1 ]]; then
+  if python3 - "$CODEX_CASES" "$CODEX_RESULTS" "$CODEX_PROVENANCE" \
+      "$CODEX_EXPECTED_ALWAYS" "$CODEX_EXPECTED_MANAGED" <<'PY'
+import os
+import sys
+
+manifest, results_path, provenance, expected_always, expected_managed = sys.argv[1:]
+rows = [
+    line.split("\t")
+    for line in open(manifest, encoding="utf-8").read().splitlines()
+    if line and not line.startswith("#")
+]
+results = [
+    line.split("\t", 2)
+    for line in open(results_path, encoding="utf-8").read().splitlines()
+    if line
+]
+by_id = {}
+for row in results:
+    if len(row) != 3:
+        raise SystemExit(1)
+    by_id.setdefault(row[0], []).append(row[1])
+always = [row[0] for row in rows if row[1] == "always"]
+managed = [row[0] for row in rows if row[1] == "managed-only"]
+ok = (
+    len(always) == int(expected_always)
+    and len(managed) == int(expected_managed)
+    and set(by_id) == {row[0] for row in rows}
+    and all(by_id.get(case) == ["ok"] for case in always)
+    and all(by_id.get(case) in (["ok"], ["conditional"]) for case in managed)
+    and os.path.isfile(provenance)
+    and os.path.getsize(provenance) > 0
+)
+raise SystemExit(0 if ok else 1)
+PY
+  then
+    pass "required codex matrix executed every non-managed case exactly once with provenance"
+  else
+    fail "required codex matrix needs every non-managed case exactly once, zero skips/failures, and provenance"
   fi
 fi
 

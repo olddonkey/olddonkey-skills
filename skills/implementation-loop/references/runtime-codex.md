@@ -1,70 +1,101 @@
 # Codex runtime reference
 
-Detail companion to the implementation-loop skill: runtime resolution, the companion contract, and job monitoring. The workflow itself lives in SKILL.md; this file is the part you consult at dispatch time.
+Dispatch Codex through `scripts/codex-dispatch.sh`. The adapter uses plain
+`codex exec`, runs strictly in the foreground, records each turn under
+`~/.config/olddonkey-loop/codex/`, and emits only the final implementer message
+on stdout. Its summary, warnings, CLI transcript, and policy-banner checks go to
+stderr.
 
-### Choosing model and effort
+### Choosing model, effort, and tier
 
-**These are the user's call, not yours to silently assume.** At each loop kickoff — each time this skill is invoked to start or resume working through units — ask **one compact question** covering thinking level (effort) and speed (service tier), with the user's current config values presented as the inherit option (read them from `~/.codex/config.toml` first so the question shows real values, e.g. "inherit: gpt-5.6-sol / xhigh / priority"). The answer holds for the **entire invocation** — never re-ask per unit. These knobs sit at kickoff rather than in per-repo calibration because the right setting tracks the day's work: a heavy correctness-critical unit wants high effort; a batch of mechanical edits doesn't.
+**These are the user's call, not yours to silently assume.** At loop kickoff,
+ask one compact question covering model/effort and service tier, showing the
+current top-level values from `~/.codex/config.toml` as the inherit option. The
+answer holds for the invocation; do not re-ask per unit. Respect a standing
+preference to inherit.
 
-Two boundaries on the kickoff question:
-- If the user has recorded a standing preference ("stop asking, always inherit my config"), respect it — the question exists to give control, not friction.
-- Model and companion-accepted efforts are overridable per-dispatch via flags; config-only effort values are layered top-level assertions, not overrides. **Tier is config-only** — if the user picks a different tier at kickoff, they change it themselves (`/fast` in the codex TUI) or explicitly ask you to edit their config. Don't edit their global config on your own initiative.
+- Omit `--model` and `--effort` to let the installed CLI resolve its normal
+  config layers.
+- `--model VALUE` passes `-m VALUE` for that turn.
+- `--effort VALUE` passes a quoted TOML
+  `-c 'model_reasoning_effort="VALUE"'` override. The CLI is the authority for
+  supported values, so `ultra` and `max` are forwarded like every other level.
+- Service tier has no adapter flag. The CLI resolves it from config; the
+  summary displays the top-level project/global value only as disclosure.
+- Model names and tier spellings age quickly. Read the installed config and
+  check `codex --version` before making a current recommendation.
 
-The dispatch summary printing model/effort/tier on each run is disclosure, not a question.
+`CODEX_LOOP_MODEL` and `CODEX_LOOP_EFFORT` provide standing per-project
+overrides without editing global config. Never edit the user's Codex config on
+your own initiative.
 
-How resolution works, which shapes the choice:
+### Flag semantics: pinned policy on every path
 
-- **Omit both flags** and the Codex CLI resolves from its config layers. This is the default the script uses, because it honors the setup the user already chose for themselves. An omitted effort inherits without asserting what the config contains.
-- **Pass `--model` or a companion-accepted `--effort`** to override for this task only. Those effort values are detected from the installed companion and forwarded unchanged. Never edit the user's global config to force a setting — that changes their own Codex use outside this loop.
-- **`ultra` and `max` are config-only effort assertions.** Companion 1.0.6 rejects them as flags, so the dispatch script cannot forward them. Instead, `--effort max` (or `CODEX_LOOP_EFFORT=max`) parses the project's `$PWD/.codex/config.toml` first and `${CODEX_HOME:-$HOME/.codex}/config.toml` second with `tomllib`, then asserts that the first top-level `model_reasoning_effort` found matches after trimming and case-folding. A project top-level value takes precedence and a mismatch there fails even if the global value matches; an absent project file or top-level key falls through to global. A passing check dispatches with no effort flag and reports `assertion matched project .codex/config.toml top-level; other config layers not resolved` or `assertion matched config.toml top-level; other config layers not resolved`, as applicable. This assertion deliberately does not resolve profiles or overlays. A different resolved value, absence from both layers, a required missing or unreadable file, malformed TOML, or unavailable parser fails closed before dispatch. Omitting `--effort` still inherits without an assertion. The config-only list is a hardcoded snapshot (`ultra max`) because the companion exposes no runtime source for it, so it may age; never edit the user's config automatically to satisfy the assertion.
-- **Model names are passed through to the CLI as-is** — nothing here maintains a model list, so new Codex models work the day they ship; availability depends on the user's account. Aliases may exist in the companion (as of 1.0.6, `spark` → `gpt-5.3-codex-spark`). **Model names age fast; never recommend one from memory.** When unsure what the user has or what's current, read `~/.codex/config.toml` first, then ask.
-- **Service tier is a third speed lever, separate from model and effort.** Codex supports priority routing (**Fast**) and cheaper-but-slower **flex**; support varies by model. Same model, same reasoning — different queue: model trades capability, effort trades thinking depth, tier trades routing speed/cost. The user picks it with the **`/fast` slash command in the codex TUI**, which persists to `service_tier` in `~/.codex/config.toml`; editing the config key directly works too. The accepted value set has shifted across CLI versions — `fast`, `flex`, `priority`, and `default` have all appeared, the TUI currently writes `fast`, and spellings may be remapped at the request layer — so **treat the installed CLI's own config schema as authoritative, not any fixed list here**, and expect any of those spellings when reading a config. The companion has no per-task tier flag, so every dispatch inherits whatever the config says — the dispatch script prints the inherited tier so it's visible. It belongs to the kickoff question like effort does; a mid-loop tier change is a conditions change worth noting, not something to do silently. Note the dispatch summary reads **top-level** config keys only (from the project's `.codex/config.toml` first, then the global one); profile/overlay mechanics have changed across CLI versions, so deeper layers are deliberately not resolved — the installed CLI's own resolution is authoritative.
-- **A "missing" model usually means a stale CLI, not a wrong name.** New models require a recent `codex` CLI. Before concluding a model or flag is unavailable, check `codex --version` (the dispatch script prints it on every run). The safe update path is **`codex update`** — the CLI's own updater works regardless of how it was installed. Don't reinstall through a different channel (e.g. npm on top of a standalone install): two skewed copies of `codex` on one machine is a real failure mode, where a model "doesn't exist" until the copy actually being used gets updated. The CLI is the user's environment — get their OK before updating, and update between units rather than mid-unit so a version change doesn't muddy attribution.
+Both fresh and resume argv come from one mode-parameterized builder.
 
-Reasonable way to pick, if the user wants a recommendation: raise effort for work where a subtle mistake is expensive to catch downstream — anything touching correctness boundaries, concurrency, or migrations — and lower it for mechanical, well-specified edits where the spec leaves little room for judgment. Model choice usually follows whatever they're already running; the interesting dial is effort.
+| path | sandbox/workspace shape |
+| --- | --- |
+| fresh | `codex exec -s <workspace-write|read-only> ... -C <canonical-workspace>` |
+| resume | `cd <canonical-workspace>` then `codex exec resume <exact-id> -c 'sandbox_mode="<mode>"' ...` |
 
-To give one project a standing preference without touching the user's global config or this script, set `CODEX_LOOP_MODEL` / `CODEX_LOOP_EFFORT` in that project's environment, and record the choice (see First-run calibration in SKILL.md) so later sessions don't re-litigate it. A config-only `CODEX_LOOP_EFFORT` remains an assertion that the project-first, global-second top-level resolution already matches; it does not supply or change that value.
+Every invocation also carries:
 
-### Flag semantics: pins vs assertions
-
-How that intent is expressed differs per knob, and assuming a flag always pins is what makes this go wrong:
-
-| knob | expressing intent | if reality disagrees |
-| --- | --- | --- |
-| `--model` | a real pin | — |
-| `--effort` at companion-accepted levels | a real pin | **overrides a config set higher** |
-| `--effort max` (config-only levels) | an assertion — verifies config, then dispatches with no flag | **fails closed** rather than downgrading |
-| service tier | cannot be expressed at all | only visible in the printed summary |
-
-So **passing a flag is not automatically the safer choice**: the top effort settings are config-only, and passing *any* `--effort` below them guarantees you are below them. The config-only assertion is the stricter option precisely because it refuses to dispatch instead of quietly giving you less.
-
-### Monitoring, stuck jobs, and cleanup
-
-The same companion script has `status` and `cancel` subcommands (the dispatch script prints the companion path on every run):
-
-```bash
-node <companion> status --all      # list known jobs
-node <companion> cancel <job-id>   # stop one
+```text
+-c 'approval_policy="never"'
+--strict-config
+-c 'sandbox_workspace_write.writable_roots=[]'
+-c 'sandbox_workspace_write.network_access=false'
+-c 'sandbox_permissions=[]'
 ```
 
-Judge progress by the event stream, not the clock. Codex being quiet for a couple of minutes is normal; a job that has produced no new events for 15–20 minutes, or is visibly re-running the same failing command, is stuck. Cancel it, read what it was attempting, and fix the cause — usually an ambiguous spec or a missing environment constraint — or split the unit. Don't just re-dispatch the same prompt at the same problem.
+Resume accepts neither `-s` nor `-C`; omitting the explicit `sandbox_mode`
+override would fall through to ambient config rather than inherit the original
+thread policy. The adapter never uses `--last`, never passes `--json`, and
+redirects the child stdin from `/dev/null`. It rejects policy broadeners,
+including bypass flags, extra writable directories, profiles, config/rule
+ignores, and feature toggles.
 
-After killing a job, **also kill the test processes it spawned** — orphaned runners keep eating the machine long after the parent dies, and they're easy to miss because the job looks gone. Don't filter `pgrep -fl` output by repo path: argv rarely contains it (`python -m pytest` says nothing about where it runs). Match each candidate's **working directory** instead:
+The adapter scans only the initial delimited human banner block for
+`approval:`, `sandbox:`, and the session id while teeing the full stream to
+`transcript.log`; duplicate banner fields are rejected, and policy-looking
+model output after the banner cannot override them. Seeing a calibrated
+human-stream turn marker closes banner discovery permanently, so later output
+also cannot synthesize a banner that was absent at startup. A mismatch kills only the
+new Codex process group and fails nonzero. This is post-start detection that bounds
+damage; it cannot undo a tool call already initiated, and a truthful banner
+proves resolved CLI intent rather than kernel enforcement. The pinned argv is
+the pre-launch protection.
 
-Compare canonicalized paths with a path boundary — a bare prefix match would also catch siblings like `<repo-dir>-copy` and kill another repository's runner:
+### State and resume
 
-```bash
-repo="$(cd <repo-dir> && pwd -P)"
-# macOS — cwd via lsof:
-for pid in $(pgrep -f 'unittest|pytest'); do
-  cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
-  [[ "$cwd" == "$repo" || "$cwd" == "$repo"/* ]] && echo "$pid"
-done
-# Linux — cwd via /proc:
-for pid in $(pgrep -f 'unittest|pytest'); do
-  cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)"
-  [[ "$cwd" == "$repo" || "$cwd" == "$repo"/* ]] && echo "$pid"
-done
-# then kill the listed PIDs (kill the whole process group if the companion
-# reported one — orphans respawned by a runner wrapper escape single-PID kills)
-```
+State is keyed by the SHA-256 of the canonical workspace. A non-blocking
+`fcntl.flock` is held across selection, child execution, and the final state
+transition. The authoritative `meta.tsv` lifecycle is
+`initializing → running → ready|failed`; highest generation wins. A highest
+`initializing` or `running` record refuses both fresh dispatch and resume, so a
+crashed wrapper cannot fall back to an older live session. `current` is only a
+validated cache.
+
+Managed resume is release-disabled until
+`scripts/integration-test.sh --require codex` executes every non-managed frozen
+case with no skip or failure. While disabled, iterate with a fresh dispatch and
+carry the prior findings in the prompt. Once enabled, `--resume` selects the
+highest ready loop-owned exact id, and `--resume ID` additionally asserts that
+id. It never selects unrelated interactive work.
+
+Migration note: a session created by the former companion runtime has no loop
+record. After finishing or cancelling any in-flight legacy job, use
+`--resume-unmanaged <exact-id>` once; a successful turn adopts that id so later
+ordinary `--resume` can use it.
+
+### External tools and foreground lifecycle
+
+MCP servers, Apps, plugins, hooks, and `notify` run in the host agent process,
+outside both shell sandboxes. The config scan discloses `mcp_servers`, `apps`,
+`plugins`, and `notify`; it warns and proceeds by default, or refuses when
+`CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1`. This is accepted exposure, not isolation.
+
+There is no detached-job registry or cancel subcommand. Background the adapter
+at the harness level if needed; its own exit is authoritative. The run state
+retains `prompt.txt`, an append-only `transcript.log`, `last-message.txt`, and
+`meta.tsv` for diagnosis after failure.
