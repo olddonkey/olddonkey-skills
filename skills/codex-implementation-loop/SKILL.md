@@ -5,7 +5,7 @@ description: 'Delegate implementation work to Codex (via the codex-companion run
 
 # Codex implementation loop
 
-**Codex writes the code; you own the judgment.** Codex is fast at implementation but it self-reports success, cannot commit, and will hang a machine if pointed at a long test suite. You give it a precise spec, then be the thing that actually verifies and ships. **This includes bug fixes**: a bug found at review, at the gate, or later is a unit like any other — you diagnose and spec, Codex implements. Editing code directly "because it's faster" silently inverts the division of labor and costs review its independence.
+**The implementer writes the code; you own the judgment.** The implementer is fast at implementation but it self-reports success, cannot commit, and will hang a machine if pointed at a long test suite. You give it a precise spec, then be the thing that actually verifies and ships. **This includes bug fixes**: a bug found at review, at the gate, or later is a unit like any other — you diagnose and spec, the implementer implements. Editing code directly "because it's faster" silently inverts the division of labor and costs review its independence.
 
 The loop: **decompose → dispatch → review → iterate → gate → publish → next**.
 
@@ -15,7 +15,7 @@ The loop: **decompose → dispatch → review → iterate → gate → publish �
 2. **An assumed default never leaves the machine.** With no explicit user choice, stop at the working tree — even a local commit can fire hooks/signing. Commit, push, PR, and merge each need the user to have said yes once for this repo, **asked at kickoff, not discovered at publish time**. **Once is once**: that authorization is per-repo, persists across sessions until revoked or the work changes character — never re-ask per unit.
 3. **Never push straight to the default branch.**
 4. **The full-suite gate is yours**, run by you, with the real exit code. A fix means the code satisfies the test — a weakened assertion, deleted case, or widened tolerance to turn red green is a stop, not a pass.
-5. **Don't let Codex run the full test suite by default** — focused subsets only, unless calibration showed the suite is small and fast.
+5. **Don't let the implementer run the full test suite by default** — focused subsets only, unless calibration showed the suite is small and fast.
 
 ## Dials (settle at kickoff, record, stop re-asking)
 
@@ -52,7 +52,7 @@ Read the repo's calibration record first, then ask **one compact question** cove
 
 The answers hold for the **entire invocation** — never re-ask per unit. A recorded calibration or standing preference ("always inherit, stop asking") suppresses the corresponding part; a fully recorded repo means no question at all. Everything else runs at its recommended default until something makes it worth raising.
 
-**If a later step needs a dial nobody settled, you asked too late** — that's the failure this section exists to prevent, not a reason to interrupt mid-loop. Runtime detail — flag/config resolution, config-only efforts, tier mechanics, model-name aging, stale-CLI diagnosis, the companion contract — is in [references/runtime.md](references/runtime.md); read it before the first dispatch of a session.
+**If a later step needs a dial nobody settled, you asked too late** — that's the failure this section exists to prevent, not a reason to interrupt mid-loop. Runtime detail — flag/config resolution, config-only efforts, tier mechanics, model-name aging, stale-CLI diagnosis, the companion contract — is in [references/runtime-codex.md](references/runtime-codex.md); read it before the first dispatch of a session.
 
 ## 1. Decompose
 
@@ -80,16 +80,7 @@ A unit = one coherent, reviewable change, roughly one PR. Settle the design **be
 
 **Name model and effort on every dispatch rather than inheriting silently.** Kickoff settles the intent once; each dispatch then states it, so config drift — or the CLI being repointed at another vendor's model, which is not hypothetical — cannot change what implements your units without saying so. The summary the script prints is the confirmation that the intent actually landed.
 
-How that intent is expressed differs per knob, and assuming a flag always pins is what makes this go wrong:
-
-| knob | expressing intent | if reality disagrees |
-| --- | --- | --- |
-| `--model` | a real pin | — |
-| `--effort` at companion-accepted levels | a real pin | **overrides a config set higher** |
-| `--effort max` (config-only levels) | an assertion — verifies config, then dispatches with no flag | **fails closed** rather than downgrading |
-| service tier | cannot be expressed at all | only visible in the printed summary |
-
-So **passing a flag is not automatically the safer choice**: the top effort settings are config-only, and passing *any* `--effort` below them guarantees you are below them. The config-only assertion is the stricter option precisely because it refuses to dispatch instead of quietly giving you less.
+How each knob expresses intent — including the config-only effort assertion that fails closed rather than downgrading — is codex-specific mechanics: see the flag-semantics section of [references/runtime-codex.md](references/runtime-codex.md).
 
 Hygiene — each failure mode here is silent:
 
@@ -110,7 +101,7 @@ Environment constraints to include verbatim-ish in every dispatch:
 
 The dispatch script prints a `warn` line naming any MCP servers or app connectors in the Codex config, because the sandbox does not bound tool calls. **That warning is disclosure, not a stop — do not ask the user how to proceed.** Note it in the unit report and continue. Whether to refuse instead (`CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1`) is a calibration setting, settled once per repo like any other dial, not a per-dispatch question. The scan is a tripwire, not a boundary — server-side-enabled Apps are invisible to it, and full isolation means disabling the tools in Codex itself.
 
-Stuck jobs (no new events 15–20 min): cancel, read what it attempted, fix the prompt or split the unit — and kill orphaned test processes. Commands in [references/runtime.md](references/runtime.md).
+Stuck jobs (no new events 15–20 min): cancel, read what it attempted, fix the prompt or split the unit — and kill orphaned test processes. Commands in [references/runtime-codex.md](references/runtime-codex.md).
 
 **Absence of events is ambiguous — the watcher itself can be the broken thing, and it fails looking exactly like a healthy one.** A watcher that latches "the newest job log" *after* dispatching latches the very log it was meant to follow, then waits forever for a newer one: zero events, indefinitely, indistinguishable from a job still working. Capture that marker **before** dispatching, or hardcode it. Two habits make the failure loud instead of silent: **no event within ~2 minutes of arming means suspect the watcher first**, and **never let the watcher be the only completion signal** — the dispatch invocation's own exit is the authoritative one, so watcher output is progress detail, not the thing you wait on.
 
@@ -118,7 +109,7 @@ That last point also settles what the watcher should emit: **only the abnormal �
 
 ## 3. Review the diff yourself
 
-Read the actual diff; the summary only says where to look. Check the whole tree (`git status --short`), not just files Codex mentioned. Recurring delegated-implementation failure modes, priority order — detail in [references/review-checklist.md](references/review-checklist.md):
+Read the actual diff; the summary only says where to look. Check the whole tree (`git status --short`), not just files the implementer mentioned. Recurring delegated-implementation failure modes, priority order — detail in [references/review-checklist.md](references/review-checklist.md):
 
 1. **Silent regressions from changed defaults** — trace production call paths, not just the changed function.
 2. **Tests "fixed" by weakening intent** — deleted cases, softened assertions, tautologies.

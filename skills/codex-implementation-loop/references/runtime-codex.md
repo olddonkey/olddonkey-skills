@@ -25,6 +25,19 @@ Reasonable way to pick, if the user wants a recommendation: raise effort for wor
 
 To give one project a standing preference without touching the user's global config or this script, set `CODEX_LOOP_MODEL` / `CODEX_LOOP_EFFORT` in that project's environment, and record the choice (see First-run calibration in SKILL.md) so later sessions don't re-litigate it. A config-only `CODEX_LOOP_EFFORT` remains an assertion that the project-first, global-second top-level resolution already matches; it does not supply or change that value.
 
+### Flag semantics: pins vs assertions
+
+How that intent is expressed differs per knob, and assuming a flag always pins is what makes this go wrong:
+
+| knob | expressing intent | if reality disagrees |
+| --- | --- | --- |
+| `--model` | a real pin | — |
+| `--effort` at companion-accepted levels | a real pin | **overrides a config set higher** |
+| `--effort max` (config-only levels) | an assertion — verifies config, then dispatches with no flag | **fails closed** rather than downgrading |
+| service tier | cannot be expressed at all | only visible in the printed summary |
+
+So **passing a flag is not automatically the safer choice**: the top effort settings are config-only, and passing *any* `--effort` below them guarantees you are below them. The config-only assertion is the stricter option precisely because it refuses to dispatch instead of quietly giving you less.
+
 ### Monitoring, stuck jobs, and cleanup
 
 The same companion script has `status` and `cancel` subcommands (the dispatch script prints the companion path on every run):

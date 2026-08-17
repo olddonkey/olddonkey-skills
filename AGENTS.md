@@ -14,7 +14,9 @@ Components:
 
 - `skills/codex-implementation-loop/` — the original Codex loop skill. Bash
   helpers in `scripts/`: `codex-dispatch.sh`, `run-gate.sh`, and the regression
-  harness `selftest.sh`.
+  harness `selftest.sh`. Codex-specific mechanics live in
+  `references/runtime-codex.md`; the shared observable interface is recorded in
+  `references/dispatch-contract.md`.
 - `skills/codex-engineering-mode/` — goal-first wrapper over the loop. Shared
   playbooks in `references/playbooks/`, plus `scripts/tree-oid.sh` and its
   selftest.
@@ -58,8 +60,8 @@ run):
 6. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
 7. Packaging checks: both marketplace JSON manifests must parse; every
    `SKILL.md` (under `skills/` and `cursor-implementation-loop/skills/`) must
-   have non-empty `name:` and `description:` frontmatter; engineering-mode
-   Markdown must have no dangling relative links.
+   have non-empty `name:` and `description:` frontmatter; engineering-mode and
+   Codex-loop Markdown must have no dangling relative links.
 8. `tree-oid` job (runs on ubuntu **and** macos):
    `bash skills/codex-engineering-mode/scripts/tree-oid-selftest.sh` and the
    Cursor copy — expect `selftest: PASS (202 checks)` each. Keep these scripts

@@ -162,6 +162,8 @@ jobs:
           paths = [root / "SKILL.md", *sorted((root / "references").glob("**/*.md"))]
           cursor_root = Path("cursor-implementation-loop/skills/cursor-engineering-mode")
           paths.extend([cursor_root / "SKILL.md", *sorted((cursor_root / "references").glob("**/*.md"))])
+          codex_loop_root = Path("skills/codex-implementation-loop")
+          paths.extend([codex_loop_root / "SKILL.md", *sorted((codex_loop_root / "references").glob("**/*.md"))])
           patterns = (
               re.compile(r"!?\[[^\]\n]*\]\((<[^>\n]+>|[^)\n]+)\)"),
               re.compile(r"^\s*\[[^\]\n]+\]:\s*(<[^>\n]+>|\S+)", re.MULTILINE),
