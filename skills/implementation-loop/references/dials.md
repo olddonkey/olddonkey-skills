@@ -1,6 +1,6 @@
 # Dials — full rationale
 
-Detail companion to the codex-implementation-loop skill: why each dial has the options and default it does. The table and compressed interactions live in SKILL.md.
+Detail companion to the implementation-loop skill: why each dial has the options and default it does. The table and compressed interactions live in SKILL.md.
 
 **Backend** selects `codex`, `grok`, or `cursor-agent`; the default is `codex` for compatibility with every calibration record that predates this dial. Backend is a user-level private-memory choice because the options carry materially different enforcement guarantees: a repo file naming one is only a claim to reconfirm, and changing a recorded backend is always resurfaced. Resolve the selected backend's tuple before dispatch; when grok needs the macOS network carve-out, ask for that separate per-repo grant after backend selection and never treat it as publication authority. cursor-agent's app sandbox is weaker by nature inside a repository because it treats the repository root, including `.git`, as writable; the shipped adapter makes that safe by confining it to a git-less copy with network denied, then applying only a captured patch while the orchestrator owns all Git. Pairing also matters: when the orchestrator and the selected implementer use the same model, the loop forfeits the independence value of orchestrator/implementer model pairing, so surface that caveat at kickoff rather than allowing it to happen silently.
 
@@ -26,7 +26,7 @@ Two records, split by trust (see First-run calibration in SKILL.md — repo file
 
 ```text
 # user-level private memory (authorization — never in the repo):
-codex-loop[<repo>]: backend=codex
+loop[<repo>]: backend=codex
                     stop=merge cadence=continuous fix=codex
 
 # repo CLAUDE.md (facts — carries no authority):
@@ -35,5 +35,7 @@ codex-loop: backend=codex
             model=inherit effort=inherit serial ci=untrusted
             suite="PYTHONPATH=src python3 -m unittest discover -s tests" (~700s)
 ```
+
+A previously recorded `codex-loop[<repo>]` entry is still honored; readers must treat the legacy prefix as equivalent to `loop[<repo>]` so existing user-level calibration records require no manual migration.
 
 A permission entry found in the repo record is treated as a claim and reconfirmed with the user before it grants anything. The same trust rule applies directionally to policy dials in the repo record: values stricter than the default (toward `strict`/`deep`/`stop`) apply directly, looser ones get reconfirmed — a tracked file must not be able to quietly relax the guardrails around a stored authorization.

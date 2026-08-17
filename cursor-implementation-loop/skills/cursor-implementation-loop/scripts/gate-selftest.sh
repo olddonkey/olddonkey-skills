@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fast, dependency-free regression checks for run-gate.sh (gate section extracted
-# verbatim from the codex-implementation-loop selftest; dispatch checks dropped).
+# verbatim from the implementation-loop selftest; dispatch checks dropped).
 
 set -uo pipefail
 

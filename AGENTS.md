@@ -12,7 +12,7 @@ update script has nothing to install.
 
 Components:
 
-- `skills/codex-implementation-loop/` — the original Codex loop skill. Bash
+- `skills/implementation-loop/` — the backend-neutral implementation loop skill. Bash
   helpers in `scripts/`: `codex-dispatch.sh`, `run-gate.sh`, `selftest.sh`,
   `grok-dispatch.sh`, `grok-verify-worktree.sh`, `grok-selftest.sh`,
   `cursor-dispatch.sh`, `cursor-selftest.sh`, and `integration-test.sh`.
@@ -20,7 +20,7 @@ Components:
   the shipped `references/runtime-grok.md` and `references/runtime-cursor.md`
   backend references; the shared observable interface is recorded in
   `references/dispatch-contract.md`.
-- `skills/codex-engineering-mode/` — goal-first wrapper over the loop. Shared
+- `skills/engineering-mode/` — goal-first wrapper over the loop. Shared
   playbooks in `references/playbooks/`, plus `scripts/tree-oid.sh` and its
   selftest.
 - `skills/web-slides/` — a scaffolder (`scripts/scaffold.sh`) that generates a
@@ -44,23 +44,23 @@ run):
 1. `bash -n` syntax checks on all thirteen shipped scripts (nine Codex-loop scripts,
    two Cursor gate scripts, both installer scripts).
 2. **Byte-for-byte shared-file checks** (`diff -q`): `run-gate.sh` must stay
-   identical between `skills/codex-implementation-loop/scripts/` and
+   identical between `skills/implementation-loop/scripts/` and
    `cursor-implementation-loop/skills/cursor-implementation-loop/scripts/`; the
    six engineering-mode playbooks, `verification-contract.md`, `handoff.md`,
    `tree-oid.sh`, and `tree-oid-selftest.sh` must stay identical between
-   `skills/codex-engineering-mode/` and
+   `skills/engineering-mode/` and
    `cursor-implementation-loop/skills/cursor-engineering-mode/`. **If you edit
    one copy, mirror the other in the same commit.**
 3. Playbooks must stay platform-neutral: no `read-only` / `investigate` words
    and no `codex-dispatch` references anywhere under either
    `references/playbooks/` tree.
-4. `bash skills/codex-implementation-loop/scripts/selftest.sh` — expect
+4. `bash skills/implementation-loop/scripts/selftest.sh` — expect
    `selftest: PASS (217 checks)`. The dispatch checks that need `tomllib` run
    fully on python3 ≥ 3.11; on older hosts they self-skip while keeping a
    stable check count.
-5. `bash skills/codex-implementation-loop/scripts/grok-selftest.sh` — expect
+5. `bash skills/implementation-loop/scripts/grok-selftest.sh` — expect
    `selftest: PASS (276 checks)`.
-6. `bash skills/codex-implementation-loop/scripts/cursor-selftest.sh` — expect
+6. `bash skills/implementation-loop/scripts/cursor-selftest.sh` — expect
    `selftest: PASS (97 checks)`.
 7. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (122 checks)`.
@@ -70,13 +70,13 @@ run):
    have non-empty `name:` and `description:` frontmatter; engineering-mode and
    Codex-loop Markdown must have no dangling relative links.
 10. `tree-oid` job (runs on ubuntu **and** macos):
-   `bash skills/codex-engineering-mode/scripts/tree-oid-selftest.sh` and the
+   `bash skills/engineering-mode/scripts/tree-oid-selftest.sh` and the
    Cursor copy — expect `selftest: PASS (202 checks)` each. Keep these scripts
    portable across GNU and BSD userlands.
 
 ## Manual backend integration gate
 
-`skills/codex-implementation-loop/scripts/integration-test.sh` is the manual,
+`skills/implementation-loop/scripts/integration-test.sh` is the manual,
 opt-in pre-release gate for backend changes. It exercises the real grok and
 cursor-agent sandboxes, needs authenticated CLIs, and makes real API calls. Run
 it with `--backend grok|cursor|all`; unavailable or logged-out backends are

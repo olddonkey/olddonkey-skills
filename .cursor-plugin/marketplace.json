@@ -11,7 +11,7 @@
     {
       "name": "cursor-implementation-loop",
       "source": "cursor-implementation-loop",
-      "description": "Review-gated implementation loop: a dedicated subagent writes code while the parent agent owns planning, diff review, full-suite gating, and publication. Cursor port of codex-implementation-loop. Ships two modes: the plan-first cursor-implementation-loop and the goal-first cursor-engineering-mode wrapper."
+      "description": "Review-gated implementation loop: a dedicated subagent writes code while the parent agent owns planning, diff review, full-suite gating, and publication. Cursor port of implementation-loop. Ships two modes: the plan-first cursor-implementation-loop and the goal-first cursor-engineering-mode wrapper."
     }
   ]
 }

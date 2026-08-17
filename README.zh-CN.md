@@ -15,8 +15,8 @@
 
 目前包含三个 Claude Code skill，外加一个内含两个工程 skill 的 Cursor Plugin：
 
-- [`codex-implementation-loop`](#codex-implementation-loop) —— 把实现交给 **Codex、grok 或 cursor-agent**，但不把判断交出去：Claude 亲自审查真实 diff、跑全量测试门禁，只发布自己敢签名的改动。实现后端是一个可选档位，三者的审查与发布纪律完全一致。
-- `codex-engineering-mode` —— 目标先行的工程主导模式：先调查、定设计、写计划，再逐单元驱动 `codex-implementation-loop`。
+- [`implementation-loop`](#implementation-loop) —— 把实现交给 **Codex、grok 或 cursor-agent**，但不把判断交出去：Claude 亲自审查真实 diff、跑全量测试门禁，只发布自己敢签名的改动。实现后端是一个可选档位，三者的审查与发布纪律完全一致。
+- `engineering-mode` —— 目标先行的工程主导模式：先调查、定设计、写计划，再逐单元驱动 `implementation-loop`。
 - [`cursor-implementation-loop`](#cursor-implementation-loop) —— Cursor Plugin 内含计划先行的实现循环和目标先行的 `cursor-engineering-mode` 包装器；父 agent 负责 review / 门禁 / 发布，implementer 子 agent 写代码。
 - [`web-slides`](#web-slides) —— 把素材 / 提纲做成点击驱动的 16:9 HTML 幻灯片，用于现场放映；内置 24 套主题 + 演讲者窗口，投屏时口播稿对观众不可见。
 
@@ -28,13 +28,15 @@
 
 ```text
 /plugin marketplace add olddonkey/olddonkey-skills
-/plugin install codex-implementation-loop@olddonkey-skills
-/plugin install codex-engineering-mode@olddonkey-skills
+/plugin install implementation-loop@olddonkey-skills
+/plugin install engineering-mode@olddonkey-skills
 /plugin install web-slides@olddonkey-skills
 /reload-plugins
 ```
 
-`codex-engineering-mode` 依赖 `codex-implementation-loop` 和官方 Codex companion 插件；Codex 环境还需要已登录的 Codex CLI，见下方[环境准备](#环境准备)。`web-slides` 除了生成的幻灯片项目需要 Node.js 之外没有额外依赖。
+由于实现循环现在支持 Codex、grok 和 cursor-agent 后端，这两个插件已去掉 `codex-` 前缀并改用新名称。已安装旧 Codex 前缀插件 ID 的用户应先卸载旧 ID，再安装 `implementation-loop` 和 `engineering-mode`。
+
+`engineering-mode` 依赖 `implementation-loop` 和官方 Codex companion 插件；Codex 环境还需要已登录的 Codex CLI，见下方[环境准备](#环境准备)。`web-slides` 除了生成的幻灯片项目需要 Node.js 之外没有额外依赖。
 
 ### 手动安装
 
@@ -104,15 +106,15 @@ cp olddonkey-skills/cursor-implementation-loop/agents/*.md ~/.cursor/agents/
 
 ## 计划先行 vs 目标先行
 
-**计划先行（现有行为不变）：**先审阅并批准计划，再直接调用实现循环：`使用 codex-implementation-loop 逐单元实现 PLAN.md。`
+**计划先行（现有行为不变）：**先审阅并批准计划，再直接调用实现循环：`使用 implementation-loop 逐单元实现 PLAN.md。`
 
-**目标先行：**只给 engineering mode 一个结果目标；它会调查根因、选定设计、写出计划，再驱动同一套循环。Codex：`使用 codex-engineering-mode 修复 webhook 重放导致的重复履约。` Cursor：`使用 cursor-engineering-mode 修复 webhook 重放导致的重复履约。`
+**目标先行：**只给 engineering mode 一个结果目标；它会调查根因、选定设计、写出计划，再驱动同一套循环。Codex：`使用 engineering-mode 修复 webhook 重放导致的重复履约。` Cursor：`使用 cursor-engineering-mode 修复 webhook 重放导致的重复履约。`
 
-Codex 侧依赖链：`codex-engineering-mode` → `codex-implementation-loop` → 官方 Codex companion 插件。Cursor 侧的 `cursor-engineering-mode` 已内置于 `cursor-implementation-loop` 插件，无需单独安装；现有安装更新后即可获得：重新运行一行安装命令，或在 managed checkout 中执行 `git pull`。
+Codex 侧依赖链：`engineering-mode` → `implementation-loop` → 官方 Codex companion 插件。Cursor 侧的 `cursor-engineering-mode` 已内置于 `cursor-implementation-loop` 插件，无需单独安装；现有安装更新后即可获得：重新运行一行安装命令，或在 managed checkout 中执行 `git pull`。
 
 ---
 
-## codex-implementation-loop
+## implementation-loop
 
 **把实现交给 Codex、grok 或 cursor-agent，但不把判断交出去。**
 
@@ -120,8 +122,8 @@ Codex 侧依赖链：`codex-engineering-mode` → `codex-implementation-loop` �
 
 **后端是一个可选档位。** 默认是 Codex（见下方环境准备）；无论哪个后端实现，都是同一套循环、同样的审查与门禁纪律。每个后端的 git 与发布边界机制不同，各有独立的 runtime 文档——首次派发前请先读所选后端的：
 
-- **grok** —— fail-closed 自定义沙箱、linked-worktree 定位、按机器的 tuple allowlist。见 [`references/runtime-grok.md`](./skills/codex-implementation-loop/references/runtime-grok.md)。
-- **cursor-agent** —— git-less-copy 架构：实现者在一个无 `.git`、禁网络的沙箱拷贝里改文件，编排者再把捕获的 patch 应用到真仓库（绝不带 `--force`/`--yolo`，那会绕过沙箱）。见 [`references/runtime-cursor.md`](./skills/codex-implementation-loop/references/runtime-cursor.md)。
+- **grok** —— fail-closed 自定义沙箱、linked-worktree 定位、按机器的 tuple allowlist。见 [`references/runtime-grok.md`](./skills/implementation-loop/references/runtime-grok.md)。
+- **cursor-agent** —— git-less-copy 架构：实现者在一个无 `.git`、禁网络的沙箱拷贝里改文件，编排者再把捕获的 patch 应用到真仓库（绝不带 `--force`/`--yolo`，那会绕过沙箱）。见 [`references/runtime-cursor.md`](./skills/implementation-loop/references/runtime-cursor.md)。
 
 grok 与 cursor-agent 的默认实现模型都是 grok-4.6 / `xhigh`。
 
@@ -153,7 +155,7 @@ codex update
 
 在目标仓库中打开 Claude Code，然后直接说：
 
-> 使用 codex-implementation-loop 实现 PLAN.md 的第 1 项。停在 PR；门禁使用 baseline；review 深度为 standard；进入下一单元前先确认；model 和 effort 继承我的 Codex 配置。
+> 使用 implementation-loop 实现 PLAN.md 的第 1 项。停在 PR；门禁使用 baseline；review 深度为 standard；进入下一单元前先确认；model 和 effort 继承我的 Codex 配置。
 
 自然语言触发同时适用于插件市场和手动安装。第一次运行时，Claude 会在派发前说明最终采用的控制项，让成本、自动化程度和发布边界都清清楚楚。
 
@@ -174,9 +176,9 @@ Codex 的总结只是检查地图，不是改动正确的证据；diff 和测试
 - **证据优先的 review。** 清单专门检查委派改动中常被普通 review 漏掉的问题：被改弱的测试、默认值导致的静默回归、无法发布的 gitignore 文件、悄悄新增的依赖，以及被软化的强制边界。
 - **有边界的自动化。** 七个控制项决定循环可以走多远、review 多深、修复由谁实现，以及门禁变红时怎么办。每个仓库只确定一次，不必每个单元重新争论。
 - **把昂贵的经验编码一次。** 工作流明确区分聚焦测试和全量门禁，按事件流识别卡死任务，并覆盖取消任务与清理孤儿进程。
-- **两个附带工具。** [`codex-dispatch.sh`](./skills/codex-implementation-loop/scripts/codex-dispatch.sh) 自动定位当前 companion 运行时并展示派发设置；[`run-gate.sh`](./skills/codex-implementation-loop/scripts/run-gate.sh) 保留测试套件的真实 exit code，并支持与基线失败项对比。
+- **两个附带工具。** [`codex-dispatch.sh`](./skills/implementation-loop/scripts/codex-dispatch.sh) 自动定位当前 companion 运行时并展示派发设置；[`run-gate.sh`](./skills/implementation-loop/scripts/run-gate.sh) 保留测试套件的真实 exit code，并支持与基线失败项对比。
 
-完整工作流见 [`SKILL.md`](./skills/codex-implementation-loop/SKILL.md)。
+完整工作流见 [`SKILL.md`](./skills/implementation-loop/SKILL.md)。
 
 ### 控制项
 
@@ -278,8 +280,8 @@ review 或门禁发现的 bug 也要作为新单元交给 implementer——父 a
 
 ```text
 /plugin marketplace update olddonkey-skills
-/plugin update codex-implementation-loop@olddonkey-skills
-/plugin update codex-engineering-mode@olddonkey-skills
+/plugin update implementation-loop@olddonkey-skills
+/plugin update engineering-mode@olddonkey-skills
 /plugin update web-slides@olddonkey-skills
 /reload-plugins
 ```

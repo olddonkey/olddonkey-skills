@@ -1,6 +1,6 @@
 # Codex runtime reference
 
-Detail companion to the codex-implementation-loop skill: runtime resolution, the companion contract, and job monitoring. The workflow itself lives in SKILL.md; this file is the part you consult at dispatch time.
+Detail companion to the implementation-loop skill: runtime resolution, the companion contract, and job monitoring. The workflow itself lives in SKILL.md; this file is the part you consult at dispatch time.
 
 ### Choosing model and effort
 
