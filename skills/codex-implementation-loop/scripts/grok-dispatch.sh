@@ -803,7 +803,8 @@ for directory, dirnames, filenames in os.walk(worktree, followlinks=False):
     markers.append({
         "path": os.path.relpath(path, worktree), "type": "file",
         "dev": info.st_dev, "inode": info.st_ino, "nlink": info.st_nlink,
-        "size": info.st_size, "sha256": digest.hexdigest(),
+        "size": info.st_size, "mtime_ns": info.st_mtime_ns,
+        "ctime_ns": info.st_ctime_ns, "sha256": digest.hexdigest(),
     })
 markers.sort(key=lambda item: item["path"])
 data = {"schema": "1", "status": "active", "worktree": worktree, "markers": markers}
@@ -1034,7 +1035,8 @@ for directory, dirnames, filenames in os.walk(snapshot, followlinks=False):
         raise SystemExit(1)
     markers.append({
         "path": relative, "type": "file", "dev": info.st_dev, "inode": info.st_ino,
-        "nlink": info.st_nlink, "size": info.st_size, "sha256": digest,
+        "nlink": info.st_nlink, "size": info.st_size, "mtime_ns": info.st_mtime_ns,
+        "ctime_ns": info.st_ctime_ns, "sha256": digest,
     })
 if sorted(old_by_path) != sorted(entry["path"] for entry in markers):
     print("error: snapshot marker path set differs from pre-dispatch baseline", file=sys.stderr)

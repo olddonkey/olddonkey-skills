@@ -286,6 +286,7 @@ path = os.path.join(root, ".git")
 info = os.lstat(path)
 entry = {"path": ".git", "type": "file", "dev": info.st_dev, "inode": info.st_ino,
          "nlink": info.st_nlink, "size": info.st_size,
+         "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns,
          "sha256": hashlib.sha256(open(path, "rb").read()).hexdigest()}
 json.dump({"schema": "1", "status": "active", "worktree": os.path.realpath(root), "markers": [entry]}, open(output, "w"))
 PY

@@ -21,9 +21,14 @@ Run from the target repository root:
 
 ```bash
 "${CLAUDE_SKILL_DIR}/scripts/grok-dispatch.sh" \
-  --prompt-file /tmp/unit-prompt.txt --model grok-code-fast-1 \
-  --effort high
+  --prompt-file /tmp/unit-prompt.txt --model grok-4.6 \
+  --effort xhigh
 ```
+
+The recommended implementer setting for the grok backend is **`grok-4.6`
+at `xhigh`** (grok's default model is `grok-4.6`; effort is forwarded
+verbatim as `--reasoning-effort`). Set `GROK_LOOP_MODEL` / `GROK_LOOP_EFFORT`
+to make it standing for a repo without repeating the flags.
 
 Use `--read-only` or its alias `--investigate` for investigation. The adapter
 is foreground-only; background the script at the harness level. It always

@@ -77,7 +77,7 @@ A unit = one coherent, reviewable change, roughly one PR. Settle the design **be
     --model gpt-5.6-sol --effort max      # model pins; max asserts against config
 "${CLAUDE_SKILL_DIR}/scripts/codex-dispatch.sh" --prompt-file /tmp/unit-prompt.txt   # inherit whatever config says
 "${CLAUDE_SKILL_DIR}/scripts/grok-dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
-    --model grok-code-fast-1 --effort high
+    --model grok-4.6 --effort xhigh
 ```
 
 **Dispatch through this script, never by calling the companion yourself.** Reaching past it into `codex-companion.mjs` looks equivalent and quietly gives up three things: the config-only effort assertion (§Runtime), the summary naming the model, effort and tier actually in force, and the external-tools scan. Observed cost of hand-rolling it for a whole run of units — every dispatch carried `--effort xhigh`, silently *overriding* a config that said `max`, and the CLI was meanwhile repointed at a different vendor's model through a local proxy without a single line of output saying so.

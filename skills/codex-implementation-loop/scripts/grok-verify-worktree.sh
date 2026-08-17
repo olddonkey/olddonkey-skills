@@ -113,7 +113,9 @@ def marker_paths(root):
 
 expected_paths = []
 expected = {}
-required_keys = {"path", "type", "dev", "inode", "nlink", "size", "sha256"}
+required_keys = {
+    "path", "type", "dev", "inode", "nlink", "size", "mtime_ns", "ctime_ns", "sha256"
+}
 for entry in markers:
     if not isinstance(entry, dict) or set(entry) != required_keys:
         refuse("baseline marker entry has an invalid schema")
@@ -153,6 +155,8 @@ for relative in actual_paths:
         "inode": info.st_ino,
         "nlink": info.st_nlink,
         "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
+        "ctime_ns": info.st_ctime_ns,
     }
     for key, actual in identity.items():
         if entry[key] != actual:
