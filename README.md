@@ -36,6 +36,11 @@ Inside Claude Code, add the marketplace once, then install the skills you want:
 
 These plugins were renamed by dropping the `codex-` prefix because the loop now supports Codex, grok, and cursor-agent backends. If the former Codex-prefixed plugin IDs are installed, uninstall them and install `implementation-loop` and `engineering-mode` instead.
 
+The implementation-loop adapter scripts moved from `scripts/` into
+`backends/<name>/` for the 0.4.x release. The old executable paths forward for
+that release so existing harnesses keep working; update external callers to the
+new module paths before the shims are removed in release 0.5.0.
+
 `engineering-mode` requires `implementation-loop`; the Codex backend needs an authenticated `codex` CLI and no additional Claude Code plugin — see [Setup](#setup) below. `web-slides` needs nothing beyond Node.js for the generated slide project.
 
 ### Manual
@@ -122,10 +127,11 @@ The implementer implements and runs focused tests. Claude reviews the real diff,
 
 **Backend is a dial.** The default is Codex (setup below); the same loop and the same review-and-gate discipline apply whichever backend implements. Each backend's git and publication boundary works differently and is documented in its own runtime reference — read the selected backend's before its first dispatch:
 
-- **grok** — a fail-closed custom sandbox, linked-worktree placement, and a per-machine tuple allowlist. [`references/runtime-grok.md`](./skills/implementation-loop/references/runtime-grok.md).
-- **cursor-agent** — a git-less-copy architecture: the implementer edits a `.git`-free copy inside a network-denied sandbox, and the orchestrator applies the captured patch to the real repo (it never runs with `--force`/`--yolo`, which would bypass the sandbox). [`references/runtime-cursor.md`](./skills/implementation-loop/references/runtime-cursor.md).
+- **Codex** — pinned `codex exec` policy, loop-owned exact-id state, and policy-banner verification. [`backends/codex/runtime.md`](./skills/implementation-loop/backends/codex/runtime.md).
+- **grok** — a fail-closed custom sandbox, linked-worktree placement, and a per-machine tuple allowlist. [`backends/grok/runtime.md`](./skills/implementation-loop/backends/grok/runtime.md).
+- **cursor-agent** — a git-less-copy architecture: the implementer edits a `.git`-free copy inside a network-denied sandbox, and the orchestrator applies the captured patch to the real repo (it never runs with `--force`/`--yolo`, which would bypass the sandbox). [`backends/cursor/runtime.md`](./skills/implementation-loop/backends/cursor/runtime.md).
 
-Both default to Grok 4.6 at `xhigh` as the implementer model, but `--model` is a passthrough on every backend — cursor-agent in particular reaches its whole account catalog (Claude, GPT-5.x, Gemini, Composer, Grok tiers), where the effort level is part of the model id.
+grok and cursor-agent both default to Grok 4.6 at `xhigh` as the implementer model, but `--model` is a passthrough on every backend — cursor-agent in particular reaches its whole account catalog (Claude, GPT-5.x, Gemini, Composer, Grok tiers), where the effort level is part of the model id.
 
 ### Setup
 
@@ -168,7 +174,7 @@ Codex's summary is a map of where to look, not proof that the change is correct.
 - **Evidence-first review.** The checklist targets delegated-change failures that generic review often misses: weakened tests, silent default regressions, gitignored files, new dependencies, and softened enforcement points.
 - **Bounded autonomy.** Seven controls settle how far the loop may act, how deeply it reviews, who implements fixes, and what happens when the gate is red. They are chosen once per repository instead of re-litigated on every unit.
 - **Expensive lessons encoded once.** The workflow distinguishes focused tests from the full gate, detects stuck foreground runs from retained transcripts, and covers bounded interruption plus orphaned-process cleanup.
-- **Two bundled helpers.** [`codex-dispatch.sh`](./skills/implementation-loop/scripts/codex-dispatch.sh) runs plain `codex exec` with pinned policy, loop-owned state, and banner verification; [`run-gate.sh`](./skills/implementation-loop/scripts/run-gate.sh) preserves the suite's real exit code and can compare failures with a baseline.
+- **Uniform backend modules.** Each backend ships `dispatch.sh`, `runtime.md`, `selftest.sh`, and a contract fixture driver under [`backends/`](./skills/implementation-loop/backends/); [`run-gate.sh`](./skills/implementation-loop/scripts/run-gate.sh) remains the shared backend-neutral gate.
 
 Read the complete workflow in [`SKILL.md`](./skills/implementation-loop/SKILL.md).
 

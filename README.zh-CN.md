@@ -36,6 +36,10 @@
 
 由于实现循环现在支持 Codex、grok 和 cursor-agent 后端，这两个插件已去掉 `codex-` 前缀并改用新名称。已安装旧 Codex 前缀插件 ID 的用户应先卸载旧 ID，再安装 `implementation-loop` 和 `engineering-mode`。
 
+0.4.x 版本把 implementation-loop 的 adapter 脚本从 `scripts/` 移到了
+`backends/<name>/`。旧可执行路径会在这一版继续转发，现有 harness 不会立刻中断；
+请在 0.5.0 移除 shim 之前把外部调用改到新的模块路径。
+
 `engineering-mode` 依赖 `implementation-loop`；Codex 后端需要已登录的 `codex` CLI，不再需要额外的 Claude Code 插件，见下方[环境准备](#环境准备)。`web-slides` 除了生成的幻灯片项目需要 Node.js 之外没有额外依赖。
 
 ### 手动安装
@@ -122,10 +126,11 @@ Codex 侧依赖链：`engineering-mode` → `implementation-loop` → 已登录�
 
 **后端是一个可选档位。** 默认是 Codex（见下方环境准备）；无论哪个后端实现，都是同一套循环、同样的审查与门禁纪律。每个后端的 git 与发布边界机制不同，各有独立的 runtime 文档——首次派发前请先读所选后端的：
 
-- **grok** —— fail-closed 自定义沙箱、linked-worktree 定位、按机器的 tuple allowlist。见 [`references/runtime-grok.md`](./skills/implementation-loop/references/runtime-grok.md)。
-- **cursor-agent** —— git-less-copy 架构：实现者在一个无 `.git`、禁网络的沙箱拷贝里改文件，编排者再把捕获的 patch 应用到真仓库（绝不带 `--force`/`--yolo`，那会绕过沙箱）。见 [`references/runtime-cursor.md`](./skills/implementation-loop/references/runtime-cursor.md)。
+- **Codex** —— 固定 `codex exec` 策略、loop 自有的 exact-id 状态、policy banner 校验。见 [`backends/codex/runtime.md`](./skills/implementation-loop/backends/codex/runtime.md)。
+- **grok** —— fail-closed 自定义沙箱、linked-worktree 定位、按机器的 tuple allowlist。见 [`backends/grok/runtime.md`](./skills/implementation-loop/backends/grok/runtime.md)。
+- **cursor-agent** —— git-less-copy 架构：实现者在一个无 `.git`、禁网络的沙箱拷贝里改文件，编排者再把捕获的 patch 应用到真仓库（绝不带 `--force`/`--yolo`，那会绕过沙箱）。见 [`backends/cursor/runtime.md`](./skills/implementation-loop/backends/cursor/runtime.md)。
 
-两者的默认实现模型都是 Grok 4.6 / `xhigh`，但 `--model` 在每个后端都是透传的——cursor-agent 尤其可以用到账号目录里的全部模型（Claude、GPT-5.x、Gemini、Composer、各档 Grok），其中 effort 档位是写在模型 id 里的。
+grok 与 cursor-agent 的默认实现模型都是 Grok 4.6 / `xhigh`，但 `--model` 在每个后端都是透传的——cursor-agent 尤其可以用到账号目录里的全部模型（Claude、GPT-5.x、Gemini、Composer、各档 Grok），其中 effort 档位是写在模型 id 里的。
 
 ### 环境准备
 
@@ -168,7 +173,7 @@ Codex 的总结只是检查地图，不是改动正确的证据；diff 和测试
 - **证据优先的 review。** 清单专门检查委派改动中常被普通 review 漏掉的问题：被改弱的测试、默认值导致的静默回归、无法发布的 gitignore 文件、悄悄新增的依赖，以及被软化的强制边界。
 - **有边界的自动化。** 七个控制项决定循环可以走多远、review 多深、修复由谁实现，以及门禁变红时怎么办。每个仓库只确定一次，不必每个单元重新争论。
 - **把昂贵的经验编码一次。** 工作流明确区分聚焦测试和全量门禁，通过保留的 transcript 识别卡死的前台任务，并覆盖有界中断与清理孤儿进程。
-- **两个附带工具。** [`codex-dispatch.sh`](./skills/implementation-loop/scripts/codex-dispatch.sh) 通过 plain `codex exec` 固定策略、维护循环状态并校验 banner；[`run-gate.sh`](./skills/implementation-loop/scripts/run-gate.sh) 保留测试套件的真实 exit code，并支持与基线失败项对比。
+- **统一的后端模块。** 每个后端都在 [`backends/`](./skills/implementation-loop/backends/) 下提供 `dispatch.sh`、`runtime.md`、`selftest.sh` 和 contract fixture driver；[`run-gate.sh`](./skills/implementation-loop/scripts/run-gate.sh) 继续作为共享、后端无关的门禁。
 
 完整工作流见 [`SKILL.md`](./skills/implementation-loop/SKILL.md)。
 

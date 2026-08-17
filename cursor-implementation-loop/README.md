@@ -13,7 +13,7 @@ only what it would sign its name to.
 | `skills/cursor-implementation-loop/SKILL.md` | The loop: decompose → dispatch → review → iterate → gate → publish → next |
 | `skills/.../references/` | Dials rationale, unit-contract skeleton, review checklist, gate details, Cursor runtime notes |
 | `skills/.../scripts/run-gate.sh` | Test gate with real exit codes, baseline comparison, fail-closed parsing (verbatim from the Codex original) |
-| `skills/.../scripts/gate-selftest.sh` | 122 regression checks for the gate (extracted from the original selftest) |
+| `skills/.../scripts/gate-selftest.sh` | 122 regression checks for the gate (interim byte-locked to the canonical suite) |
 | `agents/loop-implementer.md` | The only writable subagent — implements exactly one unit per dispatch |
 | `agents/loop-independent-reviewer.md` | Read-only deep reviewer; never saw the dispatch prompt, never fixes code |
 
@@ -55,10 +55,11 @@ implementer.
 
 ## How it differs from implementation-loop
 
-- **Dispatch is native.** The Codex companion runtime, its discovery
-  script, effort/tier config assertions, and the `--` injection defense are
-  gone — a Cursor subagent is dispatched as a Task call with a structured
-  prompt.
+- **Dispatch is host-native.** `implementation-loop` launches a selected
+  standalone CLI through `backends/<name>/dispatch.sh`, with backend-owned
+  sandbox and session-state contracts. The Cursor port instead dispatches a
+  native Task subagent with a structured prompt and therefore ships no external
+  backend adapter or loop-owned CLI session state.
 - **The gate is unchanged.** `run-gate.sh` and its guarantees are copied
   verbatim; the parent still runs the full suite itself.
 - **Three hard guarantees became procedure.** Read-only git for the

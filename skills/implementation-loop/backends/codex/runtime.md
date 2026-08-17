@@ -1,6 +1,6 @@
 # Codex runtime reference
 
-Dispatch Codex through `scripts/codex-dispatch.sh`. The adapter uses plain
+Dispatch Codex through `backends/codex/dispatch.sh`. The adapter uses plain
 `codex exec`, runs strictly in the foreground, records each turn under
 `~/.config/olddonkey-loop/codex/`, and emits only the final implementer message
 on stdout. Its summary, warnings, CLI transcript, and policy-banner checks go to
@@ -77,7 +77,7 @@ crashed wrapper cannot fall back to an older live session. `current` is only a
 validated cache.
 
 Managed resume is release-disabled until
-`scripts/integration-test.sh --require codex` executes every non-managed frozen
+`tests/integration-test.sh --require codex` executes every non-managed frozen
 case with no skip or failure. While disabled, iterate with a fresh dispatch and
 carry the prior findings in the prompt. Once enabled, `--resume` selects the
 highest ready loop-owned exact id, and `--resume ID` additionally asserts that

@@ -5,7 +5,7 @@ reuse grok's linked-worktree or snapshot-transition mechanism because
 cursor-agent treats the whole discovered Git repository, including `.git`, as
 its writable workspace. Read this before the first cursor-agent dispatch in a
 session; the shared observable interface is in
-[dispatch-contract.md](dispatch-contract.md).
+[dispatch-contract.md](../../references/dispatch-contract.md).
 
 ## Contents
 
@@ -24,7 +24,7 @@ session; the shared observable interface is in
 Run from the real unit worktree root:
 
 ```bash
-"${CLAUDE_SKILL_DIR}/scripts/cursor-dispatch.sh" \
+"${CLAUDE_SKILL_DIR}/backends/cursor/dispatch.sh" \
   --prompt-file /tmp/unit-prompt.txt \
   --model cursor-grok-4.6-xhigh
 ```
@@ -226,7 +226,7 @@ Verified live on Darwin/arm64 with authenticated cursor-agent 2026.08.11:
 ## Live smoke procedure
 
 The manual smoke below is automated in
-[`scripts/integration-test.sh`](../scripts/integration-test.sh); run it before
+[`tests/integration-test.sh`](../../tests/integration-test.sh); run it before
 shipping backend changes.
 
 This is an **acceptance procedure**, not a normal dispatch. It intentionally
@@ -336,7 +336,7 @@ evidence is reviewed.
 ## Revive or verify
 
 After a cursor-agent upgrade, sandbox-policy change, or model-id change, rerun
-`cursor-selftest.sh` first and then the live smoke above on the real agent path.
+`backends/cursor/selftest.sh` first and then the live smoke above on the real agent path.
 If the safe case can reach outside CWD or the network, or if tools require
 Run Everything to proceed, stop using this backend until a new hard boundary is
 designed and documented. Never revive it by relaxing the fixed flag set.
