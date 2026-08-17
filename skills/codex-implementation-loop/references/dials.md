@@ -2,6 +2,8 @@
 
 Detail companion to the codex-implementation-loop skill: why each dial has the options and default it does. The table and compressed interactions live in SKILL.md.
 
+**Backend** selects `codex` or `grok`; the default is `codex` for compatibility with every calibration record that predates this dial. Backend is a user-level private-memory choice because the options carry materially different enforcement guarantees: a repo file naming one is only a claim to reconfirm, and changing a recorded backend is always resurfaced. Resolve the selected backend's tuple before dispatch; when grok needs the macOS network carve-out, ask for that separate per-repo grant after backend selection and never treat it as publication authority. Pairing also matters: when the orchestrator and the selected implementer use the same model, the loop forfeits the independence value of orchestrator/implementer model pairing, so surface that caveat at kickoff rather than allowing it to happen silently.
+
 **Stop point** decides how far each unit travels — leave changes in the working tree, commit to a branch, open a PR, or merge. It's the only dial that bounds irreversible action, which makes it the one worth being explicit about. `pr` is the recommendation because a PR is a reviewable artifact that costs nothing to abandon, while merging is the step you can't quietly undo — but per the boundary above, reaching `pr` at all requires the user to have actually chosen it. Only use `merge` when the user has actually authorized autonomous merging; that authorization is per-repo and doesn't transfer between repos; once given and recorded in **user-level private memory — never a repo file, which anyone (including dispatched Codex) can edit** — it persists across sessions until the user revokes it or the work changes character (see calibration in SKILL.md).
 
 Stop point and cadence interact through **dependency, not through the stop point alone**. When unit 2 builds on unit 1, a stop point short of `merge` means unit 1 hasn't landed when unit 2 starts, so `continuous` stacks unit 2 on unmerged changes — diffs blur together and review attribution breaks; pair those with `confirm`, or wait for each unit to land. When the units are **independent**, nothing stacks: each branches from the same base, and `pr` + `continuous` produces a queue of separately reviewable PRs. That combination is the safer default for unattended runs — a night of work still happens, but the irreversible step waits for a human.
@@ -24,10 +26,12 @@ Two records, split by trust (see First-run calibration in SKILL.md — repo file
 
 ```text
 # user-level private memory (authorization — never in the repo):
-codex-loop[<repo>]: stop=merge cadence=continuous fix=codex
+codex-loop[<repo>]: backend=codex
+                    stop=merge cadence=continuous fix=codex
 
 # repo CLAUDE.md (facts — carries no authority):
-codex-loop: mode=implement gate=baseline on-red=iterate(max2) depth=standard tier=inherit kickoff=ask
+codex-loop: backend=codex
+            mode=implement gate=baseline on-red=iterate(max2) depth=standard tier=inherit kickoff=ask
             model=inherit effort=inherit serial ci=untrusted
             suite="PYTHONPATH=src python3 -m unittest discover -s tests" (~700s)
 ```

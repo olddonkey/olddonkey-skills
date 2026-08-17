@@ -11,6 +11,9 @@ jobs:
       - name: Syntax check
         run: |
           bash -n skills/codex-implementation-loop/scripts/codex-dispatch.sh
+          bash -n skills/codex-implementation-loop/scripts/grok-dispatch.sh
+          bash -n skills/codex-implementation-loop/scripts/grok-verify-worktree.sh
+          bash -n skills/codex-implementation-loop/scripts/grok-selftest.sh
           bash -n skills/codex-implementation-loop/scripts/run-gate.sh
           bash -n skills/codex-implementation-loop/scripts/selftest.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh
@@ -64,6 +67,8 @@ jobs:
             cursor-implementation-loop/skills/cursor-engineering-mode/references/playbooks/
       - name: Regression selftest
         run: bash skills/codex-implementation-loop/scripts/selftest.sh
+      - name: Grok backend selftest
+        run: bash skills/codex-implementation-loop/scripts/grok-selftest.sh
       - name: Cursor gate selftest
         run: bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
       - name: Cursor installer selftest
