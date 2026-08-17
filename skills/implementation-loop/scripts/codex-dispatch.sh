@@ -171,7 +171,8 @@ for family in ("mcp_servers", "apps", "plugins"):
     table = data.get(family)
     if not isinstance(table, dict):
         continue
-    for name, entry in table.items():
+    for name in sorted(table):
+        entry = table[name]
         if isinstance(entry, dict) and entry.get("enabled") is False:
             continue
         print(f"[{family}.{name}]")
@@ -523,7 +524,7 @@ def scan_records(workspace_root):
             raise StateError(f"unexpected entry in state directory: {entry.path}")
         validate_directory(entry.path)
         allowed = {"meta.tsv", "prompt.txt", "transcript.log", "last-message.txt"}
-        for child in os.scandir(entry.path):
+        for child in sorted(os.scandir(entry.path), key=lambda item: item.name):
             if child.name.startswith(".tmp-"):
                 validate_regular(child.path)
                 continue

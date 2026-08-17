@@ -532,7 +532,9 @@ TOOLS_WORKSPACE="$STATE_PARENT/tools-workspace"
 mkdir -p "$TOOLS_CODEX_HOME" "$TOOLS_WORKSPACE"
 write_lines "$TOOLS_CODEX_HOME/config.toml" \
   'notify = ["/example/turn-ended"]' \
-  '[mcp_servers.demo]' \
+  '[mcp_servers.zeta]' \
+  'command = "example"' \
+  '[mcp_servers.alpha]' \
   'command = "example"' \
   '[apps.connector_a]' \
   'enabled = true' \
@@ -546,8 +548,8 @@ run_split_case_in_dir external-tools-block "$TOOLS_WORKSPACE" env \
   CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 CODEX_STUB_LOG="$TMP_ROOT/tools-block.argv" \
   "$DISPATCH" --prompt x
 expect_status 4 "external-tools refusal mode remains fail-closed when requested"
-expect_output "mcp_servers.demo, apps.connector_a, plugins.enabled_plugin, notify" \
-  "external-tools scan discloses MCP, Apps, plugins, and notify"
+expect_output "mcp_servers.alpha, mcp_servers.zeta, apps.connector_a, plugins.enabled_plugin, notify" \
+  "external-tools scan sorts and discloses MCP, Apps, plugins, and notify"
 expect_no_output "disabled_plugin" "external-tools scan honors plugin enabled=false"
 expect_missing_file "$TMP_ROOT/tools-block.argv" "blocked external tools never launch Codex"
 
@@ -754,9 +756,43 @@ rm -f "$TMP_ROOT/symlinked-next.argv"
 run_split_case_in_dir state-symlinked "$FIX_WORKSPACE" env \
   HOME="$FIX_HOME" CODEX_HOME="$FIX_HOME/.codex" PATH="$TEST_PATH" \
   CODEX_STUB_LOG="$TMP_ROOT/symlinked-next.argv" "$DISPATCH" --prompt next
-expect_status 5 "symlinked state record refuses dispatch"
-expect_output "unexpected entry in dispatch state" "symlinked record cannot hide its target file"
-expect_missing_file "$TMP_ROOT/symlinked-next.argv" "symlinked record refuses before Codex launch"
+SYMLINKED_STATUS=$CASE_STATUS
+SYMLINKED_STDERR=$CASE_STDERR
+
+# Create the same tampering in the opposite directory-entry creation order:
+# first the dangling meta.tsv symlink, then its unexpected meta.real target.
+create_ready_fixture symlinked-reversed
+if [[ -n "$FIX_STATE" ]]; then
+  mv "$FIX_STATE/meta.tsv" "$TMP_ROOT/symlinked-reversed-meta.tsv"
+  ln -s meta.real "$FIX_STATE/meta.tsv"
+  mv "$TMP_ROOT/symlinked-reversed-meta.tsv" "$FIX_STATE/meta.real"
+fi
+rm -f "$TMP_ROOT/symlinked-reversed-next.argv"
+run_split_case_in_dir state-symlinked-reversed "$FIX_WORKSPACE" env \
+  HOME="$FIX_HOME" CODEX_HOME="$FIX_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/symlinked-reversed-next.argv" "$DISPATCH" --prompt next
+SYMLINKED_REVERSED_STATUS=$CASE_STATUS
+SYMLINKED_REVERSED_STDERR=$CASE_STDERR
+
+if [[ $SYMLINKED_STATUS -eq 5 && $SYMLINKED_REVERSED_STATUS -eq 5 ]]; then
+  pass "symlinked state record refuses dispatch in both entry-creation orders"
+else
+  fail "symlinked state record refuses dispatch in both entry-creation orders"
+fi
+SYMLINKED_REASON="$(LC_ALL=C sed -n 's#^\(error: unexpected entry in dispatch state\): .*#\1#p' "$SYMLINKED_STDERR")"
+SYMLINKED_REVERSED_REASON="$(LC_ALL=C sed -n 's#^\(error: unexpected entry in dispatch state\): .*#\1#p' "$SYMLINKED_REVERSED_STDERR")"
+if [[ "$SYMLINKED_REASON" == "error: unexpected entry in dispatch state" &&
+      "$SYMLINKED_REVERSED_REASON" == "$SYMLINKED_REASON" ]]; then
+  pass "symlinked record refusal reason is independent of entry-creation order"
+else
+  fail "symlinked record refusal reason is independent of entry-creation order"
+fi
+if [[ ! -e "$TMP_ROOT/symlinked-next.argv" &&
+      ! -e "$TMP_ROOT/symlinked-reversed-next.argv" ]]; then
+  pass "symlinked records refuse before Codex launch in both entry-creation orders"
+else
+  fail "symlinked records refuse before Codex launch in both entry-creation orders"
+fi
 
 create_ready_fixture hardlinked
 if [[ -n "$FIX_STATE" ]]; then
