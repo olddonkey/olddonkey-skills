@@ -329,6 +329,10 @@ Verified live on Darwin/arm64 with grok 1.0.4:
 
 ## Live smoke procedure
 
+The manual smoke below is automated in
+[`scripts/integration-test.sh`](../scripts/integration-test.sh); run it before
+shipping backend changes.
+
 This is an acceptance procedure, not a normal dispatch. Use a disposable repo;
 it deliberately attempts git-state writes and pushes. `jq`, `git`, `python3`,
 `pgrep`, and grok 1.0.4 must be available.

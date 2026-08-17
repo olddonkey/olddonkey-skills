@@ -16,6 +16,7 @@ jobs:
           bash -n skills/codex-implementation-loop/scripts/grok-selftest.sh
           bash -n skills/codex-implementation-loop/scripts/cursor-dispatch.sh
           bash -n skills/codex-implementation-loop/scripts/cursor-selftest.sh
+          bash -n skills/codex-implementation-loop/scripts/integration-test.sh
           bash -n skills/codex-implementation-loop/scripts/run-gate.sh
           bash -n skills/codex-implementation-loop/scripts/selftest.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh

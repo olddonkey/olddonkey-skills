@@ -15,7 +15,7 @@ Components:
 - `skills/codex-implementation-loop/` — the original Codex loop skill. Bash
   helpers in `scripts/`: `codex-dispatch.sh`, `run-gate.sh`, `selftest.sh`,
   `grok-dispatch.sh`, `grok-verify-worktree.sh`, `grok-selftest.sh`,
-  `cursor-dispatch.sh`, and `cursor-selftest.sh`.
+  `cursor-dispatch.sh`, `cursor-selftest.sh`, and `integration-test.sh`.
   Backend-specific mechanics live in `references/runtime-codex.md` and
   the shipped `references/runtime-grok.md` and `references/runtime-cursor.md`
   backend references; the shared observable interface is recorded in
@@ -41,7 +41,7 @@ root in this order — all suites are self-contained, need no network, and the
 Codex/Cursor CLIs are **not** required (they are only needed to dispatch a live
 run):
 
-1. `bash -n` syntax checks on all twelve shipped scripts (eight Codex-loop scripts,
+1. `bash -n` syntax checks on all thirteen shipped scripts (nine Codex-loop scripts,
    two Cursor gate scripts, both installer scripts).
 2. **Byte-for-byte shared-file checks** (`diff -q`): `run-gate.sh` must stay
    identical between `skills/codex-implementation-loop/scripts/` and
@@ -73,6 +73,14 @@ run):
    `bash skills/codex-engineering-mode/scripts/tree-oid-selftest.sh` and the
    Cursor copy — expect `selftest: PASS (202 checks)` each. Keep these scripts
    portable across GNU and BSD userlands.
+
+## Manual backend integration gate
+
+`skills/codex-implementation-loop/scripts/integration-test.sh` is the manual,
+opt-in pre-release gate for backend changes. It exercises the real grok and
+cursor-agent sandboxes, needs authenticated CLIs, and makes real API calls. Run
+it with `--backend grok|cursor|all`; unavailable or logged-out backends are
+reported as skips. CI only runs `bash -n` on this script and never executes it.
 
 ## Running the web-slides app (non-obvious gotchas)
 
