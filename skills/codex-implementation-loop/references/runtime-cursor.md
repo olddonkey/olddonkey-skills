@@ -203,6 +203,10 @@ Verified live on Darwin/arm64 with authenticated cursor-agent 2026.08.11:
 
 ## Live smoke procedure
 
+The manual smoke below is automated in
+[`scripts/integration-test.sh`](../scripts/integration-test.sh); run it before
+shipping backend changes.
+
 This is an **acceptance procedure**, not a normal dispatch. It intentionally
 performs one tightly scoped Run Everything breach inside a disposable temp
 tree to prove why production bans `--force`. Run it only with the real,
