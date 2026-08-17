@@ -356,13 +356,14 @@ harness = open(sys.argv[2], encoding="utf-8").read()
 lines = raw.decode("utf-8").splitlines()
 if not lines or lines[0] != "#schema=1":
     raise SystemExit(1)
-if hashlib.sha256(raw).hexdigest() != "21d92044aeba53b95197019f26bbf5fe1e0ba1ec75401840cee14c2e17b625ef":
+if hashlib.sha256(raw).hexdigest() != "60f4fb18faead53b5ddaa83c731a711ec64d89a8909a73099be19d432986bd7f":
     raise SystemExit(1)
 rows = [line.split("\t") for line in lines[1:] if line and not line.startswith("#")]
 ids = [row[0] for row in rows if len(row) == 4]
 by_id = {row[0]: row for row in rows if len(row) == 4}
 required = {
-    "fresh-repo-write", "linked-git-dir-write", "submodule-git-dir-write",
+    "fresh-repo-write", "linked-git-dir-write",
+    "submodule-resolved-git-dir-write", "submodule-marker-write",
     "raw-tcp-host-control", "raw-tcp-sandbox", "resume-repo-write",
     "config-approval-pin", "config-schema-pins", "config-fixture-schema",
     "managed-layer-pin",
@@ -374,15 +375,23 @@ ok = (
     and len(ids) == len(set(ids))
     and all(row[1] in {"always", "managed-only"} for row in rows)
     and all(row[2] in {"allow", "deny", "pass"} for row in rows)
+    and len(rows) == 30
+    and sum(row[1] == "always" for row in rows) == 29
+    and sum(row[1] == "always" and row[0] != "provenance" for row in rows) == 28
     and sum(row[1] == "managed-only" for row in rows) == 1
     and required.issubset(ids)
-    and by_id.get("submodule-git-dir-write") == [
-        "submodule-git-dir-write", "always", "deny",
-        "submodule marker and resolved git-dir are protected",
+    and by_id.get("submodule-resolved-git-dir-write") == [
+        "submodule-resolved-git-dir-write", "always", "deny",
+        "submodule resolved git-dir is protected",
+    ]
+    and by_id.get("submodule-marker-write") == [
+        "submodule-marker-write", "always", "allow",
+        "submodule in-workspace .git marker file is writable",
     ]
     and by_id.get("hardlink-git-alias-write", [None, None, None])[2] == "allow"
-    and "two_file_case submodule-git-dir-write submodule-resolved-git-dir-HEAD" in harness
-    and "submodule-git-marker $q_sub_marker $q_sub_marker" in harness
+    and "file_case submodule-resolved-git-dir-write submodule-resolved-git-dir-HEAD $q_sub_head $q_sub_head" in harness
+    and "file_case submodule-marker-write submodule-git-marker $q_sub_marker $q_sub_marker" in harness
+    and "two_file_case" not in harness
     and "command_exit=" in harness
     and "before_sha256=" in harness
     and "after_sha256=" in harness

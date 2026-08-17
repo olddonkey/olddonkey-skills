@@ -13,7 +13,7 @@ GROK_DISPATCH="$SCRIPT_DIR/../backends/grok/dispatch.sh"
 CURSOR_DISPATCH="$SCRIPT_DIR/../backends/cursor/dispatch.sh"
 CODEX_DISPATCH="$SCRIPT_DIR/../backends/codex/dispatch.sh"
 CODEX_CASES="$SCRIPT_DIR/codex-cases.tsv"
-CODEX_CASES_SHA256="21d92044aeba53b95197019f26bbf5fe1e0ba1ec75401840cee14c2e17b625ef"
+CODEX_CASES_SHA256="60f4fb18faead53b5ddaa83c731a711ec64d89a8909a73099be19d432986bd7f"
 TOML_PYTHON=""
 TOML_CANDIDATES_TRIED="python3 python3.13 python3.12 python3.11"
 SELECT_GROK=0
@@ -1054,33 +1054,6 @@ file_case() { # id label hashed-target operation-path command...
   LAST_FILE_OUTCOME="\$EVIDENCE_OUTCOME"
   LAST_FILE_DETAIL="\$detail"
 }
-two_file_case() { # id label1 target1 operation1 label2 target2 operation2
-  id="\$1"; first_label="\$2"; first_target="\$3"; first_operation="\$4"
-  second_label="\$5"; second_target="\$6"; second_operation="\$7"
-  EVIDENCE_BEFORE=\$(hash_file "\$first_target")
-  printf X >> "\$first_operation" 2>/dev/null
-  EVIDENCE_EXIT=\$?
-  EVIDENCE_AFTER=\$(hash_file "\$first_target")
-  classify_file_evidence
-  first_outcome="\$EVIDENCE_OUTCOME"; first_conditions="\$EVIDENCE_CONDITIONS"
-  first_exit=\$EVIDENCE_EXIT; first_before="\$EVIDENCE_BEFORE"; first_after="\$EVIDENCE_AFTER"
-  EVIDENCE_BEFORE=\$(hash_file "\$second_target")
-  printf X >> "\$second_operation" 2>/dev/null
-  EVIDENCE_EXIT=\$?
-  EVIDENCE_AFTER=\$(hash_file "\$second_target")
-  classify_file_evidence
-  second_outcome="\$EVIDENCE_OUTCOME"; second_conditions="\$EVIDENCE_CONDITIONS"
-  second_exit=\$EVIDENCE_EXIT; second_before="\$EVIDENCE_BEFORE"; second_after="\$EVIDENCE_AFTER"
-  if [[ "\$first_outcome" == allow || "\$second_outcome" == allow ]]; then
-    outcome=allow
-  elif [[ "\$first_outcome" == deny && "\$second_outcome" == deny ]]; then
-    outcome=deny
-  else
-    outcome=skip
-  fi
-  detail="target=\$first_label path=\$first_target operation_path=\$first_operation outcome=\$first_outcome command_exit=\$first_exit before_sha256=\${first_before:-missing} after_sha256=\${first_after:-missing} observed_conditions=\$first_conditions; target=\$second_label path=\$second_target operation_path=\$second_operation outcome=\$second_outcome command_exit=\$second_exit before_sha256=\${second_before:-missing} after_sha256=\${second_after:-missing} observed_conditions=\$second_conditions"
-  record "\$id" "\$outcome" "\$detail"
-}
 file_case fresh-repo-write tracked-worktree-file $q_tracked $q_tracked sh -c 'printf fresh >> "\$1"' _ $q_tracked
 file_case fresh-git-marker-write worktree-git-marker $q_marker $q_marker sh -c 'printf X >> "\$1"' _ $q_marker
 file_case linked-git-dir-write linked-worktree-git-dir-HEAD $q_git_head $q_git_head sh -c 'printf X >> "\$1"' _ $q_git_head
@@ -1088,7 +1061,8 @@ file_case linked-common-dir-write linked-worktree-common-dir-config $q_common_co
 file_case git-refs-write protected-git-ref $q_ref $q_ref sh -c 'printf X >> "\$1"' _ $q_ref
 file_case git-objects-write protected-git-object $q_object $q_object sh -c 'printf X >> "\$1"' _ $q_object
 file_case git-packed-refs-write protected-packed-refs $q_packed $q_packed sh -c 'printf X >> "\$1"' _ $q_packed
-two_file_case submodule-git-dir-write submodule-resolved-git-dir-HEAD $q_sub_head $q_sub_head submodule-git-marker $q_sub_marker $q_sub_marker
+file_case submodule-resolved-git-dir-write submodule-resolved-git-dir-HEAD $q_sub_head $q_sub_head sh -c 'printf X >> "\$1"' _ $q_sub_head
+file_case submodule-marker-write submodule-git-marker $q_sub_marker $q_sub_marker sh -c 'printf X >> "\$1"' _ $q_sub_marker
 file_case symlink-git-alias-write protected-git-ref-via-symlink $q_ref $q_symlink sh -c 'printf X >> "\$1"' _ $q_symlink
 file_case hardlink-git-alias-write protected-git-ref-via-hardlink $q_ref $q_hardlink sh -c 'printf X >> "\$1"' _ $q_hardlink
 file_case rename-git-target protected-git-ref-via-rename $q_ref $q_ref sh -c 'printf X > replacement.tmp && mv replacement.tmp "\$1"' _ $q_ref

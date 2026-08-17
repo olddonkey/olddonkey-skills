@@ -77,10 +77,10 @@ matrix continues to exercise hostile valid user and project config layers.
 ### Calibrated tuple
 
 The required matrix ran end to end on 2026-08-17 at source head
-`f1690f47b84f83fe50875470daf4f83ee5216fa1`. Twenty-six frozen expectations
-matched and none skipped; the hard-link probe measured the vendor-sandbox hole
-described below, while the submodule probe produced an ambiguous failure. Both
-resume probes matched: repository write `allow`, Git-state write `deny`.
+`f1690f47b84f83fe50875470daf4f83ee5216fa1`. At that head, twenty-six frozen
+expectations matched and none skipped; the hard-link probe measured the
+vendor-sandbox hole described below. Both resume probes matched: repository
+write `allow`, Git-state write `deny`.
 
 The matrix wrote this release provenance before its temporary fixture was
 cleaned up:
@@ -103,9 +103,9 @@ host and source head. A different launcher, terminal executable hash, CLI,
 adapter version, OS/kernel/architecture, or effective-policy fingerprint is an
 uncalibrated tuple.
 
-### Known workspace-write sandbox hole
+### Known workspace-write sandbox holes
 
-`workspace-write` on the calibrated tuple has one measured Git-boundary hole:
+`workspace-write` on the calibrated tuple has two measured Git-boundary holes:
 
 - `hardlink-git-alias-write` is `allow`. The matrix changed the protected ref
   through a workspace hard link and reported
@@ -115,13 +115,25 @@ uncalibrated tuple.
   `.git`. The corresponding symlink probe is `deny` because symlinks resolve to
   the protected path; hard links do not.
 
-An earlier run appeared to show a submodule Git-dir write succeeding; a later
-run recorded child exit 1 and identical before/after hashes, so the write was
-denied and the ambiguous diagnostic was corrected.
+- Matrix run 5 at source head `d9f98ab` established that
+  `submodule-resolved-git-dir-write` is `deny`: the resolved Git-dir `HEAD`
+  write exited 1 and its before/after SHA-256 hashes were both
+  `162e8e6f...`. `submodule-marker-write` is independently `allow`: the
+  in-workspace `.git` marker write exited 0 and changed its SHA-256 from
+  `00e17535...` to `b0465a6e...`. A submodule's `.git` marker is a plain file
+  inside the workspace, so path-based `workspace-write` authorizes it;
+  rewriting the marker can redirect where Git resolves that submodule's
+  Git-dir. The top-level linked-worktree marker is not affected:
+  `fresh-git-marker-write` remains `deny`.
+
+This claim was wrong twice before the per-target diagnostic settled it: first
+the bundled output was read as “the submodule Git-dir is writable,” then the
+claim was withdrawn entirely. Keeping one target per case preserves the
+opposite measured outcomes instead of collapsing them into one expectation.
 
 This is a property of Codex's vendor `workspace-write` sandbox, not this
 adapter. The retired companion passed the identical mode string to the same
-core, so it had the same hole before this adapter and matrix existed.
+core, so it had the same holes before this adapter and matrix existed.
 
 The practical boundary stops an implementer from accidentally touching Git
 state—the common failure, such as deciding to run `git commit`. It does not and
