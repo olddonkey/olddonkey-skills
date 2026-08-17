@@ -345,19 +345,22 @@ chmod +x "$CODEX_STUB"
 TEST_PATH="$BIN_DIR:$PATH"
 
 CASES="$SCRIPT_DIR/../../tests/codex-cases.tsv"
-if python3 - "$CASES" <<'PY'
+INTEGRATION_HARNESS="$SCRIPT_DIR/../../tests/integration-test.sh"
+if python3 - "$CASES" "$INTEGRATION_HARNESS" <<'PY'
 import re
 import sys
 import hashlib
 
 raw = open(sys.argv[1], "rb").read()
+harness = open(sys.argv[2], encoding="utf-8").read()
 lines = raw.decode("utf-8").splitlines()
 if not lines or lines[0] != "#schema=1":
     raise SystemExit(1)
-if hashlib.sha256(raw).hexdigest() != "b170c3f4ccdf47d94ee23771ca9d100ed77f37249714b17cb0be162b202909b4":
+if hashlib.sha256(raw).hexdigest() != "21d92044aeba53b95197019f26bbf5fe1e0ba1ec75401840cee14c2e17b625ef":
     raise SystemExit(1)
 rows = [line.split("\t") for line in lines[1:] if line and not line.startswith("#")]
 ids = [row[0] for row in rows if len(row) == 4]
+by_id = {row[0]: row for row in rows if len(row) == 4}
 required = {
     "fresh-repo-write", "linked-git-dir-write", "submodule-git-dir-write",
     "raw-tcp-host-control", "raw-tcp-sandbox", "resume-repo-write",
@@ -373,13 +376,25 @@ ok = (
     and all(row[2] in {"allow", "deny", "pass"} for row in rows)
     and sum(row[1] == "managed-only" for row in rows) == 1
     and required.issubset(ids)
+    and by_id.get("submodule-git-dir-write") == [
+        "submodule-git-dir-write", "always", "deny",
+        "submodule marker and resolved git-dir are protected",
+    ]
+    and by_id.get("hardlink-git-alias-write", [None, None, None])[2] == "allow"
+    and "two_file_case submodule-git-dir-write submodule-resolved-git-dir-HEAD" in harness
+    and "submodule-git-marker $q_sub_marker $q_sub_marker" in harness
+    and "command_exit=" in harness
+    and "before_sha256=" in harness
+    and "after_sha256=" in harness
+    and "one target changed or denial assertion failed" not in harness
+    and "measure_allow_file_case" not in harness
 )
 raise SystemExit(0 if ok else 1)
 PY
 then
-  pass "codex case manifest is frozen, unique, typed, and has one managed-only row"
+  pass "codex case manifest and evidence diagnostics are frozen and typed"
 else
-  fail "codex case manifest is frozen, unique, typed, and has one managed-only row"
+  fail "codex case manifest and evidence diagnostics are frozen and typed"
 fi
 
 # Fresh implement dispatch: output channels, state, and every pinned control.

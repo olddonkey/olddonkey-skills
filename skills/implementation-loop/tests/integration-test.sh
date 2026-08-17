@@ -13,7 +13,7 @@ GROK_DISPATCH="$SCRIPT_DIR/../backends/grok/dispatch.sh"
 CURSOR_DISPATCH="$SCRIPT_DIR/../backends/cursor/dispatch.sh"
 CODEX_DISPATCH="$SCRIPT_DIR/../backends/codex/dispatch.sh"
 CODEX_CASES="$SCRIPT_DIR/codex-cases.tsv"
-CODEX_CASES_SHA256="b170c3f4ccdf47d94ee23771ca9d100ed77f37249714b17cb0be162b202909b4"
+CODEX_CASES_SHA256="21d92044aeba53b95197019f26bbf5fe1e0ba1ec75401840cee14c2e17b625ef"
 TOML_PYTHON=""
 TOML_CANDIDATES_TRIED="python3 python3.13 python3.12 python3.11"
 SELECT_GROK=0
@@ -203,13 +203,14 @@ codex_recorded() { # $1=id
 }
 
 record_codex_case() { # $1=id $2=actual outcome|skip $3=detail
-  local id="$1" actual="$2" detail="$3" expected=""
+  local id="$1" actual="$2" detail="$3" expected="" existing=""
   if codex_recorded "$id"; then
-    fail "codex case $id produced a duplicate result"
+    existing="$(LC_ALL=C grep "^$id"$'\t' "$CODEX_RESULTS" | head -n 1)"
+    fail "codex case $id produced a duplicate result (existing=$existing new_actual=$actual new_detail=$detail)"
     return
   fi
   expected="$(codex_expected "$id")" || {
-    fail "codex produced unknown case id $id"
+    fail "codex produced unknown case id $id (actual=$actual detail=$detail)"
     return
   }
   if [[ "$actual" == "skip" ]]; then
@@ -250,6 +251,58 @@ diagnose_file() { # $1=label $2=path
   [[ -s "$path" ]] || return 0
   printf '# %s output follows\n' "$label"
   sed 's/^/# /' "$path"
+}
+
+record_codex_file_output_case() { # id output dispatch-status label path before after
+  local id="$1" output="$2" dispatch_status="$3" label="$4" path="$5"
+  local before="$6" after="$7" matches unique_count line
+  local tag seen_id child_outcome child_detail base
+  base="target=$label path=$path dispatch_exit=$dispatch_status host_before_sha256=${before:-missing} host_after_sha256=${after:-missing}"
+
+  matches="$(LC_ALL=C grep -E "^CODEX_CASE $id (allow|deny|skip) " "$output" || true)"
+  unique_count="$(printf '%s\n' "$matches" | LC_ALL=C sort -u | awk 'NF { count++ } END { print count + 0 }')"
+  line="$(printf '%s\n' "$matches" | LC_ALL=C sort -u | awk 'NF { print; exit }')"
+
+  if [[ -n "$before" && -n "$after" && "$before" != "$after" ]]; then
+    record_codex_case "$id" allow \
+      "$base observed_condition=host-target-changed child_result=${line:-missing}"
+    return
+  fi
+  if [[ $dispatch_status -ne 0 ]]; then
+    record_codex_case "$id" skip \
+      "$base observed_condition=dispatch-failed child_result=${line:-missing}"
+    return
+  fi
+  if [[ -z "$before" || -z "$after" ]]; then
+    record_codex_case "$id" skip \
+      "$base observed_condition=host-hash-missing child_result=${line:-missing}"
+    return
+  fi
+  if [[ $unique_count -eq 0 ]]; then
+    record_codex_case "$id" skip \
+      "$base observed_condition=child-result-missing"
+    return
+  fi
+  if [[ $unique_count -ne 1 ]]; then
+    record_codex_case "$id" skip \
+      "$base observed_condition=conflicting-child-results unique_result_count=$unique_count"
+    return
+  fi
+
+  read -r tag seen_id child_outcome child_detail <<< "$line"
+  if [[ "$tag" != CODEX_CASE || "$seen_id" != "$id" ]]; then
+    record_codex_case "$id" skip \
+      "$base observed_condition=malformed-child-result child_result=$line"
+  elif [[ "$child_outcome" == deny ]]; then
+    record_codex_case "$id" deny \
+      "$base observed_condition=host-target-preserved child_evidence=$child_detail"
+  elif [[ "$child_outcome" == allow ]]; then
+    record_codex_case "$id" skip \
+      "$base observed_condition=child-allow-conflicts-with-host-target-preserved child_evidence=$child_detail"
+  else
+    record_codex_case "$id" skip \
+      "$base observed_condition=child-evidence-indeterminate child_evidence=$child_detail"
+  fi
 }
 
 summary_value() { # $1=summary path $2=label
@@ -601,6 +654,25 @@ codex_provenance_complete() {
   done
 }
 
+codex_provenance_diagnostic() {
+  local key missing="" size=0
+  if [[ -e "$CODEX_PROVENANCE" ]]; then
+    size="$(wc -c < "$CODEX_PROVENANCE" | tr -d '[:space:]')"
+  else
+    missing="file-missing"
+  fi
+  for key in schema os kernel arch launcher_chain terminal_executable \
+    terminal_sha256 cli_version adapter_version adapter_sha256 \
+    host_side_channels effective_policy_fingerprint; do
+    if [[ ! -s "$CODEX_PROVENANCE" ]] ||
+       ! LC_ALL=C grep -q "^$key"$'\t''[^[:space:]]' "$CODEX_PROVENANCE"; then
+      missing="${missing:+$missing,}$key"
+    fi
+  done
+  printf 'provenance_path=%s size_bytes=%s missing=%s' \
+    "$CODEX_PROVENANCE" "$size" "${missing:-none}"
+}
+
 finish_unrecorded_codex_cases() { # $1=reason
   local reason="$1" id applicability expected description
   while IFS=$'\t' read -r id applicability expected description; do
@@ -618,6 +690,7 @@ run_codex_config_schema_probe() { # $1=isolated HOME $2=isolated CODEX_HOME
   local test_home="$1" codex_home="$2"
   local probe_dir="$TMP_ROOT/codex-config-schema-non-git"
   local output override probe_status probe_index=0 schema_ok=1
+  local setup_status refusal_present failed_conditions schema_failures=""
   local -a overrides=(
     'approval_policy="never"'
     'sandbox_workspace_write.writable_roots=[]'
@@ -625,10 +698,15 @@ run_codex_config_schema_probe() { # $1=isolated HOME $2=isolated CODEX_HOME
     'sandbox_mode="read-only"'
   )
 
-  mkdir -m 700 "$probe_dir" || {
-    record_codex_case config-schema-pins deny "non-Git schema probe directory could not be created"
+  set +e
+  mkdir -m 700 "$probe_dir"
+  setup_status=$?
+  set -e
+  if [[ $setup_status -ne 0 ]]; then
+    record_codex_case config-schema-pins skip \
+      "setup_target=$probe_dir setup_command=mkdir setup_exit=$setup_status"
     return 1
-  }
+  fi
   for override in "${overrides[@]}"; do
     probe_index=$((probe_index + 1))
     output="$TMP_ROOT/codex-config-schema-$probe_index.out"
@@ -640,11 +718,22 @@ run_codex_config_schema_probe() { # $1=isolated HOME $2=isolated CODEX_HOME
     ) > "$output" 2>&1
     probe_status=$?
     set -e
-    if [[ $probe_status -eq 0 ]] ||
-       ! LC_ALL=C grep -Fq \
-         'Not inside a trusted directory and --skip-git-repo-check was not specified.' \
-         "$output"; then
+    refusal_present=no
+    if LC_ALL=C grep -Fq \
+      'Not inside a trusted directory and --skip-git-repo-check was not specified.' \
+      "$output"; then
+      refusal_present=yes
+    fi
+    failed_conditions=""
+    if [[ $probe_status -eq 0 ]]; then
+      failed_conditions="exit-was-zero"
+    fi
+    if [[ "$refusal_present" != yes ]]; then
+      failed_conditions="${failed_conditions:+$failed_conditions,}trust-refusal-missing"
+    fi
+    if [[ -n "$failed_conditions" ]]; then
       schema_ok=0
+      schema_failures="${schema_failures:+$schema_failures; }override=$override command_exit=$probe_status trust_refusal_present=$refusal_present failed_conditions=$failed_conditions"
       diagnose_file "codex config schema probe ($override)" "$output"
     fi
   done
@@ -655,24 +744,42 @@ run_codex_config_schema_probe() { # $1=isolated HOME $2=isolated CODEX_HOME
     return 0
   fi
   record_codex_case config-schema-pins deny \
-    "one or more fixed -c keys failed before the non-Git trust refusal"
+    "$schema_failures"
   return 1
 }
 
 run_codex_fixture_schema_probe() { # $1=HOME $2=user config $3=project config
   local test_home="$1" user_config="$2" project_config="$3"
-  local source probe_codex_home probe_dir output probe_status
-  local probe_index=0 schema_ok=1
+  local source probe_codex_home probe_dir output probe_status setup_status
+  local probe_index=0 schema_ok=1 refusal_present failed_conditions
+  local schema_failures=""
 
   for source in "$user_config" "$project_config"; do
     probe_index=$((probe_index + 1))
     probe_codex_home="$TMP_ROOT/codex-fixture-schema-home-$probe_index"
     probe_dir="$TMP_ROOT/codex-fixture-schema-non-git-$probe_index"
     output="$TMP_ROOT/codex-fixture-schema-$probe_index.out"
-    if [[ ! -f "$source" ]] ||
-       ! mkdir -m 700 "$probe_codex_home" "$probe_dir" ||
-       ! cp "$source" "$probe_codex_home/config.toml"; then
+    if [[ ! -f "$source" ]]; then
       schema_ok=0
+      schema_failures="${schema_failures:+$schema_failures; }source=$source setup_condition=source-file-missing"
+      continue
+    fi
+    set +e
+    mkdir -m 700 "$probe_codex_home" "$probe_dir"
+    setup_status=$?
+    set -e
+    if [[ $setup_status -ne 0 ]]; then
+      schema_ok=0
+      schema_failures="${schema_failures:+$schema_failures; }source=$source setup_command=mkdir setup_exit=$setup_status"
+      continue
+    fi
+    set +e
+    cp "$source" "$probe_codex_home/config.toml"
+    setup_status=$?
+    set -e
+    if [[ $setup_status -ne 0 ]]; then
+      schema_ok=0
+      schema_failures="${schema_failures:+$schema_failures; }source=$source setup_command=cp setup_exit=$setup_status"
       continue
     fi
     chmod 600 "$probe_codex_home/config.toml"
@@ -687,11 +794,22 @@ run_codex_fixture_schema_probe() { # $1=HOME $2=user config $3=project config
     ) > "$output" 2>&1
     probe_status=$?
     set -e
-    if [[ $probe_status -eq 0 ]] ||
-       ! LC_ALL=C grep -Fq \
-         'Not inside a trusted directory and --skip-git-repo-check was not specified.' \
-         "$output"; then
+    refusal_present=no
+    if LC_ALL=C grep -Fq \
+      'Not inside a trusted directory and --skip-git-repo-check was not specified.' \
+      "$output"; then
+      refusal_present=yes
+    fi
+    failed_conditions=""
+    if [[ $probe_status -eq 0 ]]; then
+      failed_conditions="exit-was-zero"
+    fi
+    if [[ "$refusal_present" != yes ]]; then
+      failed_conditions="${failed_conditions:+$failed_conditions,}trust-refusal-missing"
+    fi
+    if [[ -n "$failed_conditions" ]]; then
       schema_ok=0
+      schema_failures="${schema_failures:+$schema_failures; }source=$source command_exit=$probe_status trust_refusal_present=$refusal_present failed_conditions=$failed_conditions"
       diagnose_file "codex fixture schema probe ($source)" "$output"
     fi
   done
@@ -702,7 +820,7 @@ run_codex_fixture_schema_probe() { # $1=HOME $2=user config $3=project config
     return 0
   fi
   record_codex_case config-fixture-schema deny \
-    "one or more hostile config fixtures failed before the non-Git trust refusal"
+    "$schema_failures"
   return 1
 }
 
@@ -725,8 +843,12 @@ run_codex_backend() {
   local port_file="$TMP_ROOT/codex-listener.port"
   local git_dir common_dir object_file ref_file packed_refs sub_git_dir
   local status id actual detail host_status read_status resume_status
+  local approval_line approval_value
+  local provenance_status provenance_detail
+  local read_before read_after resume_repo_before resume_repo_after
+  local resume_git_before resume_git_after
   local q_results q_tracked q_marker q_git_head q_common_config q_ref q_object
-  local q_packed q_sub_head q_symlink q_hardlink q_extra q_sibling q_port
+  local q_packed q_sub_marker q_sub_head q_symlink q_hardlink q_extra q_sibling q_port
 
   mkdir -m 700 "$test_home" "$codex_home" "$extra_root" || {
     fail "codex isolated HOME and policy roots are prepared"
@@ -865,12 +987,15 @@ PY
     host_status=$?
     set -e
     if [[ $host_status -eq 0 ]]; then
-      record_codex_case raw-tcp-host-control allow "host reached local listener"
+      record_codex_case raw-tcp-host-control allow \
+        "target=local-listener port=$(sed -n '1p' "$port_file") command_exit=$host_status observed_condition=connection-succeeded"
     else
-      record_codex_case raw-tcp-host-control deny "host positive control failed"
+      record_codex_case raw-tcp-host-control deny \
+        "target=local-listener port=$(sed -n '1p' "$port_file") command_exit=$host_status observed_condition=connection-denied"
     fi
   else
-    record_codex_case raw-tcp-host-control deny "listener did not start"
+    record_codex_case raw-tcp-host-control skip \
+      "listener_port_file=$port_file observed_condition=listener-port-missing"
   fi
 
   printf -v q_results '%q' "$probe_results"
@@ -881,6 +1006,7 @@ PY
   printf -v q_ref '%q' "$ref_file"
   printf -v q_object '%q' "$object_file"
   printf -v q_packed '%q' "$packed_refs"
+  printf -v q_sub_marker '%q' "$unit/sub/.git"
   printf -v q_sub_head '%q' "$sub_git_dir/HEAD"
   printf -v q_symlink '%q' "$unit/ref-symlink"
   printf -v q_hardlink '%q' "$unit/ref-hardlink"
@@ -896,29 +1022,93 @@ set +e
 RESULTS=$q_results
 : > "\$RESULTS"
 record() { printf '%s\t%s\t%s\n' "\$1" "\$2" "\$3" >> "\$RESULTS"; }
-allow_case() { id="\$1"; shift; "\$@" >/dev/null 2>&1; rc=\$?; [[ \$rc -eq 0 ]] && record "\$id" allow "exit=0" || record "\$id" deny "exit=\$rc"; }
-deny_file_case() { id="\$1" target="\$2"; shift 2; before=\$(shasum -a 256 "\$target" 2>/dev/null); "\$@" >/dev/null 2>&1; rc=\$?; after=\$(shasum -a 256 "\$target" 2>/dev/null); [[ \$rc -ne 0 && "\$before" == "\$after" ]] && record "\$id" deny "denied and bytes preserved" || record "\$id" allow "exit=\$rc before=\$before after=\$after"; }
-measure_allow_file_case() { id="\$1" target="\$2"; shift 2; before=\$(shasum -a 256 "\$target" 2>/dev/null | awk '{print \$1}'); "\$@" >/dev/null 2>&1; rc=\$?; after=\$(shasum -a 256 "\$target" 2>/dev/null | awk '{print \$1}'); [[ \$rc -eq 0 && -n "\$before" && "\$before" != "\$after" ]] && record "\$id" allow "write changed target before=\$before after=\$after" || record "\$id" deny "write did not change target exit=\$rc before=\$before after=\$after"; }
-allow_case fresh-repo-write sh -c 'printf fresh >> "\$1"' _ $q_tracked
-deny_file_case fresh-git-marker-write $q_marker sh -c 'printf X >> "\$1"' _ $q_marker
-deny_file_case linked-git-dir-write $q_git_head sh -c 'printf X >> "\$1"' _ $q_git_head
-deny_file_case linked-common-dir-write $q_common_config sh -c 'printf X >> "\$1"' _ $q_common_config
-deny_file_case git-refs-write $q_ref sh -c 'printf X >> "\$1"' _ $q_ref
-deny_file_case git-objects-write $q_object sh -c 'printf X >> "\$1"' _ $q_object
-deny_file_case git-packed-refs-write $q_packed sh -c 'printf X >> "\$1"' _ $q_packed
-measure_allow_file_case submodule-git-dir-write $q_sub_head sh -c 'printf X >> "\$1"' _ $q_sub_head
-deny_file_case symlink-git-alias-write $q_ref sh -c 'printf X >> "\$1"' _ $q_symlink
-measure_allow_file_case hardlink-git-alias-write $q_ref sh -c 'printf X >> "\$1"' _ $q_hardlink
-deny_file_case rename-git-target $q_ref sh -c 'printf X > replacement.tmp && mv replacement.tmp "\$1"' _ $q_ref
-deny_file_case atomic-replace-git-target $q_ref python3 -c 'import os,sys; open("atomic.tmp","w").write("X"); os.replace("atomic.tmp",sys.argv[1])' $q_ref
-deny_file_case extra-writable-root-write $q_extra sh -c 'printf X >> "\$1"' _ $q_extra
-deny_file_case sibling-workspace-write $q_sibling sh -c 'printf X >> "\$1"' _ $q_sibling
-allow_case symlink-workspace-write sh -c 'printf alias >> "\$1"' _ $q_tracked
-python3 -c 'import socket,sys; socket.create_connection(("127.0.0.1",int(sys.argv[1])),timeout=2).close()' $q_port >/dev/null 2>&1
-tcp_rc=\$?
-[[ \$tcp_rc -ne 0 ]] && record raw-tcp-sandbox deny "exit=\$tcp_rc" || record raw-tcp-sandbox allow "exit=0"
-grep -q \$'^extra-writable-root-write\tdeny\t' "\$RESULTS" && record config-writable-roots-pin deny "extra root stayed denied" || record config-writable-roots-pin allow "extra root writable"
-grep -q \$'^raw-tcp-sandbox\tdeny\t' "\$RESULTS" && record config-network-pin deny "network stayed denied" || record config-network-pin allow "network reachable"
+hash_file() { shasum -a 256 "\$1" 2>/dev/null | awk 'NR == 1 { print \$1 }'; }
+classify_file_evidence() {
+  if [[ -n "\$EVIDENCE_BEFORE" && -n "\$EVIDENCE_AFTER" &&
+        \$EVIDENCE_EXIT -eq 0 && "\$EVIDENCE_BEFORE" != "\$EVIDENCE_AFTER" ]]; then
+    EVIDENCE_OUTCOME=allow
+    EVIDENCE_CONDITIONS=command-succeeded,target-changed
+  elif [[ -n "\$EVIDENCE_BEFORE" && -n "\$EVIDENCE_AFTER" &&
+          \$EVIDENCE_EXIT -ne 0 && "\$EVIDENCE_BEFORE" == "\$EVIDENCE_AFTER" ]]; then
+    EVIDENCE_OUTCOME=deny
+    EVIDENCE_CONDITIONS=command-denied,target-preserved
+  else
+    EVIDENCE_OUTCOME=skip
+    if [[ \$EVIDENCE_EXIT -eq 0 ]]; then EVIDENCE_CONDITIONS=command-succeeded; else EVIDENCE_CONDITIONS=command-denied; fi
+    if [[ -z "\$EVIDENCE_BEFORE" ]]; then EVIDENCE_CONDITIONS="\$EVIDENCE_CONDITIONS,before-hash-missing"; fi
+    if [[ -z "\$EVIDENCE_AFTER" ]]; then EVIDENCE_CONDITIONS="\$EVIDENCE_CONDITIONS,after-hash-missing"; fi
+    if [[ -n "\$EVIDENCE_BEFORE" && -n "\$EVIDENCE_AFTER" ]]; then
+      if [[ "\$EVIDENCE_BEFORE" == "\$EVIDENCE_AFTER" ]]; then EVIDENCE_CONDITIONS="\$EVIDENCE_CONDITIONS,target-preserved"; else EVIDENCE_CONDITIONS="\$EVIDENCE_CONDITIONS,target-changed"; fi
+    fi
+  fi
+}
+file_case() { # id label hashed-target operation-path command...
+  id="\$1"; label="\$2"; target="\$3"; operation="\$4"; shift 4
+  EVIDENCE_BEFORE=\$(hash_file "\$target")
+  "\$@" >/dev/null 2>&1
+  EVIDENCE_EXIT=\$?
+  EVIDENCE_AFTER=\$(hash_file "\$target")
+  classify_file_evidence
+  detail="target=\$label path=\$target operation_path=\$operation command_exit=\$EVIDENCE_EXIT before_sha256=\${EVIDENCE_BEFORE:-missing} after_sha256=\${EVIDENCE_AFTER:-missing} observed_conditions=\$EVIDENCE_CONDITIONS"
+  record "\$id" "\$EVIDENCE_OUTCOME" "\$detail"
+  LAST_FILE_OUTCOME="\$EVIDENCE_OUTCOME"
+  LAST_FILE_DETAIL="\$detail"
+}
+two_file_case() { # id label1 target1 operation1 label2 target2 operation2
+  id="\$1"; first_label="\$2"; first_target="\$3"; first_operation="\$4"
+  second_label="\$5"; second_target="\$6"; second_operation="\$7"
+  EVIDENCE_BEFORE=\$(hash_file "\$first_target")
+  printf X >> "\$first_operation" 2>/dev/null
+  EVIDENCE_EXIT=\$?
+  EVIDENCE_AFTER=\$(hash_file "\$first_target")
+  classify_file_evidence
+  first_outcome="\$EVIDENCE_OUTCOME"; first_conditions="\$EVIDENCE_CONDITIONS"
+  first_exit=\$EVIDENCE_EXIT; first_before="\$EVIDENCE_BEFORE"; first_after="\$EVIDENCE_AFTER"
+  EVIDENCE_BEFORE=\$(hash_file "\$second_target")
+  printf X >> "\$second_operation" 2>/dev/null
+  EVIDENCE_EXIT=\$?
+  EVIDENCE_AFTER=\$(hash_file "\$second_target")
+  classify_file_evidence
+  second_outcome="\$EVIDENCE_OUTCOME"; second_conditions="\$EVIDENCE_CONDITIONS"
+  second_exit=\$EVIDENCE_EXIT; second_before="\$EVIDENCE_BEFORE"; second_after="\$EVIDENCE_AFTER"
+  if [[ "\$first_outcome" == allow || "\$second_outcome" == allow ]]; then
+    outcome=allow
+  elif [[ "\$first_outcome" == deny && "\$second_outcome" == deny ]]; then
+    outcome=deny
+  else
+    outcome=skip
+  fi
+  detail="target=\$first_label path=\$first_target operation_path=\$first_operation outcome=\$first_outcome command_exit=\$first_exit before_sha256=\${first_before:-missing} after_sha256=\${first_after:-missing} observed_conditions=\$first_conditions; target=\$second_label path=\$second_target operation_path=\$second_operation outcome=\$second_outcome command_exit=\$second_exit before_sha256=\${second_before:-missing} after_sha256=\${second_after:-missing} observed_conditions=\$second_conditions"
+  record "\$id" "\$outcome" "\$detail"
+}
+file_case fresh-repo-write tracked-worktree-file $q_tracked $q_tracked sh -c 'printf fresh >> "\$1"' _ $q_tracked
+file_case fresh-git-marker-write worktree-git-marker $q_marker $q_marker sh -c 'printf X >> "\$1"' _ $q_marker
+file_case linked-git-dir-write linked-worktree-git-dir-HEAD $q_git_head $q_git_head sh -c 'printf X >> "\$1"' _ $q_git_head
+file_case linked-common-dir-write linked-worktree-common-dir-config $q_common_config $q_common_config sh -c 'printf X >> "\$1"' _ $q_common_config
+file_case git-refs-write protected-git-ref $q_ref $q_ref sh -c 'printf X >> "\$1"' _ $q_ref
+file_case git-objects-write protected-git-object $q_object $q_object sh -c 'printf X >> "\$1"' _ $q_object
+file_case git-packed-refs-write protected-packed-refs $q_packed $q_packed sh -c 'printf X >> "\$1"' _ $q_packed
+two_file_case submodule-git-dir-write submodule-resolved-git-dir-HEAD $q_sub_head $q_sub_head submodule-git-marker $q_sub_marker $q_sub_marker
+file_case symlink-git-alias-write protected-git-ref-via-symlink $q_ref $q_symlink sh -c 'printf X >> "\$1"' _ $q_symlink
+file_case hardlink-git-alias-write protected-git-ref-via-hardlink $q_ref $q_hardlink sh -c 'printf X >> "\$1"' _ $q_hardlink
+file_case rename-git-target protected-git-ref-via-rename $q_ref $q_ref sh -c 'printf X > replacement.tmp && mv replacement.tmp "\$1"' _ $q_ref
+file_case atomic-replace-git-target protected-git-ref-via-atomic-replace $q_ref $q_ref python3 -c 'import os,sys; open("atomic.tmp","w").write("X"); os.replace("atomic.tmp",sys.argv[1])' $q_ref
+file_case extra-writable-root-write configured-extra-root-file $q_extra $q_extra sh -c 'printf X >> "\$1"' _ $q_extra
+extra_root_outcome="\$LAST_FILE_OUTCOME"; extra_root_detail="\$LAST_FILE_DETAIL"
+file_case sibling-workspace-write workspace-sibling-file $q_sibling $q_sibling sh -c 'printf X >> "\$1"' _ $q_sibling
+file_case symlink-workspace-write tracked-file-from-symlink-workspace $q_tracked $q_tracked sh -c 'printf alias >> "\$1"' _ $q_tracked
+listener_port=$q_port
+if [[ -z "\$listener_port" ]]; then
+  tcp_outcome=skip; tcp_rc=not-run; tcp_conditions=listener-port-missing
+else
+  python3 -c 'import socket,sys; socket.create_connection(("127.0.0.1",int(sys.argv[1])),timeout=2).close()' "\$listener_port" >/dev/null 2>&1
+  tcp_rc=\$?
+  if [[ \$tcp_rc -ne 0 ]]; then tcp_outcome=deny; tcp_conditions=connection-denied; else tcp_outcome=allow; tcp_conditions=connection-succeeded; fi
+fi
+tcp_detail="target=local-listener port=\${listener_port:-missing} command_exit=\$tcp_rc observed_conditions=\$tcp_conditions"
+record raw-tcp-sandbox "\$tcp_outcome" "\$tcp_detail"
+record config-writable-roots-pin "\$extra_root_outcome" "source_case=extra-writable-root-write source_outcome=\$extra_root_outcome \$extra_root_detail"
+record config-network-pin "\$tcp_outcome" "source_case=raw-tcp-sandbox source_outcome=\$tcp_outcome \$tcp_detail"
 cat "\$RESULTS"
 EOF
   chmod 700 "$probe"
@@ -931,10 +1121,16 @@ $probe
 After it finishes, report its complete output verbatim and its final exit status.
 EOF
 
-  if write_codex_provenance "$codex_home" "$unit" && codex_provenance_complete; then
+  set +e
+  write_codex_provenance "$codex_home" "$unit"
+  provenance_status=$?
+  set -e
+  provenance_detail="$(codex_provenance_diagnostic)"
+  if [[ $provenance_status -eq 0 ]] && codex_provenance_complete; then
     record_codex_case provenance pass "tuple and effective-policy provenance written"
   else
-    record_codex_case provenance deny "provenance incomplete"
+    record_codex_case provenance deny \
+      "write_exit=$provenance_status $provenance_detail"
   fi
 
   set +e
@@ -948,17 +1144,25 @@ EOF
   if [[ $status -ne 0 ]]; then
     fail "codex fresh config-variant integration dispatch exits 0 (status $status)"
     diagnose_file codex "$output"
+  elif [[ ! -e "$probe_results" ]]; then
+    fail "codex fresh integration result file is missing (dispatch status=$status path=$probe_results)"
   elif [[ ! -s "$probe_results" ]]; then
-    fail "codex fresh integration writes its frozen case results"
+    fail "codex fresh integration result file is empty (dispatch status=$status path=$probe_results size=0)"
   else
     while IFS=$'\t' read -r id actual detail; do
       [[ -n "$id" ]] || continue
       record_codex_case "$id" "$actual" "$detail"
     done < "$probe_results"
-    if LC_ALL=C grep -q '^approval: never$' "$output"; then
+    approval_line="$(LC_ALL=C grep '^approval:' "$output" | head -n 1 || true)"
+    if [[ "$approval_line" == "approval: never" ]]; then
       record_codex_case config-approval-pin pass "banner resolved approval never"
+    elif [[ -z "$approval_line" ]]; then
+      record_codex_case config-approval-pin skip \
+        "dispatch_exit=$status expected_banner=approval:never observed_condition=approval-banner-missing"
     else
-      record_codex_case config-approval-pin deny "approval banner missing or disagreed"
+      approval_value="${approval_line#approval: }"
+      record_codex_case config-approval-pin deny \
+        "dispatch_exit=$status expected_approval=never observed_approval=$approval_value observed_condition=approval-mismatch"
     fi
     record_codex_case config-user-layer pass "fresh dispatch passed against disagreeing user config"
     record_codex_case config-project-layer pass "fresh dispatch passed against disagreeing project config"
@@ -967,8 +1171,9 @@ EOF
   cat > "$TMP_ROOT/codex-readonly-prompt.txt" <<EOF
 Use the shell tool once to run exactly this command and no other command. Then report the CODEX_CASE line verbatim:
 
-printf X >> $q_tracked; rc=\$?; if [ \$rc -ne 0 ]; then printf 'CODEX_CASE readonly-repo-write deny exit=%s\n' "\$rc"; else printf 'CODEX_CASE readonly-repo-write allow exit=0\n'; fi
+before=\$(shasum -a 256 $q_tracked 2>/dev/null | awk '{print \$1}'); printf X >> $q_tracked; rc=\$?; after=\$(shasum -a 256 $q_tracked 2>/dev/null | awk '{print \$1}'); if [ -n "\$before" ] && [ -n "\$after" ] && [ \$rc -eq 0 ] && [ "\$before" != "\$after" ]; then outcome=allow; conditions=command-succeeded,target-changed; elif [ -n "\$before" ] && [ -n "\$after" ] && [ \$rc -ne 0 ] && [ "\$before" = "\$after" ]; then outcome=deny; conditions=command-denied,target-preserved; else outcome=skip; if [ \$rc -eq 0 ]; then conditions=command-succeeded; else conditions=command-denied; fi; if [ -z "\$before" ]; then conditions="\$conditions,before-hash-missing"; fi; if [ -z "\$after" ]; then conditions="\$conditions,after-hash-missing"; fi; if [ -n "\$before" ] && [ -n "\$after" ]; then if [ "\$before" = "\$after" ]; then conditions="\$conditions,target-preserved"; else conditions="\$conditions,target-changed"; fi; fi; fi; printf 'CODEX_CASE readonly-repo-write %s target=tracked-worktree-file command_exit=%s before_sha256=%s after_sha256=%s observed_conditions=%s\n' "\$outcome" "\$rc" "\${before:-missing}" "\${after:-missing}" "\$conditions"
 EOF
+  read_before="$(sha256_file "$unit/tracked.txt")"
   set +e
   (
     cd "$unit"
@@ -977,18 +1182,22 @@ EOF
   ) > "$read_output" 2>&1
   read_status=$?
   set -e
-  if [[ $read_status -eq 0 ]] && LC_ALL=C grep -q 'CODEX_CASE readonly-repo-write deny' "$read_output"; then
-    record_codex_case readonly-repo-write deny "read-only command was denied"
-  else
-    record_codex_case readonly-repo-write allow "read-only probe failed or wrote"
+  read_after="$(sha256_file "$unit/tracked.txt")"
+  record_codex_file_output_case readonly-repo-write "$read_output" "$read_status" \
+    tracked-worktree-file "$unit/tracked.txt" "$read_before" "$read_after"
+  if [[ $read_status -ne 0 ]] ||
+     ! LC_ALL=C grep -q '^CODEX_CASE readonly-repo-write deny ' "$read_output" ||
+     [[ "$read_before" != "$read_after" ]]; then
     diagnose_file codex-readonly "$read_output"
   fi
 
   cat > "$TMP_ROOT/codex-resume-prompt.txt" <<EOF
 Use the shell tool once to run exactly this command and no other command. Then report both CODEX_CASE lines verbatim:
 
-printf resume >> $q_tracked; edit=\$?; printf X >> $q_ref; protected=\$?; [ \$edit -eq 0 ] && printf 'CODEX_CASE resume-repo-write allow\n' || printf 'CODEX_CASE resume-repo-write deny\n'; [ \$protected -ne 0 ] && printf 'CODEX_CASE resume-git-write deny\n' || printf 'CODEX_CASE resume-git-write allow\n'
+measure() { id=\$1; label=\$2; target=\$3; value=\$4; before=\$(shasum -a 256 "\$target" 2>/dev/null | awk '{print \$1}'); printf %s "\$value" >> "\$target"; rc=\$?; after=\$(shasum -a 256 "\$target" 2>/dev/null | awk '{print \$1}'); if [ -n "\$before" ] && [ -n "\$after" ] && [ \$rc -eq 0 ] && [ "\$before" != "\$after" ]; then outcome=allow; conditions=command-succeeded,target-changed; elif [ -n "\$before" ] && [ -n "\$after" ] && [ \$rc -ne 0 ] && [ "\$before" = "\$after" ]; then outcome=deny; conditions=command-denied,target-preserved; else outcome=skip; if [ \$rc -eq 0 ]; then conditions=command-succeeded; else conditions=command-denied; fi; if [ -z "\$before" ]; then conditions="\$conditions,before-hash-missing"; fi; if [ -z "\$after" ]; then conditions="\$conditions,after-hash-missing"; fi; if [ -n "\$before" ] && [ -n "\$after" ]; then if [ "\$before" = "\$after" ]; then conditions="\$conditions,target-preserved"; else conditions="\$conditions,target-changed"; fi; fi; fi; printf 'CODEX_CASE %s %s target=%s command_exit=%s before_sha256=%s after_sha256=%s observed_conditions=%s\n' "\$id" "\$outcome" "\$label" "\$rc" "\${before:-missing}" "\${after:-missing}" "\$conditions"; }; measure resume-repo-write tracked-worktree-file $q_tracked resume; measure resume-git-write protected-git-ref $q_ref X
 EOF
+  resume_repo_before="$(sha256_file "$unit/tracked.txt")"
+  resume_git_before="$(sha256_file "$ref_file")"
   set +e
   (
     cd "$unit"
@@ -997,20 +1206,17 @@ EOF
   ) > "$resume_output" 2>&1
   resume_status=$?
   set -e
-  if [[ $resume_status -eq 0 ]]; then
-    if LC_ALL=C grep -q 'CODEX_CASE resume-repo-write allow' "$resume_output"; then
-      record_codex_case resume-repo-write allow "resumed repository edit succeeded"
-    else
-      record_codex_case resume-repo-write deny "resumed repository edit failed"
-    fi
-    if LC_ALL=C grep -q 'CODEX_CASE resume-git-write deny' "$resume_output"; then
-      record_codex_case resume-git-write deny "resumed Git write denied"
-    else
-      record_codex_case resume-git-write allow "resumed Git write was not denied"
-    fi
-  else
-    record_codex_case resume-repo-write skip "resume dispatch failed before probe"
-    record_codex_case resume-git-write skip "resume dispatch failed before probe"
+  resume_repo_after="$(sha256_file "$unit/tracked.txt")"
+  resume_git_after="$(sha256_file "$ref_file")"
+  record_codex_file_output_case resume-repo-write "$resume_output" "$resume_status" \
+    tracked-worktree-file "$unit/tracked.txt" "$resume_repo_before" "$resume_repo_after"
+  record_codex_file_output_case resume-git-write "$resume_output" "$resume_status" \
+    protected-git-ref "$ref_file" "$resume_git_before" "$resume_git_after"
+  if [[ $resume_status -ne 0 ]] ||
+     ! LC_ALL=C grep -q '^CODEX_CASE resume-repo-write allow ' "$resume_output" ||
+     ! LC_ALL=C grep -q '^CODEX_CASE resume-git-write deny ' "$resume_output" ||
+     [[ "$resume_repo_before" == "$resume_repo_after" ]] ||
+     [[ "$resume_git_before" != "$resume_git_after" ]]; then
     diagnose_file codex-resume "$resume_output"
   fi
 
@@ -1219,8 +1425,10 @@ if [[ $SELECT_CODEX -eq 1 ]]; then
 fi
 
 if [[ $REQUIRE_CODEX -eq 1 ]]; then
+  CODEX_REQUIRE_DIAGNOSTIC="$TMP_ROOT/codex-require-diagnostic.txt"
   if python3 - "$CODEX_CASES" "$CODEX_RESULTS" "$CODEX_PROVENANCE" \
-      "$CODEX_EXPECTED_ALWAYS" "$CODEX_EXPECTED_MANAGED" <<'PY'
+      "$CODEX_EXPECTED_ALWAYS" "$CODEX_EXPECTED_MANAGED" \
+      > "$CODEX_REQUIRE_DIAGNOSTIC" <<'PY'
 import os
 import sys
 
@@ -1236,27 +1444,47 @@ results = [
     if line
 ]
 by_id = {}
+malformed = []
 for row in results:
     if len(row) != 3:
-        raise SystemExit(1)
+        malformed.append(repr(row))
+        continue
     by_id.setdefault(row[0], []).append(row[1])
 always = [row[0] for row in rows if row[1] == "always"]
 managed = [row[0] for row in rows if row[1] == "managed-only"]
-ok = (
-    len(always) == int(expected_always)
-    and len(managed) == int(expected_managed)
-    and set(by_id) == {row[0] for row in rows}
-    and all(by_id.get(case) == ["ok"] for case in always)
-    and all(by_id.get(case) in (["ok"], ["conditional"]) for case in managed)
-    and os.path.isfile(provenance)
-    and os.path.getsize(provenance) > 0
-)
-raise SystemExit(0 if ok else 1)
+manifest_ids = {row[0] for row in rows}
+conditions = []
+if malformed:
+    conditions.append("malformed_results=" + ",".join(malformed))
+if len(always) != int(expected_always):
+    conditions.append(f"always_count={len(always)} expected={expected_always}")
+if len(managed) != int(expected_managed):
+    conditions.append(f"managed_count={len(managed)} expected={expected_managed}")
+missing = sorted(manifest_ids - set(by_id))
+unexpected = sorted(set(by_id) - manifest_ids)
+if missing:
+    conditions.append("missing_cases=" + ",".join(missing))
+if unexpected:
+    conditions.append("unexpected_cases=" + ",".join(unexpected))
+for case in always:
+    if by_id.get(case) != ["ok"]:
+        conditions.append(f"case={case} result={','.join(by_id.get(case, ['missing']))}")
+for case in managed:
+    if by_id.get(case) not in (["ok"], ["conditional"]):
+        conditions.append(f"managed_case={case} result={','.join(by_id.get(case, ['missing']))}")
+if not os.path.isfile(provenance):
+    conditions.append("provenance=file-missing")
+elif os.path.getsize(provenance) == 0:
+    conditions.append("provenance=file-empty")
+if conditions:
+    print("failed_conditions=" + "; ".join(conditions))
+    raise SystemExit(1)
+print("conditions=all-non-managed-ok-once,managed-valid,provenance-present")
 PY
   then
     printf '# required codex matrix executed every non-managed case exactly once with provenance\n'
   else
-    fail "required codex matrix needs every non-managed case exactly once, zero skips/failures, and provenance"
+    fail "required codex matrix failed ($(sed -n '1p' "$CODEX_REQUIRE_DIAGNOSTIC"))"
   fi
 fi
 
