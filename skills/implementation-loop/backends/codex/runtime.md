@@ -45,8 +45,16 @@ Every invocation also carries:
 --strict-config
 -c 'sandbox_workspace_write.writable_roots=[]'
 -c 'sandbox_workspace_write.network_access=false'
--c 'sandbox_permissions=[]'
 ```
+
+Do not add `sandbox_permissions=[]` from the `codex exec --help` examples. In
+codex-cli 0.147.0 that help text is stale relative to the real configuration
+schema: `sandbox_permissions` is not a schema field, and `--strict-config`
+makes the unknown `-c` override fatal during config loading. The same strict
+schema rejects that field in user config, so there is no accepted ambient value
+for the adapter to clear. Before shipping any new fixed `-c` key, validate it
+against the installed real CLI with the non-Git, pre-API `config-schema-pins`
+case in `tests/integration-test.sh`; PATH stubs cannot validate config schemas.
 
 Resume accepts neither `-s` nor `-C`; omitting the explicit `sandbox_mode`
 override would fall through to ambient config rather than inherit the original

@@ -13,7 +13,7 @@ GROK_DISPATCH="$SCRIPT_DIR/../backends/grok/dispatch.sh"
 CURSOR_DISPATCH="$SCRIPT_DIR/../backends/cursor/dispatch.sh"
 CODEX_DISPATCH="$SCRIPT_DIR/../backends/codex/dispatch.sh"
 CODEX_CASES="$SCRIPT_DIR/codex-cases.tsv"
-CODEX_CASES_SHA256="a4ed463a92fc9f46854c069290b117cd714ed4fe0ad2b7918cda0571a701970c"
+CODEX_CASES_SHA256="b503670de17ce6f8ea91530fdb850457676e85d71969ce797dcbfd9df1e153c7"
 SELECT_GROK=0
 SELECT_CURSOR=0
 SELECT_CODEX=0
@@ -216,6 +216,7 @@ skip_all_codex_cases() { # $1=reason
   local reason="$1" id applicability expected description
   while IFS=$'\t' read -r id applicability expected description; do
     [[ -n "$id" && "$id" != \#* ]] || continue
+    codex_recorded "$id" && continue
     if [[ "$applicability" == "managed-only" ]]; then
       record_codex_managed_conditional
     else
@@ -519,7 +520,6 @@ fingerprint_input = {
         "approval_policy": "never",
         "writable_roots": [],
         "network_access": False,
-        "sandbox_permissions": [],
     },
     "config_hashes": {
         path: digest(path) for path in (user_config, project_config) if os.path.isfile(path)
@@ -594,6 +594,51 @@ finish_unrecorded_codex_cases() { # $1=reason
   done < "$CODEX_CASES"
 }
 
+run_codex_config_schema_probe() { # $1=isolated HOME $2=isolated CODEX_HOME
+  local test_home="$1" codex_home="$2"
+  local probe_dir="$TMP_ROOT/codex-config-schema-non-git"
+  local output override probe_status probe_index=0 schema_ok=1
+  local -a overrides=(
+    'approval_policy="never"'
+    'sandbox_workspace_write.writable_roots=[]'
+    'sandbox_workspace_write.network_access=false'
+    'sandbox_mode="read-only"'
+  )
+
+  mkdir -m 700 "$probe_dir" || {
+    record_codex_case config-schema-pins deny "non-Git schema probe directory could not be created"
+    return 1
+  }
+  for override in "${overrides[@]}"; do
+    probe_index=$((probe_index + 1))
+    output="$TMP_ROOT/codex-config-schema-$probe_index.out"
+    set +e
+    (
+      cd "$probe_dir"
+      HOME="$test_home" CODEX_HOME="$codex_home" codex exec \
+        --strict-config -c "$override" -- 'schema probe only' </dev/null
+    ) > "$output" 2>&1
+    probe_status=$?
+    set -e
+    if [[ $probe_status -eq 0 ]] ||
+       ! LC_ALL=C grep -Fq \
+         'Not inside a trusted directory and --skip-git-repo-check was not specified.' \
+         "$output"; then
+      schema_ok=0
+      diagnose_file "codex config schema probe ($override)" "$output"
+    fi
+  done
+
+  if [[ $schema_ok -eq 1 ]]; then
+    record_codex_case config-schema-pins pass \
+      "all four fixed -c keys reached the pre-API non-Git trust refusal"
+    return 0
+  fi
+  record_codex_case config-schema-pins deny \
+    "one or more fixed -c keys failed before the non-Git trust refusal"
+  return 1
+}
+
 run_codex_backend() {
   local test_home="$TMP_ROOT/codex-home"
   local codex_home="$test_home/.codex"
@@ -620,6 +665,10 @@ run_codex_backend() {
     finish_unrecorded_codex_cases "fixture setup failed"
     return
   }
+  if ! run_codex_config_schema_probe "$test_home" "$codex_home"; then
+    finish_unrecorded_codex_cases "real CLI config-schema probe failed before any API call"
+    return
+  fi
   if [[ -f "$ORIGINAL_HOME/.codex/auth.json" ]]; then
     cp "$ORIGINAL_HOME/.codex/auth.json" "$codex_home/auth.json"
     chmod 600 "$codex_home/auth.json"
@@ -677,7 +726,6 @@ run_codex_backend() {
     'profile = "unsafe"' \
     'approval_policy = "on-request"' \
     'sandbox_mode = "danger-full-access"' \
-    'sandbox_permissions = ["disk-full-read-access"]' \
     '[sandbox_workspace_write]' \
     'writable_roots = ["'"$extra_root"'"]' \
     'network_access = true' \
@@ -777,7 +825,6 @@ tcp_rc=\$?
 [[ \$tcp_rc -ne 0 ]] && record raw-tcp-sandbox deny "exit=\$tcp_rc" || record raw-tcp-sandbox allow "exit=0"
 grep -q \$'^extra-writable-root-write\tdeny\t' "\$RESULTS" && record config-writable-roots-pin deny "extra root stayed denied" || record config-writable-roots-pin allow "extra root writable"
 grep -q \$'^raw-tcp-sandbox\tdeny\t' "\$RESULTS" && record config-network-pin deny "network stayed denied" || record config-network-pin allow "network reachable"
-grep -q \$'^sibling-workspace-write\tdeny\t' "\$RESULTS" && record config-permissions-pin deny "sibling stayed denied" || record config-permissions-pin allow "sibling writable"
 cat "\$RESULTS"
 EOF
   chmod 700 "$probe"

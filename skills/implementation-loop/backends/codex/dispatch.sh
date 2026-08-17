@@ -578,6 +578,12 @@ def build_codex_argv(kind, mode, session_id, output_path):
         if not SESSION_RE.fullmatch(session_id):
             raise StateError("resume requires an exact UUID session id")
         argv.extend(["resume", session_id, "-c", f'sandbox_mode={toml_string(mode)}'])
+    # Do not add sandbox_permissions=[] from `codex exec --help`: in codex-cli
+    # 0.147.0 that example is stale and the key is absent from the real config
+    # schema. --strict-config makes an unknown -c key fatal before startup, and
+    # the same schema rejects it in user config, so there is no ambient value to
+    # pin away. Validate every new fixed -c key with the real-CLI integration
+    # schema probe before shipping it.
     argv.extend(
         [
             "-c",
@@ -587,8 +593,6 @@ def build_codex_argv(kind, mode, session_id, output_path):
             "sandbox_workspace_write.writable_roots=[]",
             "-c",
             "sandbox_workspace_write.network_access=false",
-            "-c",
-            "sandbox_permissions=[]",
         ]
     )
     if kind == "fresh":
