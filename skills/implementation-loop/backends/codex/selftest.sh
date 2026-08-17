@@ -190,6 +190,27 @@ PY
   fi
 }
 
+expect_argv_config_key_count() { # $1=log $2=key $3=count $4=description
+  if python3 - "$1" "$2" "$3" <<'PY'
+import sys
+
+path, key, expected = sys.argv[1:]
+raw = open(path, "rb").read().split(b"\0")
+argv = [item.decode("utf-8") for item in raw if item]
+count = sum(
+    1
+    for index, value in enumerate(argv[:-1])
+    if value == "-c" and argv[index + 1].partition("=")[0] == key
+)
+raise SystemExit(0 if count == int(expected) else 1)
+PY
+  then
+    pass "$4"
+  else
+    fail "$4"
+  fi
+}
+
 expect_argv_sequence() { # $1=log $2=description, remaining=sequence
   local log="$1" description="$2"
   shift 2
@@ -337,14 +358,14 @@ raw = open(sys.argv[1], "rb").read()
 lines = raw.decode("utf-8").splitlines()
 if not lines or lines[0] != "#schema=1":
     raise SystemExit(1)
-if hashlib.sha256(raw).hexdigest() != "a4ed463a92fc9f46854c069290b117cd714ed4fe0ad2b7918cda0571a701970c":
+if hashlib.sha256(raw).hexdigest() != "b503670de17ce6f8ea91530fdb850457676e85d71969ce797dcbfd9df1e153c7":
     raise SystemExit(1)
 rows = [line.split("\t") for line in lines[1:] if line and not line.startswith("#")]
 ids = [row[0] for row in rows if len(row) == 4]
 required = {
     "fresh-repo-write", "linked-git-dir-write", "submodule-git-dir-write",
     "raw-tcp-host-control", "raw-tcp-sandbox", "resume-repo-write",
-    "config-approval-pin", "managed-layer-pin",
+    "config-approval-pin", "config-schema-pins", "managed-layer-pin",
 }
 ok = (
     rows
@@ -383,7 +404,7 @@ expect_argv_sequence "$FRESH_LOG" "fresh argv pins quoted approval never" -c 'ap
 expect_argv_count "$FRESH_LOG" --strict-config 1 "fresh argv carries --strict-config exactly once"
 expect_argv_sequence "$FRESH_LOG" "fresh argv clears inherited writable roots" -c 'sandbox_workspace_write.writable_roots=[]'
 expect_argv_sequence "$FRESH_LOG" "fresh argv pins network access false" -c 'sandbox_workspace_write.network_access=false'
-expect_argv_sequence "$FRESH_LOG" "fresh argv clears sandbox permissions" -c 'sandbox_permissions=[]'
+expect_argv_config_key_count "$FRESH_LOG" sandbox_permissions 0 "fresh argv omits nonexistent sandbox_permissions key"
 expect_argv_sequence "$FRESH_LOG" "fresh argv pins the canonical workspace" -C "$WORKSPACE"
 expect_argv_sequence "$FRESH_LOG" "fresh argv forwards explicit model" -m gpt-test
 expect_argv_sequence "$FRESH_LOG" "max effort is a quoted TOML override" -c 'model_reasoning_effort="max"'
@@ -433,7 +454,7 @@ expect_argv_sequence "$READONLY_LOG" "read-only argv still pins approval" -c 'ap
 expect_argv_count "$READONLY_LOG" --strict-config 1 "read-only argv carries --strict-config"
 expect_argv_sequence "$READONLY_LOG" "read-only argv still pins nested writable roots" -c 'sandbox_workspace_write.writable_roots=[]'
 expect_argv_sequence "$READONLY_LOG" "read-only argv still pins nested network" -c 'sandbox_workspace_write.network_access=false'
-expect_argv_sequence "$READONLY_LOG" "read-only argv still pins nested permissions" -c 'sandbox_permissions=[]'
+expect_argv_config_key_count "$READONLY_LOG" sandbox_permissions 0 "read-only argv omits nonexistent sandbox_permissions key"
 expect_argv_count "$READONLY_LOG" --json 0 "read-only argv omits --json"
 expect_argv_no_forbidden "$READONLY_LOG" "read-only constructed argv contains no policy broadener"
 expect_first_line "$READONLY_STDIN" devnull "read-only codex exec stdin is /dev/null"
@@ -466,7 +487,7 @@ expect_argv_sequence "$RESUME_LOG" "resume argv pins quoted approval never" -c '
 expect_argv_count "$RESUME_LOG" --strict-config 1 "resume argv carries --strict-config exactly once"
 expect_argv_sequence "$RESUME_LOG" "resume argv clears inherited writable roots" -c 'sandbox_workspace_write.writable_roots=[]'
 expect_argv_sequence "$RESUME_LOG" "resume argv pins network access false" -c 'sandbox_workspace_write.network_access=false'
-expect_argv_sequence "$RESUME_LOG" "resume argv clears sandbox permissions" -c 'sandbox_permissions=[]'
+expect_argv_config_key_count "$RESUME_LOG" sandbox_permissions 0 "resume argv omits nonexistent sandbox_permissions key"
 expect_argv_sequence "$RESUME_LOG" "resume forwards max as a quoted TOML override" -c 'model_reasoning_effort="max"'
 expect_argv_count "$RESUME_LOG" --json 0 "resume argv omits --json"
 expect_argv_no_forbidden "$RESUME_LOG" "resume constructed argv contains no policy broadener"

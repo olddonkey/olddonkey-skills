@@ -23,7 +23,7 @@ resume-repo-write	always	allow	resumed workspace-write can modify repository fil
 resume-git-write	always	deny	resumed workspace-write keeps Git state protected
 config-writable-roots-pin	always	deny	disagreeing configured writable roots do not take effect
 config-network-pin	always	deny	disagreeing configured network access does not take effect
-config-permissions-pin	always	deny	disagreeing configured sandbox permissions do not take effect
+config-schema-pins	always	pass	every fixed adapter config override is accepted by the real CLI schema
 config-approval-pin	always	pass	disagreeing approval policy resolves to never
 config-user-layer	always	pass	user-layer disagreement is overridden by adapter pins
 config-project-layer	always	pass	project-layer disagreement is overridden by adapter pins
