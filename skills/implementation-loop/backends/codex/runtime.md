@@ -55,6 +55,8 @@ schema rejects that field in user config, so there is no accepted ambient value
 for the adapter to clear. Before shipping any new fixed `-c` key, validate it
 against the installed real CLI with the non-Git, pre-API `config-schema-pins`
 case in `tests/integration-test.sh`; PATH stubs cannot validate config schemas.
+The same gate's `config-fixture-schema` case independently loads the exact
+hostile user and project fixture bytes as user config before any paid dispatch.
 
 Resume accepts neither `-s` nor `-C`; omitting the explicit `sandbox_mode`
 override would fall through to ambient config rather than inherit the original
@@ -62,6 +64,15 @@ thread policy. The adapter never uses `--last`, never passes `--json`, and
 redirects the child stdin from `/dev/null`. It rejects policy broadeners,
 including bypass flags, extra writable directories, profiles, config/rule
 ignores, and feature toggles.
+
+Profile layering is unreachable through the adapter. In codex-cli 0.147.0 a
+profile is a standalone `$CODEX_HOME/<name>.config.toml` file selected with
+`--profile <name>`; profiles are not an ambient layer. The adapter rejects both
+`-p` and `--profile`, so the former frozen `config-profile-layer` integration
+case was retired rather than claiming that an active profile was overridden.
+The real coverage is in `backends/codex/selftest.sh`: “`--profile` is refused by
+the direct parser guard” and “`--profile` never reaches Codex argv.” The live
+matrix continues to exercise hostile valid user and project config layers.
 
 The adapter scans only the initial delimited human banner block for
 `approval:`, `sandbox:`, and the session id while teeing the full stream to
@@ -90,6 +101,12 @@ case with no skip or failure. While disabled, iterate with a fresh dispatch and
 carry the prior findings in the prompt. Once enabled, `--resume` selects the
 highest ready loop-owned exact id, and `--resume ID` additionally asserts that
 id. It never selects unrelated interactive work.
+
+To avoid making that release gate circular, the integration harness exercises
+resume through an exact temporary adapter copy whose only change is
+`RESUME_RELEASE_ENABLED=1`, matching the dormant-path stub test. The committed
+adapter remains disabled until the resulting required-matrix evidence is
+reviewed and the source constant is changed deliberately.
 
 Migration note: a session created by the former companion runtime has no loop
 record. After finishing or cancelling any in-flight legacy job, use
