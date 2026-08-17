@@ -29,12 +29,31 @@ Run from the real unit worktree root:
   --model cursor-grok-4.6-xhigh
 ```
 
-The adapter default is **`cursor-grok-4.6-xhigh`**: Grok 4.6 at xhigh. Known
-variants are `cursor-grok-4.6-{low,medium,high,xhigh}[-fast]`. Effort is part of
-the model id; cursor-agent has no separate effort flag. The common `--effort`
-option is therefore an assertion that the chosen model id embeds the requested
-level. `CURSOR_LOOP_MODEL` and `CURSOR_LOOP_EFFORT` provide namespaced standing
-values; explicit flags win.
+**`--model` is a passthrough, not a restriction.** Any model id cursor-agent
+accepts works — its account-backed catalog spans Claude (Opus/Sonnet/Fable),
+GPT-5.x (Sol, Luna, Codex), Gemini, Composer, and Grok tiers; run
+`cursor-agent --list-models` (requires authentication) for the live list. The
+adapter default is only a default: **`cursor-grok-4.6-xhigh`**, chosen as a
+strong general implementer. Override per dispatch with `--model`, or set
+`CURSOR_LOOP_MODEL` for a standing per-project choice; an explicit flag wins.
+
+**Effort rides inside the model id, so `--effort` is an assertion, not a
+setting.** cursor-agent has no separate effort flag — a model id such as
+`gpt-5.6-sol-xhigh` or `claude-opus-5-thinking-high` already names its level.
+Passing `--effort` therefore only *checks* that the chosen id ends in that
+level (`*-<level>` or `*-<level>-fast`) and refuses otherwise, so a mismatch
+can never be mistaken for a setting that took effect:
+
+```bash
+--model gpt-5.6-sol-xhigh --effort xhigh              # ok — id embeds xhigh
+--model claude-opus-5-thinking-high --effort xhigh    # refused — id says high
+--model auto --effort xhigh                           # refused — id names no level
+--model claude-opus-5-thinking-high                   # ok — omit --effort
+```
+
+Omitting `--effort` is the normal case: the id already carries the level, and
+the dispatch summary reports the effort derived from it. `CURSOR_LOOP_EFFORT`
+supplies the same assertion as a standing value.
 
 Every real invocation is foreground and has this fixed control surface:
 
@@ -189,8 +208,11 @@ Verified live on Darwin/arm64 with authenticated cursor-agent 2026.08.11:
    `--force`, both an out-of-CWD write and a network connect succeeded.
 3. Workspace scope is the Git repository root when Git is discovered, or the
    CWD when it is not. This is why cursor-agent runs only in a git-less copy.
-4. The selected default is `cursor-grok-4.6-xhigh`; effort is part of the model
-   id and has no separate CLI flag. `--list-models` requires authentication.
+4. `--model` accepts any id in the account's catalog (Claude, GPT-5.x, Gemini,
+   Composer, Grok tiers); `cursor-grok-4.6-xhigh` is the adapter's default, not
+   a limit. Effort is part of the model id and has no separate CLI flag, so
+   `--effort` only asserts that the id embeds that level. `--list-models`
+   requires authentication.
 5. JSON output keys are `type`, `subtype`, `is_error`, `duration_ms`,
    `duration_api_ms`, `result`, `session_id`, `request_id`, and `usage`.
    Implementer text is `result`; `session_id` is the handle name; `is_error`

@@ -125,7 +125,7 @@ The implementer implements and runs focused tests. Claude reviews the real diff,
 - **grok** — a fail-closed custom sandbox, linked-worktree placement, and a per-machine tuple allowlist. [`references/runtime-grok.md`](./skills/implementation-loop/references/runtime-grok.md).
 - **cursor-agent** — a git-less-copy architecture: the implementer edits a `.git`-free copy inside a network-denied sandbox, and the orchestrator applies the captured patch to the real repo (it never runs with `--force`/`--yolo`, which would bypass the sandbox). [`references/runtime-cursor.md`](./skills/implementation-loop/references/runtime-cursor.md).
 
-grok and cursor-agent both default to grok-4.6 at `xhigh` as the implementer model.
+Both default to Grok 4.6 at `xhigh` as the implementer model, but `--model` is a passthrough on every backend — cursor-agent in particular reaches its whole account catalog (Claude, GPT-5.x, Gemini, Composer, Grok tiers), where the effort level is part of the model id.
 
 ### Setup
 
