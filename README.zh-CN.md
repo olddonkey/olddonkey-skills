@@ -125,7 +125,7 @@ Codex 侧依赖链：`engineering-mode` → `implementation-loop` → 官方 Cod
 - **grok** —— fail-closed 自定义沙箱、linked-worktree 定位、按机器的 tuple allowlist。见 [`references/runtime-grok.md`](./skills/implementation-loop/references/runtime-grok.md)。
 - **cursor-agent** —— git-less-copy 架构：实现者在一个无 `.git`、禁网络的沙箱拷贝里改文件，编排者再把捕获的 patch 应用到真仓库（绝不带 `--force`/`--yolo`，那会绕过沙箱）。见 [`references/runtime-cursor.md`](./skills/implementation-loop/references/runtime-cursor.md)。
 
-grok 与 cursor-agent 的默认实现模型都是 grok-4.6 / `xhigh`。
+两者的默认实现模型都是 Grok 4.6 / `xhigh`，但 `--model` 在每个后端都是透传的——cursor-agent 尤其可以用到账号目录里的全部模型（Claude、GPT-5.x、Gemini、Composer、各档 Grok），其中 effort 档位是写在模型 id 里的。
 
 ### 环境准备
 
