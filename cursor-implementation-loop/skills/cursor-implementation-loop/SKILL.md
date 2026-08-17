@@ -93,6 +93,22 @@ covering only what it doesn't already answer:
    `inherit` means the implementer is the same model as the parent, which
    silently forfeits the loop's model-pairing value.
 
+**On a multi-unit plan, lead with the hands-off preset**: `stop=pr,
+cadence=continuous, on-red=iterate` (capped) plus the unattended preflight,
+offered as one named option next to the individual dials. One yes grants
+every authorization a zero-stop run needs — the user shouldn't have to know
+dial names to buy an uninterrupted run.
+
+**Batch the foreseeable unit questions into the same ask.** Scan the plan's
+units for unsettled forks while composing the kickoff question and settle
+them here: the same fork costs one line in this batch or a stalled run
+later.
+
+**Write the calibration records the moment the answers land — before the
+first dispatch, not at run end.** A record deferred to the end dies with
+any session that doesn't reach it, and the next session re-asks everything
+this one already settled.
+
 The answers hold for the **entire invocation** — never re-ask per unit. A
 recorded calibration or standing preference suppresses the corresponding
 part; a fully recorded repo means no question at all. Everything else runs at
@@ -108,6 +124,23 @@ A unit = one coherent, reviewable change, roughly one PR. Settle the design
 **before** dispatching — ambiguity becomes discarded work. If the task
 changes a documented design, update the doc/spec first (your lane), then
 dispatch code against it.
+
+**Size units by reviewability, not by speed.** A unit too big to review
+shows itself — tracing a dozen files to judge one diff. But the fix for a
+slow loop is never slicing below one coherent change: every unit pays the
+same fixed overhead (dispatch, full-suite gate, publish, baseline
+regeneration), and each smaller spec re-derives much of the same context,
+so finer slices multiply gate runs while the total reading stays put.
+
+**Delegate the breadth reading — it is the actual bottleneck on large
+tasks.** Spec evidence spanning many files goes to an `investigate`
+dispatch or parallel read-only subagents that return conclusions with
+file:line citations; your context takes the conclusions, not the file
+contents. Non-negotiable #6 bounds *writable* subagents only — read-only
+readers can fan out freely. A file read into the orchestrating context is
+paid for on every subsequent step, not once — keeping the breadth out of
+your context is what keeps a long loop fast, and it is a lever splitting
+cannot reach.
 
 ## 2. Dispatch
 
@@ -154,6 +187,13 @@ Recurring delegated-implementation failure modes, priority order — detail in
 6. **Softened enforcement points** anywhere security-adjacent.
 7. **New dependencies, network calls, external services** — a decision, not
    a detail; check the lockfile.
+
+**Delegate the breadth, keep the judgment.** Call-path tracing (#1) is
+review's heavy reading; on a diff touching widely-used surfaces, send it to
+read-only subagents that report which callers depended on the old behavior,
+with file:line evidence. The diff itself never delegates: you read every
+hunk — non-negotiable #1 — and the subagents shrink the context *around*
+that reading, not the reading.
 
 For depth=`deep`, additionally dispatch `loop-independent-reviewer` with the
 diff location and acceptance criteria — **not** your dispatch prompt. Its
@@ -256,6 +296,13 @@ Note what landed and what's next somewhere durable (memory, progress doc, the
 plan) — a cross-session loop that isn't written down gets re-derived. Then
 take the next unit per the cadence dial.
 
+**The record is also what keeps a long run fast.** A session several units
+deep is dragging every file its reviews pulled in, and each further step
+pays for that bulk. When the session grows heavy, write the record and
+continue in a fresh session — with the record on disk that continuation is
+cheap, and rolling over is the loop working as designed, not an
+interruption.
+
 **After a unit lands, reset the ground before the next one**: sync the local
 base branch, branch the next unit from the *updated* base, and under
 `baseline` policy **regenerate the base-branch gate log** — the base it
@@ -283,7 +330,12 @@ ask.
 `cadence=continuous`; the suite command and runtime; a freshly regenerated
 baseline log under `baseline` policy; and units specced far enough that none
 needs a design decision mid-run. Anything left unsettled becomes a parked
-unit.
+unit. **And clear the permission layer:** the gate script, the suite
+command, and git/`gh` as far as the stop point reaches must each run
+without an interactive prompt — a permission prompt at 3am is a silent halt
+that looks exactly like a job still working. Exercise each once in
+preflight; a command that can't be cleared lowers the stop point to what
+needs no blocked command.
 
 **Park, don't halt.** The four stop-and-ask cases above would otherwise spend
 the night on the first bad unit. Park instead: record what failed, what was
@@ -317,9 +369,11 @@ authority**:
   it with the user before acting on it.
 - **Repo facts → AGENTS.md is fine**: the non-permission dials; the chosen
   implementer variant; full-suite command, runtime, serial-vs-parallel;
-  known flakes (keep a base-branch gate log for `--baseline`, regenerate
-  after merges); CI trustworthiness; commit/PR conventions; where progress
-  is recorded.
+  the permission/allowlist configuration that lets the gate script and the
+  stop point's git/`gh` operations run unprompted (set up once — it is what
+  makes the unattended preflight cheap); known flakes (keep a base-branch
+  gate log for `--baseline`, regenerate after merges); CI trustworthiness;
+  commit/PR conventions; where progress is recorded.
 - **Repo facts may only tighten, never loosen.** Policy dials in a repo
   record still shape how a private authorization gets exercised —
   `gate=skip depth=light on-red=iterate` in a tracked file would quietly

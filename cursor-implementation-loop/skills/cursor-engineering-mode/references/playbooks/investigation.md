@@ -8,6 +8,7 @@
 ## 2. Gather the evidence
 
 - Gather the identified evidence directly or through [investigation dispatch](../adapter.md#canonical-token-map).
+- When the evidence spans many files, gather through delegation — investigation dispatch, or parallel delegated readers — and keep conclusions plus `file:line` citations in the coordinating context, not raw file contents; serially accumulated reading slows every later phase of the run.
 - Preserve source locations, commands or observations, and material limitations so another reader can retrace the path.
 - Change the evidence plan when the first results expose a better discriminating test; do not change the question silently.
 

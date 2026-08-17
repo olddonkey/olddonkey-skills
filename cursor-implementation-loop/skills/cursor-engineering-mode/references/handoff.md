@@ -1,6 +1,6 @@
 # Cross-session handoff protocol
 
-When a goal-first run pauses, parks a unit, or ends a session with work in flight, write `<run-directory>/handoff.md`. The router's Run directory section defines `<run-directory>`.
+When a goal-first run pauses, parks a unit, ends a session with work in flight, or has accumulated enough context that the session itself has become slow, write `<run-directory>/handoff.md`. The router's Run directory section defines `<run-directory>`. A deliberate rollover to a fresh session on a written handoff is normal operation, not failure.
 
 This handoff is a prose checkpoint. It introduces no scripts, schema, or locking, and no fixed document shape is required.
 

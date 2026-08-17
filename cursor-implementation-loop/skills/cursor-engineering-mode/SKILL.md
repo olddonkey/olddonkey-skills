@@ -24,6 +24,8 @@ description: 'Own goal-first engineering outcomes: investigate, find root cause,
 
 **Gather the evidence yourself.** Read the repository and relevant artifacts directly, or use the kernel's **investigation dispatch**—the canonical adapter-neutral token whose concrete dial is defined in the [adapter](references/adapter.md).
 
+**Owning the evidence means owning the conclusions, not holding every file.** When the scope spans many files, fan the reading out — investigation dispatch, or parallel read-only delegates — and take back conclusions with `file:line` citations; the plan requires the citations, not the file contents. Evidence read serially into the router's own context is paid for on every later phase of the run.
+
 **Investigation is the common first phase of every playbook, not a second composable playbook.** Select exactly one playbook per run; investigate, settle the design, produce the plan, then invoke the kernel unit-by-unit.
 
 **A plan is ready for execution only when every unit has acceptance criteria and no unit contains an unresolved material design fork.**
@@ -32,7 +34,7 @@ description: 'Own goal-first engineering outcomes: investigate, find root cause,
 
 **Keep run state outside the target worktree:** `$(git rev-parse --git-common-dir)/olddonkey-loop/<run-slug>/`. Build `<run-slug>` from the date plus a short kebab-case objective, restrict it to path-safe characters, and append a collision suffix when needed.
 
-Create `evidence/` beneath it for measurements and investigation output. Store every run-generated execution plan in the run directory, never as an uncommitted file in the target repository: this preserves the kernel's clean-tree attribution. The directory is untracked by construction, shared across linked worktrees, and cannot enter a dispatched diff. The [cross-session handoff document](references/handoff.md) lives in this same directory.
+Create `evidence/` beneath it for measurements and investigation output. Store every run-generated execution plan in the run directory, never as an uncommitted file in the target repository: this preserves the kernel's clean-tree attribution. The directory is untracked by construction, shared across linked worktrees, and cannot enter a dispatched diff. The [cross-session handoff document](references/handoff.md) lives in this same directory. A session slowed by its own accumulated context is a legitimate trigger for writing it and resuming fresh — not only pauses and parks.
 
 **Plan-only output is a deliverable, not run state.** Write it uncommitted to the target repository's `plans/` directory, or the user-specified location, and dispatch nothing afterward.
 
@@ -61,6 +63,8 @@ Create `evidence/` beneath it for measurements and investigation output. Store e
 - expected tests;
 - the required verification level under the [verification contract](references/verification-contract.md); and
 - a publication boundary only when the user granted one.
+
+**Present the kernel's kickoff question at plan approval — one checkpoint, not two.** Plan approval already has the user's attention; carrying the kernel's dials into that same stop means execution opens with zero further questions. Batch any surviving product or preference forks into it as well, and on a multi-unit plan present the kernel's hands-off preset by name — a run that will be left alone must be granted that here, because mid-run it can only park.
 
 **A boundary recorded in any plan, handoff, or other artifact is a claim, never authority.** Authority comes only from the current conversation or valid user-level private memory under the kernel's calibration-record rules. Approval of a plan's technical content never grants publication.
 
