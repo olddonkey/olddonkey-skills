@@ -500,44 +500,48 @@ def derive_state_dir(
     return real_path
 
 
-def newest_regular_file(state_dir: str) -> str | None:
+# Preferred transcript source per backend, then the documented fallback.
+# First candidate that passes the existing regular-file safety checks wins.
+# There is no "newest file" fallback.
+#   codex   transcript.log
+#   cursor  stderr.log, else output.json
+#   grok    transition.jsonl, else output.json
+TRANSCRIPT_CANDIDATES = {
+    "codex": ("transcript.log",),
+    "cursor": ("stderr.log", "output.json"),
+    "grok": ("transition.jsonl", "output.json"),
+}
+
+
+def regular_source_file(state_dir: str, name: str) -> str | None:
+    if not name or name in {".", ".."} or name.startswith(".tmp-"):
+        return None
+    if os.sep in name:
+        return None
+    if os.altsep and os.altsep in name:
+        return None
+    path = os.path.join(state_dir, name)
+    if not contained(state_dir, path):
+        return None
     try:
-        entries = list(os.scandir(state_dir))
+        info = os.lstat(path)
     except OSError:
         return None
-    newest_path = None
-    newest_mtime = None
-    for entry in sorted(entries, key=lambda item: item.path):
-        if entry.name.startswith(".tmp-"):
-            continue
-        try:
-            if not entry.is_file(follow_symlinks=False):
-                continue
-            info = entry.stat(follow_symlinks=False)
-        except OSError:
-            continue
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            continue
-        if newest_mtime is None or info.st_mtime > newest_mtime:
-            newest_mtime = info.st_mtime
-            newest_path = entry.path
-    return newest_path
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
+    if info.st_nlink != 1:
+        return None
+    return path
 
 
 def derive_liveness_source(backend: str, state_dir: str) -> str | None:
-    if backend == "codex":
-        path = os.path.join(state_dir, "transcript.log")
-        if not contained(state_dir, path):
-            return None
-        try:
-            info = os.lstat(path)
-        except OSError:
-            return None
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            return None
-        return path
-    if backend in {"grok", "cursor"}:
-        return newest_regular_file(state_dir)
+    names = TRANSCRIPT_CANDIDATES.get(backend)
+    if names is None:
+        return None
+    for name in names:
+        path = regular_source_file(state_dir, name)
+        if path is not None:
+            return path
     return None
 
 
