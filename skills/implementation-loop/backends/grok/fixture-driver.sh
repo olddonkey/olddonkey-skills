@@ -22,11 +22,70 @@ TMPDIR_ABS="$(CDPATH= cd -- "$TMPDIR_ARG" && pwd -P)"
 ADAPTER_DIR="$(CDPATH= cd -- "$(dirname -- "$ADAPTER_ARG")" && pwd -P)"
 ADAPTER="$ADAPTER_DIR/$(basename -- "$ADAPTER_ARG")"
 [[ -x "$ADAPTER" ]] || { echo "error: adapter is not executable: $ADAPTER" >&2; exit 2; }
+DRIVER_SELF="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+REAL_JOURNAL="$(CDPATH= cd -- "$DRIVER_SELF/../.." && pwd -P)/scripts/loop-journal"
+
+journal_context_path() { # $1=workspace
+  python3 - "$HOME_DIR" "$1" <<'PY'
+import hashlib, os, sys
+home, workspace = sys.argv[1], sys.argv[2]
+key = hashlib.sha256(os.path.realpath(workspace).encode("utf-8")).hexdigest()
+print(os.path.join(home, ".config", "olddonkey-loop", "journal", key, "context"))
+PY
+}
+
+setup_loop_journal_fixture() {
+  unset LOOP_CONTEXT
+  printf '%s\n' "$HOME_DIR" > "$TMPDIR_ABS/$CASE_NAME.home"
+  printf '%s\n' "$WORKSPACE" > "$TMPDIR_ABS/$CASE_NAME.workspace"
+  case "$CASE_NAME" in
+    journal-missing)
+      export LOOP_JOURNAL="$TMPDIR_ABS/no-such-loop-journal"
+      ;;
+    journal-start-refusal)
+      export LOOP_JOURNAL="$BIN_DIR/loop-journal-refuse"
+      printf '%s\n' '#!/usr/bin/env bash' 'exit 6' > "$LOOP_JOURNAL"
+      chmod 755 "$LOOP_JOURNAL"
+      ;;
+    journal-events|journal-readonly-mode|signal-status|journal-post-disarm-abort)
+      export LOOP_JOURNAL="$REAL_JOURNAL"
+      env HOME="$HOME_DIR" "$REAL_JOURNAL" begin-run --workspace "$WORKSPACE" \
+        > "$TMPDIR_ABS/$CASE_NAME.begin-run"
+      ;;
+    journal-unattributed)
+      export LOOP_JOURNAL="$REAL_JOURNAL"
+      ;;
+    journal-stale)
+      export LOOP_JOURNAL="$REAL_JOURNAL"
+      env HOME="$HOME_DIR" "$REAL_JOURNAL" begin-run --workspace "$WORKSPACE" \
+        > "$TMPDIR_ABS/$CASE_NAME.begin-run"
+      cp "$(journal_context_path "$WORKSPACE")" "$CASE_ROOT/saved-context"
+      env HOME="$HOME_DIR" "$REAL_JOURNAL" end-run --status completed --workspace "$WORKSPACE" \
+        > "$TMPDIR_ABS/$CASE_NAME.end-run"
+      cp "$CASE_ROOT/saved-context" "$(journal_context_path "$WORKSPACE")"
+      chmod 600 "$(journal_context_path "$WORKSPACE")"
+      ;;
+    journal-malformed)
+      export LOOP_JOURNAL="$REAL_JOURNAL"
+      env HOME="$HOME_DIR" "$REAL_JOURNAL" begin-run --workspace "$WORKSPACE" \
+        > "$TMPDIR_ABS/$CASE_NAME.begin-run"
+      printf '%s\n' 'not-json{{{{' > "$(journal_context_path "$WORKSPACE")"
+      chmod 600 "$(journal_context_path "$WORKSPACE")"
+      ;;
+    journal-wrong-workspace)
+      export LOOP_JOURNAL="$REAL_JOURNAL"
+      mkdir -p "$CASE_ROOT/other-ws"
+      env HOME="$HOME_DIR" "$REAL_JOURNAL" begin-run --workspace "$CASE_ROOT/other-ws" \
+        > "$TMPDIR_ABS/$CASE_NAME.begin-run"
+      export LOOP_CONTEXT="$(journal_context_path "$CASE_ROOT/other-ws")"
+      ;;
+  esac
+}
 
 export CONTRACT_TMPDIR="$TMPDIR_ABS"
 export CONTRACT_CASE="$CASE_NAME"
 unset CODEX_LOOP_MODEL CODEX_LOOP_EFFORT CODEX_LOOP_EXTRA_ARGS
-unset GROK_LOOP_MODEL GROK_LOOP_EFFORT GROK_LOOP_EXTRA_ARGS
+unset GROK_LOOP_MODEL GROK_LOOP_EFFORT GROK_LOOP_EXTRA_ARGS GROK_LOOP_SELFTEST_INTERRUPT_AFTER
 unset CURSOR_LOOP_MODEL CURSOR_LOOP_EFFORT CURSOR_LOOP_EXTRA_ARGS
 
 case "$CASE_NAME" in
@@ -36,6 +95,10 @@ case "$CASE_NAME" in
     export CODEX_LOOP_EXTRA_ARGS="--foreign-poison"
     export CURSOR_LOOP_MODEL="foreign-poison-model"
     export CURSOR_LOOP_EXTRA_ARGS="--foreign-poison"
+    ;;
+  journal-post-disarm-abort)
+    # copied is the first implement-path journal() after trap disarm.
+    export GROK_LOOP_SELFTEST_INTERRUPT_AFTER=copied
     ;;
 esac
 
@@ -55,7 +118,7 @@ MAIN_REPO="$CASE_ROOT/main"
 WORKSPACE="$CASE_ROOT/workspace"
 mkdir -p "$BIN_DIR" "$HOME_DIR"
 
-git init -q "$MAIN_REPO"
+git init -q --template= --separate-git-dir="$CASE_ROOT/main.gitadmin" "$MAIN_REPO"
 git -C "$MAIN_REPO" config user.email contract@example.invalid
 git -C "$MAIN_REPO" config user.name contract
 printf 'contract fixture\n' > "$MAIN_REPO/tracked.txt"
@@ -207,6 +270,7 @@ path.write_text(text, encoding="utf-8")
 PY
 chmod 755 "$ADAPTER_COPY_DIR/dispatch.sh"
 
+setup_loop_journal_fixture
 cd "$WORKSPACE"
 exec env \
   HOME="$HOME_DIR" \

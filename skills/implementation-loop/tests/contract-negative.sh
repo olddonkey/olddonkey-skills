@@ -12,7 +12,7 @@ TMP_ROOT_RAW="$(mktemp -d "$SCRIPT_DIR/.contract-negative.XXXXXX")"
 TMP_ROOT="$(CDPATH= cd -- "$TMP_ROOT_RAW" && pwd -P)"
 trap 'rm -rf -- "$TMP_ROOT"' EXIT HUP INT TERM
 
-RULES="help prompt-file prompt-inline prompt-precedence prompt-required dash-prompt missing-values repeated-flags unknown-flags readonly-alias background exit-status signal-status env-namespace summary-fields"
+RULES="help prompt-file prompt-inline prompt-precedence prompt-required dash-prompt missing-values repeated-flags unknown-flags readonly-alias background exit-status signal-status env-namespace summary-fields journal-missing journal-start-refusal journal-events journal-unattributed journal-readonly-mode"
 CHECKS=0
 FAILURES=0
 
@@ -58,6 +58,15 @@ if [[ "$BROKEN_RULE" == "background" ]]; then
   exit 0
 fi
 if [[ "$BROKEN_RULE" == "exit-status" || "$BROKEN_RULE" == "signal-status" ]]; then
+  exit 0
+fi
+if [[ "$BROKEN_RULE" == "journal-missing" ]]; then
+  mkdir -p "${HOME:?}/.config/olddonkey-loop/journal/created-by-stub"
+fi
+if [[ "$BROKEN_RULE" == "journal-start-refusal" ]]; then
+  : "${CONTRACT_TMPDIR:?}"
+  : "${CONTRACT_CASE:?}"
+  printf '%s' 'journal' > "$CONTRACT_TMPDIR/$CONTRACT_CASE.observed-prompt"
   exit 0
 fi
 
@@ -149,4 +158,4 @@ if [[ $FAILURES -gt 0 ]]; then
   exit 1
 fi
 
-printf 'contract-negative: PASS (%d checks; 15 broken adapters rejected)\n' "$CHECKS"
+printf 'contract-negative: PASS (%d checks; 20 broken adapters rejected)\n' "$CHECKS"

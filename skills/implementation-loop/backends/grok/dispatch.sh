@@ -86,6 +86,11 @@ done
 }
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+if [[ -n "${LOOP_JOURNAL:-}" ]]; then
+  JOURNAL_HELPER="$LOOP_JOURNAL"
+else
+  JOURNAL_HELPER="$SCRIPT_DIR/../../scripts/loop-journal"
+fi
 VERIFIER="$SCRIPT_DIR/verify-worktree.sh"
 [[ -x "$VERIFIER" ]] || { echo "error: verifier is missing or not executable: $VERIFIER" >&2; exit 3; }
 
@@ -891,6 +896,41 @@ ARGS+=(--permission-mode bypassPermissions --disable-web-search --verbatim \
 [[ -n "$EFFORT" ]] && ARGS+=(--reasoning-effort "$EFFORT")
 [[ -z "$RESUME_ID" ]] || ARGS+=(--resume "$RESUME_ID")
 
+LOOP_JOURNAL_END_DONE=0
+LOOP_JOURNAL_STARTED=0
+journal_helper_ok() {
+  [[ -n "${JOURNAL_HELPER:-}" && -f "$JOURNAL_HELPER" && -x "$JOURNAL_HELPER" ]]
+}
+
+journal_dispatch_start() {
+  journal_helper_ok || return 0
+  local loop_home mode
+  # mkdir -p of grok-homes can create this directory at 0755; loop-journal
+  # requires 0700 and treats a mismatch as a failed dispatch.start.
+  loop_home="${HOME:?}/.config/olddonkey-loop"
+  mkdir -p "$loop_home" || return $?
+  chmod 700 "$loop_home" || return $?
+  mode="$([[ $READ_ONLY -eq 1 ]] && echo read-only || echo implement)"
+  "$JOURNAL_HELPER" append --workspace "$WORKSPACE" --event dispatch.start \
+    --field "dispatch_id=$DISPATCH_ID" --field backend=grok --field "mode=$mode"
+}
+
+journal_dispatch_end() { # $1=exit [ $2=session ]
+  local exit_code="$1" session="${2:-}"
+  [[ "$LOOP_JOURNAL_STARTED" -eq 1 ]] || return 0
+  [[ "$LOOP_JOURNAL_END_DONE" -eq 0 ]] || return 0
+  LOOP_JOURNAL_END_DONE=1
+  journal_helper_ok || return 0
+  local -a args
+  args=(append --workspace "$WORKSPACE" --event dispatch.end
+    --field "dispatch_id=$DISPATCH_ID" --field "exit=$exit_code")
+  [[ -z "$session" ]] || args+=(--field "session=$session")
+  if ! "$JOURNAL_HELPER" "${args[@]}"; then
+    echo "warning: loop-journal dispatch.end failed" >&2
+  fi
+  return 0
+}
+
 cleanup_recorded_group() {
   [[ -s "$PGID_FILE" ]] || return 0
   local cleanup_pgid
@@ -919,6 +959,16 @@ trap cleanup_recorded_group EXIT
 trap 'cleanup_recorded_group; exit 130' INT
 trap 'cleanup_recorded_group; exit 143' TERM
 
+journal_dispatch_start || {
+  start_rc=$?
+  echo "error: loop-journal dispatch.start failed; refusing to launch" >&2
+  exit "$start_rc"
+}
+LOOP_JOURNAL_STARTED=1
+trap 'rc=$?; cleanup_recorded_group; journal_dispatch_end "$rc" "${SESSION_ID:-}"' EXIT
+trap 'cleanup_recorded_group; journal_dispatch_end 130; exit 130' INT
+trap 'cleanup_recorded_group; journal_dispatch_end 143; exit 143' TERM
+
 journal transition-required
 set +e
 (cd "$WORKSPACE" && GROK_HOME="$FRESH_HOME" "$TOML_PYTHON" - "$PGID_FILE" "$OUTPUT_JSON" "${ARGS[@]}" <<'PY'
@@ -938,9 +988,9 @@ GROK_STATUS=$?
 set -e
 journal grok-exited
 
-[[ -s "$PGID_FILE" ]] || { echo "error: grok launch did not record a process group" >&2; exit 9; }
+[[ -s "$PGID_FILE" ]] || { echo "error: grok launch did not record a process group" >&2; journal_dispatch_end 9; exit 9; }
 PGID="$(tr -d '[:space:]' < "$PGID_FILE")"
-[[ "$PGID" =~ ^[0-9]+$ ]] || { echo "error: invalid recorded grok process group" >&2; exit 9; }
+[[ "$PGID" =~ ^[0-9]+$ ]] || { echo "error: invalid recorded grok process group" >&2; journal_dispatch_end 9; exit 9; }
 "$TOML_PYTHON" - "$PGID" <<'PY'
 import errno, os, signal, sys, time
 pgid = int(sys.argv[1])
@@ -962,9 +1012,11 @@ else:
 PY
 if pgrep -g "$PGID" >/dev/null 2>&1; then
   echo "error: grok process group still has members after termination: $PGID" >&2
+  journal_dispatch_end 9
   exit 9
 fi
 trap - EXIT INT TERM
+trap 'rc=$?; journal_dispatch_end "$rc" "${SESSION_ID:-}"' EXIT
 for ROOT in "$FRESH_HOME" "${TEMP_ROOTS[@]}"; do ledger "$ROOT" terminated; done
 [[ $READ_ONLY -eq 1 ]] || ledger "$WORKSPACE" terminated
 journal group-killed
@@ -998,7 +1050,7 @@ fi
 
 AUTHORITATIVE="$WORKSPACE"
 if [[ $READ_ONLY -eq 0 ]]; then
-  [[ ! -e "$SNAPSHOT" ]] || { echo "error: snapshot destination already exists: $SNAPSHOT" >&2; exit 11; }
+  [[ ! -e "$SNAPSHOT" ]] || { echo "error: snapshot destination already exists: $SNAPSHOT" >&2; journal_dispatch_end 11; exit 11; }
   if cp -cR "$WORKSPACE" "$SNAPSHOT" 2>/dev/null; then
     :
   else
@@ -1100,14 +1152,17 @@ PY
   # admin directory; never point the source admin directory at two markers.
   [[ -d "$GIT_DIR" && ! -L "$GIT_DIR" ]] || {
     echo "error: source worktree admin directory is not a real directory: $GIT_DIR" >&2
+    journal_dispatch_end 11
     exit 11
   }
   [[ -d "$COMMON_DIR/worktrees" && ! -L "$COMMON_DIR/worktrees" ]] || {
     echo "error: git common worktrees directory is not a real directory" >&2
+    journal_dispatch_end 11
     exit 11
   }
   [[ ! -e "$SNAPSHOT_ADMIN" && ! -L "$SNAPSHOT_ADMIN" ]] || {
     echo "error: fresh snapshot admin directory already exists: $SNAPSHOT_ADMIN" >&2
+    journal_dispatch_end 11
     exit 11
   }
   SOURCE_HEAD_CONTENT="$(cat "$GIT_DIR/HEAD")"
@@ -1141,10 +1196,12 @@ PY
   SOURCE_ADMIN_ACTUAL="$(git -C "$WORKSPACE" rev-parse --absolute-git-dir)"
   [[ "$SNAPSHOT_ADMIN_ACTUAL" == "$SNAPSHOT_ADMIN" ]] || {
     echo "error: snapshot resolved the wrong worktree admin directory: $SNAPSHOT_ADMIN_ACTUAL" >&2
+    journal_dispatch_end 11
     exit 11
   }
   [[ "$SOURCE_ADMIN_ACTUAL" == "$GIT_DIR" && "$SOURCE_ADMIN_ACTUAL" != "$SNAPSHOT_ADMIN_ACTUAL" ]] || {
     echo "error: source and snapshot do not have independent worktree registrations" >&2
+    journal_dispatch_end 11
     exit 11
   }
   journal worktree-repaired
@@ -1202,4 +1259,5 @@ if [[ "$ALLOWLIST_TYPE" == "carve-out" ]]; then
   echo "carve-out: child-process network blocking is not enforced on this tuple; publication remains prohibited"
 fi
 [[ -z "$OUTPUT_TEXT" ]] || printf '%s\n' "$OUTPUT_TEXT"
+journal_dispatch_end "$GROK_STATUS" "${SESSION_ID:-}"
 exit "$GROK_STATUS"

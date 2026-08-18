@@ -32,6 +32,13 @@
 set -euo pipefail
 umask 077
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+if [[ -n "${LOOP_JOURNAL:-}" ]]; then
+  JOURNAL_HELPER="$LOOP_JOURNAL"
+else
+  JOURNAL_HELPER="$SCRIPT_DIR/../../scripts/loop-journal"
+fi
+
 MODEL="${CODEX_LOOP_MODEL:-}"
 EFFORT="${CODEX_LOOP_EFFORT:-}"
 PROMPT_FILE=""
@@ -277,7 +284,7 @@ esac
 # capture, banner verification, and atomic state transitions.
 exec python3 - \
   "$STATE_ROOT" "$WORKSPACE" "$SANDBOX_MODE" "$ACTION" "$RESUME_ID" \
-  "$CODEX_BIN" "$MODEL" "$EFFORT" "$PROMPT" <<'PY'
+  "$CODEX_BIN" "$MODEL" "$EFFORT" "$PROMPT" "$JOURNAL_HELPER" <<'PY'
 import datetime
 import fcntl
 import hashlib
@@ -300,6 +307,7 @@ import time
     model,
     effort,
     prompt,
+    journal_helper,
 ) = sys.argv[1:]
 
 OWNER = os.getuid()
@@ -638,6 +646,62 @@ def terminate_group(child):
         pass
 
 
+def journal_helper_ok():
+    return bool(journal_helper) and os.path.isfile(journal_helper) and os.access(
+        journal_helper, os.X_OK
+    )
+
+
+def journal_mode():
+    return "read-only" if sandbox_mode == "read-only" else "implement"
+
+
+def journal_append(event, fields):
+    if not journal_helper_ok():
+        return 0
+    command = [
+        journal_helper,
+        "append",
+        "--workspace",
+        workspace,
+        "--event",
+        event,
+    ]
+    for key, value in fields:
+        command.extend(["--field", f"{key}={value}"])
+    completed = subprocess.run(command, check=False)
+    return completed.returncode
+
+
+def journal_dispatch_start(dispatch_id):
+    status = journal_append(
+        "dispatch.start",
+        (
+            ("dispatch_id", dispatch_id),
+            ("backend", "codex"),
+            ("mode", journal_mode()),
+        ),
+    )
+    if status != 0:
+        raise StateError(f"loop-journal dispatch.start failed (exit {status})")
+
+
+_JOURNAL_END_WRITTEN = False
+
+
+def journal_dispatch_end(dispatch_id, exit_code, session=""):
+    global _JOURNAL_END_WRITTEN
+    if _JOURNAL_END_WRITTEN:
+        return
+    _JOURNAL_END_WRITTEN = True
+    fields = [("dispatch_id", dispatch_id), ("exit", str(exit_code))]
+    if session:
+        fields.append(("session", session))
+    status = journal_append("dispatch.end", fields)
+    if status != 0:
+        print("warning: loop-journal dispatch.end failed", file=sys.stderr)
+
+
 try:
     record = None
     workspace_root = None
@@ -733,149 +797,161 @@ try:
         session_id,
         last_message,
     )
+    journal_dispatch_start(dispatch_id)
 
-    child = subprocess.Popen(
-        argv,
-        cwd=workspace,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        close_fds=True,
-    )
-    reported_sandbox = None
-    reported_approval = None
-    reported_session = None
-    banner_started = False
-    banner_closed = False
-    banner_discovery_closed = False
-    banner_error = None
-    with open(transcript_path, "ab", buffering=0) as transcript:
-        assert child.stdout is not None
-        for raw in iter(child.stdout.readline, b""):
-            transcript.write(raw)
-            sys.stderr.buffer.write(raw)
-            sys.stderr.buffer.flush()
-            line = raw.decode("utf-8", "replace").strip()
-            if line in {"user", "assistant", "analysis", "codex", "tool"}:
-                if not banner_closed:
-                    banner_discovery_closed = True
-                    if banner_started and banner_error is None:
-                        banner_error = "initial CLI policy banner ended without its delimiter"
-                        terminate_group(child)
-                continue
-            if line == "--------":
-                if banner_discovery_closed:
+    end_exit = 5
+    try:
+        child = subprocess.Popen(
+            argv,
+            cwd=workspace,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+        reported_sandbox = None
+        reported_approval = None
+        reported_session = None
+        banner_started = False
+        banner_closed = False
+        banner_discovery_closed = False
+        banner_error = None
+        with open(transcript_path, "ab", buffering=0) as transcript:
+            assert child.stdout is not None
+            for raw in iter(child.stdout.readline, b""):
+                transcript.write(raw)
+                sys.stderr.buffer.write(raw)
+                sys.stderr.buffer.flush()
+                line = raw.decode("utf-8", "replace").strip()
+                if line in {"user", "assistant", "analysis", "codex", "tool"}:
+                    if not banner_closed:
+                        banner_discovery_closed = True
+                        if banner_started and banner_error is None:
+                            banner_error = "initial CLI policy banner ended without its delimiter"
+                            terminate_group(child)
                     continue
-                if not banner_started:
-                    banner_started = True
-                elif not banner_closed:
-                    banner_closed = True
-                    if (
-                        banner_error is None
-                        and (
-                            reported_sandbox is None
-                            or reported_approval is None
-                            or reported_session is None
+                if line == "--------":
+                    if banner_discovery_closed:
+                        continue
+                    if not banner_started:
+                        banner_started = True
+                    elif not banner_closed:
+                        banner_closed = True
+                        if (
+                            banner_error is None
+                            and (
+                                reported_sandbox is None
+                                or reported_approval is None
+                                or reported_session is None
+                            )
+                        ):
+                            banner_error = "initial CLI policy banner was incomplete"
+                            terminate_group(child)
+                    continue
+                if banner_discovery_closed or not banner_started or banner_closed:
+                    continue
+                match = re.match(r"^sandbox:\s*([a-z-]+)(?:\s|$)", line)
+                if match:
+                    if reported_sandbox is not None and banner_error is None:
+                        banner_error = "initial CLI banner repeated sandbox"
+                        terminate_group(child)
+                        continue
+                    reported_sandbox = match.group(1)
+                    if reported_sandbox != sandbox_mode and banner_error is None:
+                        banner_error = (
+                            f"CLI reported sandbox {reported_sandbox}, requested {sandbox_mode}"
                         )
-                    ):
-                        banner_error = "initial CLI policy banner was incomplete"
                         terminate_group(child)
-                continue
-            if banner_discovery_closed or not banner_started or banner_closed:
-                continue
-            match = re.match(r"^sandbox:\s*([a-z-]+)(?:\s|$)", line)
-            if match:
-                if reported_sandbox is not None and banner_error is None:
-                    banner_error = "initial CLI banner repeated sandbox"
-                    terminate_group(child)
-                    continue
-                reported_sandbox = match.group(1)
-                if reported_sandbox != sandbox_mode and banner_error is None:
-                    banner_error = (
-                        f"CLI reported sandbox {reported_sandbox}, requested {sandbox_mode}"
-                    )
-                    terminate_group(child)
-            match = re.match(r"^approval:\s*(\S+)(?:\s|$)", line)
-            if match:
-                if reported_approval is not None and banner_error is None:
-                    banner_error = "initial CLI banner repeated approval"
-                    terminate_group(child)
-                    continue
-                reported_approval = match.group(1)
-                if reported_approval != "never" and banner_error is None:
-                    banner_error = (
-                        f"CLI reported approval {reported_approval}, requested never"
-                    )
-                    terminate_group(child)
-            match = re.match(r"^session id:\s*([0-9a-fA-F-]+)\s*$", line)
-            if match and SESSION_RE.fullmatch(match.group(1)):
-                if reported_session is not None and banner_error is None:
-                    banner_error = "initial CLI banner repeated session id"
-                    terminate_group(child)
-                    continue
-                observed = match.group(1).lower()
-                if session_id and observed != session_id.lower() and banner_error is None:
-                    banner_error = "CLI reported a session id different from the exact resume id"
-                    terminate_group(child)
-                reported_session = observed
-                session_id = reported_session
-                record["session_id"] = session_id
-                write_meta(record)
-    child_status = child.wait()
+                match = re.match(r"^approval:\s*(\S+)(?:\s|$)", line)
+                if match:
+                    if reported_approval is not None and banner_error is None:
+                        banner_error = "initial CLI banner repeated approval"
+                        terminate_group(child)
+                        continue
+                    reported_approval = match.group(1)
+                    if reported_approval != "never" and banner_error is None:
+                        banner_error = (
+                            f"CLI reported approval {reported_approval}, requested never"
+                        )
+                        terminate_group(child)
+                match = re.match(r"^session id:\s*([0-9a-fA-F-]+)\s*$", line)
+                if match and SESSION_RE.fullmatch(match.group(1)):
+                    if reported_session is not None and banner_error is None:
+                        banner_error = "initial CLI banner repeated session id"
+                        terminate_group(child)
+                        continue
+                    observed = match.group(1).lower()
+                    if session_id and observed != session_id.lower() and banner_error is None:
+                        banner_error = "CLI reported a session id different from the exact resume id"
+                        terminate_group(child)
+                    reported_session = observed
+                    session_id = reported_session
+                    record["session_id"] = session_id
+                    write_meta(record)
+        child_status = child.wait()
 
-    print(
-        f"sandbox (CLI reported): {reported_sandbox or '<not reported>'}",
-        file=sys.stderr,
-    )
-    print(f"session id: {session_id or '<not reported>'}", file=sys.stderr)
-    print(f"run state: {dispatch_directory}", file=sys.stderr)
+        print(
+            f"sandbox (CLI reported): {reported_sandbox or '<not reported>'}",
+            file=sys.stderr,
+        )
+        print(f"session id: {session_id or '<not reported>'}", file=sys.stderr)
+        print(f"run state: {dispatch_directory}", file=sys.stderr)
 
-    if banner_error is not None:
-        record["state"] = "failed"
-        write_meta(record)
-        repair_current(workspace_root, record)
-        refuse(f"Codex banner mismatch; child process group terminated: {banner_error}")
-    if child_status < 0:
-        record["state"] = "failed"
-        write_meta(record)
-        repair_current(workspace_root, record)
-        refuse(f"Codex terminated by signal {-child_status}", 128 + (-child_status))
-    if child_status != 0:
-        record["state"] = "failed"
-        write_meta(record)
-        repair_current(workspace_root, record)
-        raise SystemExit(child_status)
-    if (
-        not banner_started
-        or not banner_closed
-        or reported_sandbox is None
-        or reported_approval is None
-        or reported_session is None
-    ):
-        record["state"] = "failed"
-        write_meta(record)
-        repair_current(workspace_root, record)
-        refuse("Codex policy banner was absent or incomplete")
-    if reported_sandbox != sandbox_mode or reported_approval != "never":
-        record["state"] = "failed"
-        write_meta(record)
-        repair_current(workspace_root, record)
-        refuse("Codex policy banner did not match the requested policy")
-    if not session_id or session_id != reported_session:
-        record["state"] = "failed"
-        write_meta(record)
-        repair_current(workspace_root, record)
-        refuse("Codex banner did not report a valid session id")
-    validate_regular(last_message, allow_empty=False)
+        if banner_error is not None:
+            record["state"] = "failed"
+            write_meta(record)
+            repair_current(workspace_root, record)
+            end_exit = 5
+            refuse(f"Codex banner mismatch; child process group terminated: {banner_error}")
+        if child_status < 0:
+            record["state"] = "failed"
+            write_meta(record)
+            repair_current(workspace_root, record)
+            end_exit = 128 + (-child_status)
+            refuse(f"Codex terminated by signal {-child_status}", end_exit)
+        if child_status != 0:
+            record["state"] = "failed"
+            write_meta(record)
+            repair_current(workspace_root, record)
+            end_exit = child_status
+            raise SystemExit(child_status)
+        if (
+            not banner_started
+            or not banner_closed
+            or reported_sandbox is None
+            or reported_approval is None
+            or reported_session is None
+        ):
+            record["state"] = "failed"
+            write_meta(record)
+            repair_current(workspace_root, record)
+            end_exit = 5
+            refuse("Codex policy banner was absent or incomplete")
+        if reported_sandbox != sandbox_mode or reported_approval != "never":
+            record["state"] = "failed"
+            write_meta(record)
+            repair_current(workspace_root, record)
+            end_exit = 5
+            refuse("Codex policy banner did not match the requested policy")
+        if not session_id or session_id != reported_session:
+            record["state"] = "failed"
+            write_meta(record)
+            repair_current(workspace_root, record)
+            end_exit = 5
+            refuse("Codex banner did not report a valid session id")
+        validate_regular(last_message, allow_empty=False)
 
-    record["session_id"] = session_id
-    record["state"] = "ready"
-    write_meta(record)
-    repair_current(workspace_root, record)
-    with open(last_message, "rb") as handle:
-        sys.stdout.buffer.write(handle.read())
-        sys.stdout.buffer.flush()
+        record["session_id"] = session_id
+        record["state"] = "ready"
+        write_meta(record)
+        repair_current(workspace_root, record)
+        with open(last_message, "rb") as handle:
+            sys.stdout.buffer.write(handle.read())
+            sys.stdout.buffer.flush()
+        end_exit = 0
+    finally:
+        journal_dispatch_end(dispatch_id, end_exit, session_id)
 except StateError as error:
     if record is not None and record.get("state") in {"initializing", "running"}:
         try:
