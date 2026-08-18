@@ -1,0 +1,1082 @@
+#!/usr/bin/env bash
+# Read-only local web console for the loop journal and derived index.
+#
+# Usage:
+#   loop-console [--workspace DIR]
+#
+# Binds 127.0.0.1 on an ephemeral port. Prints one URL on stdout:
+#   http://127.0.0.1:<port>/#<one-time-token>
+# Sessions live in RAM. The only on-disk file is console.lock under
+# $HOME/.config/olddonkey-loop/console/<workspace-key>/.
+#
+# Test-only overrides (not for production):
+#   LOOP_CONSOLE_TEST=1            required to honor LOOP_INDEX
+#   LOOP_INDEX                     path to loop-index (default: sibling)
+#   LOOP_CONSOLE_TOKEN_TTL_SEC     bootstrap token TTL (default 120)
+
+set -euo pipefail
+umask 077
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+export LOOP_CONSOLE_SCRIPT_DIR="$SCRIPT_DIR"
+exec python3 - "$@" <<'PY'
+from __future__ import annotations
+
+import sys
+
+sys.dont_write_bytecode = True
+
+import argparse
+import fcntl
+import hashlib
+import hmac
+import http.server
+import json
+import os
+import secrets
+import signal
+import stat
+import subprocess
+import threading
+import time
+from http.cookies import SimpleCookie
+from urllib.parse import parse_qs, urlparse
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_LOCK_BUSY = 3
+EXIT_D4A = 5
+EXIT_STORE = 6
+
+OWNER = os.getuid()
+TAIL_BYTES = 64 * 1024
+CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; "
+    "connect-src 'self'; frame-ancestors 'none'; form-action 'none'; "
+    "base-uri 'none'"
+)
+SECURITY_HEADERS = (
+    ("Content-Security-Policy", CSP),
+    ("Referrer-Policy", "no-referrer"),
+    ("Cache-Control", "no-store"),
+    ("X-Content-Type-Options", "nosniff"),
+)
+ASSET_TYPES = {
+    "index.html": "text/html; charset=utf-8",
+    "console.css": "text/css; charset=utf-8",
+    "console.js": "text/javascript; charset=utf-8",
+}
+ROUTES_GET = {
+    "/",
+    "/console.css",
+    "/console.js",
+    "/api/state",
+    "/api/transcript",
+}
+ROUTES_POST = {"/api/session"}
+
+HELP = """\
+Read-only local web console for loop journal evidence.
+
+Usage:
+  loop-console [--workspace DIR]
+
+--workspace DIR   workspace to display (default: $PWD)
+
+Binds 127.0.0.1 on an ephemeral port and prints exactly one URL line
+on stdout:
+
+  http://127.0.0.1:<port>/#<one-time-token>
+
+The fragment is a single-use bootstrap token. It expires 120 seconds
+after startup if unused. The inert shell posts it to /api/session;
+success issues an HttpOnly SameSite=Strict session cookie and a
+per-session CSRF token, then invalidates the bootstrap token.
+
+Authenticated GET /api/state and /api/transcript require that session
+cookie and request header X-Console-CSRF matching the session. The
+header is compared with hmac.compare_digest. Missing or wrong CSRF
+is 403; no session is 401. A GET that sends Origin not equal to the
+console origin, or Sec-Fetch-Site other than same-origin, is 403.
+Absent Origin or Sec-Fetch-Site is allowed on same-origin GET.
+
+State directory (D4a):
+  $HOME/.config/olddonkey-loop/console/<workspace-key>/
+  contains only console.lock. Sessions are RAM-only. This lock is not
+  meta.lock and never blocks journal writers.
+
+A second console for the same workspace is refused. Serve until
+SIGTERM/SIGINT; clean shutdown exits 0.
+
+Test-only environment:
+  LOOP_CONSOLE_TEST=1             required to honor LOOP_INDEX
+  LOOP_INDEX                      loop-index executable (default:
+                                  sibling loop-index); ignored unless
+                                  LOOP_CONSOLE_TEST=1
+  LOOP_CONSOLE_TOKEN_TTL_SEC      bootstrap token TTL in seconds
+                                  (default 120; test-only)
+
+Exit codes:
+  0  clean shutdown
+  2  usage
+  3  console already running for this workspace
+  5  D4a state-directory failure
+  6  operational failure (HOME, bind, assets)
+"""
+
+
+class ConsoleError(Exception):
+    def __init__(self, message: str, code: int) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def fail(message: str, code: int) -> None:
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def contains_newline(value: object) -> bool:
+    if isinstance(value, str):
+        return "\n" in value or "\r" in value
+    if isinstance(value, dict):
+        return any(contains_newline(item) for item in value.values()) or any(
+            contains_newline(item) for item in value.keys()
+        )
+    if isinstance(value, list):
+        return any(contains_newline(item) for item in value)
+    return False
+
+
+def resolve_workspace(raw: str) -> str:
+    if not raw or contains_newline(raw):
+        fail("workspace path is invalid", EXIT_USAGE)
+    if not os.path.isdir(raw):
+        fail(f"workspace is not a directory: {raw}", EXIT_USAGE)
+    canonical = os.path.realpath(raw)
+    if not os.path.isdir(canonical):
+        fail(f"workspace is not a directory: {raw}", EXIT_USAGE)
+    if contains_newline(canonical):
+        fail("canonical workspace path contains a newline", EXIT_USAGE)
+    return canonical
+
+
+def workspace_key_for(canonical: str) -> str:
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def home_dir() -> str:
+    home = os.environ.get("HOME")
+    if not home:
+        fail("HOME is not set", EXIT_STORE)
+    home = os.path.abspath(home)
+    if not os.path.isdir(home):
+        fail("HOME is not a readable directory", EXIT_STORE)
+    try:
+        os.listdir(home)
+    except OSError as error:
+        fail(f"HOME is unreadable: {error}", EXIT_STORE)
+    return home
+
+
+def no_symlink_from(root: str, path: str) -> None:
+    root = os.path.abspath(root)
+    path = os.path.abspath(path)
+    if path != root and not path.startswith(root + os.sep):
+        raise ConsoleError(f"path escapes managed root: {path}", EXIT_D4A)
+    current = root
+    try:
+        info = os.lstat(current)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode):
+        raise ConsoleError(f"managed path contains a symlink: {current}", EXIT_D4A)
+    rest = path[len(root) :].lstrip(os.sep)
+    for part in [piece for piece in rest.split(os.sep) if piece]:
+        current = os.path.join(current, part)
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(info.st_mode):
+            raise ConsoleError(f"managed path contains a symlink: {current}", EXIT_D4A)
+
+
+def validate_directory(path: str, mode: int = 0o700) -> None:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError as error:
+        raise ConsoleError(f"directory is missing: {path}", EXIT_D4A) from error
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ConsoleError(f"not a real directory: {path}", EXIT_D4A)
+    if info.st_uid != OWNER:
+        raise ConsoleError(f"directory is foreign-owned: {path}", EXIT_D4A)
+    if stat.S_IMODE(info.st_mode) != mode:
+        raise ConsoleError(f"directory mode must be {mode:04o}: {path}", EXIT_D4A)
+
+
+def ensure_directory(path: str) -> None:
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    validate_directory(path)
+
+
+def validate_regular(path: str, *, allow_missing: bool = False) -> os.stat_result | None:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        raise ConsoleError(f"file is missing: {path}", EXIT_D4A) from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ConsoleError(f"not a regular file: {path}", EXIT_D4A)
+    if info.st_uid != OWNER:
+        raise ConsoleError(f"file is foreign-owned: {path}", EXIT_D4A)
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        raise ConsoleError(f"file mode must be 0600: {path}", EXIT_D4A)
+    if info.st_nlink != 1:
+        raise ConsoleError(f"file has multiple hard links: {path}", EXIT_D4A)
+    return info
+
+
+def open_nofollow(path: str, flags: int, mode: int = 0o600) -> int:
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        return os.open(path, flags, mode)
+    except OSError as error:
+        raise ConsoleError(f"cannot open {path}: {error}", EXIT_D4A) from error
+
+
+def create_regular(path: str, content: bytes = b"") -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = open_nofollow(path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        if content:
+            os.write(descriptor, content)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    validate_regular(path)
+
+
+def script_dir() -> str:
+    raw = os.environ.get("LOOP_CONSOLE_SCRIPT_DIR")
+    if not raw:
+        fail("LOOP_CONSOLE_SCRIPT_DIR is not set", EXIT_STORE)
+    path = os.path.abspath(raw)
+    if not os.path.isdir(path):
+        fail("console script directory is missing", EXIT_STORE)
+    return path
+
+
+def token_ttl_sec() -> float:
+    raw = os.environ.get("LOOP_CONSOLE_TOKEN_TTL_SEC")
+    if raw is None or raw == "":
+        return 120.0
+    try:
+        value = float(raw)
+    except ValueError:
+        return 120.0
+    if value < 0:
+        return 120.0
+    return value
+
+
+def index_bin(scripts: str) -> str:
+    if os.environ.get("LOOP_CONSOLE_TEST") == "1":
+        override = os.environ.get("LOOP_INDEX")
+        if override:
+            return override
+    return os.path.join(scripts, "loop-index")
+
+
+def read_regular_bytes(path: str) -> bytes:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        info = os.lstat(path)
+    except OSError as error:
+        raise ConsoleError(f"cannot read {path}: {error}", EXIT_STORE) from error
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ConsoleError(f"not a regular file: {path}", EXIT_STORE)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ConsoleError(f"cannot open {path}: {error}", EXIT_STORE) from error
+    try:
+        chunks: list[bytes] = []
+        while True:
+            piece = os.read(descriptor, 1024 * 1024)
+            if not piece:
+                break
+            chunks.append(piece)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def load_assets(scripts: str) -> dict[str, bytes]:
+    root = os.path.join(scripts, "console-assets")
+    assets: dict[str, bytes] = {}
+    for name in ASSET_TYPES:
+        assets[name] = read_regular_bytes(os.path.join(root, name))
+    return assets
+
+
+def console_paths(home: str, key: str) -> dict[str, str]:
+    loop_root = os.path.join(home, ".config", "olddonkey-loop")
+    console_root = os.path.join(loop_root, "console")
+    store = os.path.join(console_root, key)
+    return {
+        "home": home,
+        "config": os.path.join(home, ".config"),
+        "loop_root": loop_root,
+        "console_root": console_root,
+        "store": store,
+        "lock": os.path.join(store, "console.lock"),
+        "key": key,
+    }
+
+
+def bootstrap_store(paths: dict[str, str]) -> None:
+    try:
+        os.mkdir(paths["config"], 0o700)
+    except FileExistsError:
+        pass
+    if not os.path.isdir(paths["config"]):
+        raise ConsoleError(f"not a directory: {paths['config']}", EXIT_D4A)
+    ensure_directory(paths["loop_root"])
+    ensure_directory(paths["console_root"])
+    no_symlink_from(paths["loop_root"], paths["store"])
+    ensure_directory(paths["store"])
+    no_symlink_from(paths["store"], paths["lock"])
+    if not os.path.lexists(paths["lock"]):
+        create_regular(paths["lock"])
+    else:
+        validate_regular(paths["lock"])
+
+
+def acquire_singleton(paths: dict[str, str], workspace: str) -> int:
+    no_symlink_from(paths["store"], paths["lock"])
+    validate_regular(paths["lock"])
+    descriptor = open_nofollow(paths["lock"], os.O_RDWR)
+    os.set_inheritable(descriptor, False)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(descriptor)
+        fail(
+            f"console already running for workspace {workspace}",
+            EXIT_LOCK_BUSY,
+        )
+    return descriptor
+
+
+def tokens_equal(provided: str, expected: str) -> bool:
+    left = provided.encode("utf-8")
+    right = expected.encode("utf-8")
+    if len(left) != len(right):
+        return False
+    return hmac.compare_digest(left, right)
+
+
+def dump_json(obj: object) -> bytes:
+    return (
+        json.dumps(obj, ensure_ascii=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+
+
+def git_common_dir(workspace: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", workspace, "rev-parse", "--git-common-dir"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    raw = completed.stdout.strip()
+    if not raw or contains_newline(raw):
+        return None
+    if os.path.isabs(raw):
+        path = raw
+    else:
+        path = os.path.join(workspace, raw)
+    path = os.path.realpath(path)
+    if not os.path.isdir(path):
+        return None
+    return path
+
+
+def dispatch_id_safe(dispatch_id: str) -> bool:
+    if not dispatch_id or "\0" in dispatch_id:
+        return False
+    if os.sep in dispatch_id:
+        return False
+    if os.altsep and os.altsep in dispatch_id:
+        return False
+    if dispatch_id in {".", ".."}:
+        return False
+    return True
+
+
+def contained(root: str, path: str) -> bool:
+    root_abs = os.path.abspath(root)
+    path_abs = os.path.abspath(path)
+    return path_abs == root_abs or path_abs.startswith(root_abs + os.sep)
+
+
+def backend_root(backend: str, home: str, key: str, workspace: str) -> str | None:
+    if backend == "codex":
+        return os.path.join(home, ".config", "olddonkey-loop", "codex", key)
+    if backend in {"grok", "cursor"}:
+        common = git_common_dir(workspace)
+        if common is None:
+            return None
+        return os.path.join(common, "olddonkey-loop", backend)
+    return None
+
+
+def derive_state_dir(
+    backend: str,
+    dispatch_id: str,
+    home: str,
+    key: str,
+    workspace: str,
+) -> str | None:
+    if not dispatch_id_safe(dispatch_id):
+        return None
+    root = backend_root(backend, home, key, workspace)
+    if root is None:
+        return None
+    path = os.path.join(root, dispatch_id)
+    if not contained(root, path):
+        return None
+    try:
+        no_symlink_from(root, path)
+    except ConsoleError:
+        return None
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return None
+    real_root = os.path.realpath(root)
+    real_path = os.path.realpath(path)
+    if not contained(real_root, real_path):
+        return None
+    return real_path
+
+
+def newest_regular_file(state_dir: str) -> str | None:
+    try:
+        entries = list(os.scandir(state_dir))
+    except OSError:
+        return None
+    newest_path = None
+    newest_mtime = None
+    for entry in sorted(entries, key=lambda item: item.path):
+        if entry.name.startswith(".tmp-"):
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            info = entry.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            continue
+        if newest_mtime is None or info.st_mtime > newest_mtime:
+            newest_mtime = info.st_mtime
+            newest_path = entry.path
+    return newest_path
+
+
+def derive_liveness_source(backend: str, state_dir: str) -> str | None:
+    if backend == "codex":
+        path = os.path.join(state_dir, "transcript.log")
+        if not contained(state_dir, path):
+            return None
+        try:
+            info = os.lstat(path)
+        except OSError:
+            return None
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            return None
+        return path
+    if backend in {"grok", "cursor"}:
+        return newest_regular_file(state_dir)
+    return None
+
+
+def read_tail(path: str) -> bytes | None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
+    if info.st_nlink != 1:
+        return None
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(descriptor)
+        if opened.st_nlink != 1 or not stat.S_ISREG(opened.st_mode):
+            return None
+        size = opened.st_size
+        if size > TAIL_BYTES:
+            os.lseek(descriptor, -TAIL_BYTES, os.SEEK_END)
+        want = TAIL_BYTES if size > TAIL_BYTES else size
+        chunks: list[bytes] = []
+        remaining = want
+        while remaining > 0:
+            piece = os.read(descriptor, remaining)
+            if not piece:
+                break
+            chunks.append(piece)
+            remaining -= len(piece)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def run_loop_index(
+    index: str, workspace: str
+) -> tuple[dict | None, int, str | None]:
+    try:
+        completed = subprocess.run(
+            [index, "--workspace", workspace],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        return None, 504, "loop-index timed out"
+    except OSError as error:
+        return None, 502, f"loop-index could not be executed: {error}"
+    if completed.returncode != 0:
+        return None, 502, "loop-index failed"
+    try:
+        document = json.loads(completed.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, 502, "loop-index returned invalid JSON"
+    if not isinstance(document, dict):
+        return None, 502, "loop-index returned invalid JSON"
+    return document, 200, None
+
+
+def find_dispatch(document: dict, dispatch_id: str) -> dict | None:
+    runs = document.get("runs")
+    if not isinstance(runs, list):
+        return None
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        items = run.get("dispatches")
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("dispatch_id") == dispatch_id:
+                return item
+    return None
+
+
+class ConsoleState:
+    def __init__(
+        self,
+        *,
+        canonical: str,
+        key: str,
+        home: str,
+        scripts: str,
+        index: str,
+        assets: dict[str, bytes],
+        lock_fd: int,
+        token: str,
+        token_ttl: float,
+    ) -> None:
+        self.canonical = canonical
+        self.key = key
+        self.home = home
+        self.scripts = scripts
+        self.index = index
+        self.assets = assets
+        self.lock_fd = lock_fd
+        self.bootstrap_token: str | None = token
+        self.sessions: dict[str, str] = {}
+        self.lock = threading.Lock()
+        self.token_ttl = token_ttl
+        self.started_at = time.monotonic()
+        self.port = 0
+
+    @property
+    def expected_host(self) -> str:
+        return f"127.0.0.1:{self.port}"
+
+    @property
+    def expected_origin(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+
+def expire_bootstrap_token(state: ConsoleState) -> None:
+    log = False
+    with state.lock:
+        if state.bootstrap_token is None:
+            return
+        if time.monotonic() - state.started_at < state.token_ttl:
+            return
+        state.bootstrap_token = None
+        log = True
+    if log:
+        print(
+            "loop-console: bootstrap token expired",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+class ConsoleHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.0"
+    timeout = 3
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        return
+
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+        reason = message or "error"
+        self._write(
+            code,
+            dump_json({"error": reason}),
+            "application/json",
+        )
+
+    def _write(
+        self,
+        status: int,
+        body: bytes,
+        content_type: str,
+        extra: list[tuple[str, str]] | None = None,
+    ) -> None:
+        self.close_connection = True
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        for key, value in SECURITY_HEADERS:
+            self.send_header(key, value)
+        if extra:
+            for key, value in extra:
+                if key.lower().startswith("access-control-allow-"):
+                    continue
+                self.send_header(key, value)
+        self.end_headers()
+        if self.command != "HEAD" and body:
+            self.wfile.write(body)
+
+    def _json_error(self, status: int, message: str) -> None:
+        self._write(status, dump_json({"error": message}), "application/json")
+
+    def _host_ok(self) -> bool:
+        host = self.headers.get("Host")
+        return host == self.server.state.expected_host
+
+    def _origin_ok(self) -> bool:
+        origin = self.headers.get("Origin")
+        return origin == self.server.state.expected_origin
+
+    def _cookie_session_id(self) -> str | None:
+        raw = self.headers.get("Cookie")
+        if not raw:
+            return None
+        cookie = SimpleCookie()
+        try:
+            cookie.load(raw)
+        except Exception:
+            return None
+        if "session" not in cookie:
+            return None
+        sid = cookie["session"].value
+        if not sid:
+            return None
+        return sid
+
+    def _session_csrf(self) -> tuple[str | None, str | None]:
+        sid = self._cookie_session_id()
+        if sid is None:
+            return None, None
+        with self.server.state.lock:
+            csrf = self.server.state.sessions.get(sid)
+        if csrf is None:
+            return None, None
+        return sid, csrf
+
+    def _csrf_matches(self, expected: str) -> bool:
+        provided = self.headers.get("X-Console-CSRF")
+        if not isinstance(provided, str):
+            return False
+        return tokens_equal(provided, expected)
+
+    def _optional_origin_ok(self) -> bool:
+        origin = self.headers.get("Origin")
+        if origin is None:
+            return True
+        return origin == self.server.state.expected_origin
+
+    def _fetch_site_ok(self) -> bool:
+        site = self.headers.get("Sec-Fetch-Site")
+        if site is None:
+            return True
+        return site == "same-origin"
+
+    def _require_session_csrf(self) -> bool:
+        sid, expected = self._session_csrf()
+        if sid is None or expected is None:
+            self._json_error(401, "unauthorized")
+            return False
+        if not self._csrf_matches(expected):
+            self._json_error(403, "forbidden")
+            return False
+        return True
+
+    def _read_body(self) -> bytes | None:
+        raw = self.headers.get("Content-Length", "0") or "0"
+        try:
+            length = int(raw)
+        except ValueError:
+            return None
+        if length < 0 or length > 65536:
+            return None
+        try:
+            return self.rfile.read(length)
+        except OSError:
+            return None
+
+    def do_GET(self) -> None:
+        self.process()
+
+    def do_POST(self) -> None:
+        self.process()
+
+    def do_HEAD(self) -> None:
+        self.process()
+
+    def do_PUT(self) -> None:
+        self.process()
+
+    def do_DELETE(self) -> None:
+        self.process()
+
+    def do_OPTIONS(self) -> None:
+        self.process()
+
+    def do_PATCH(self) -> None:
+        self.process()
+
+    def process(self) -> None:
+        try:
+            self._process()
+        except BrokenPipeError:
+            return
+        except Exception:
+            try:
+                self._json_error(500, "internal error")
+            except Exception:
+                return
+
+    def _process(self) -> None:
+        if not self._host_ok():
+            self._json_error(400, "bad request")
+            return
+        if self.command == "POST" and not self._origin_ok():
+            self._json_error(403, "forbidden")
+            return
+        if self.command in {"GET", "HEAD"}:
+            if not self._optional_origin_ok() or not self._fetch_site_ok():
+                self._json_error(403, "forbidden")
+                return
+        parsed = urlparse(self.path)
+        route = parsed.path
+        if self.command == "GET" and route == "/":
+            self._write(200, self.server.state.assets["index.html"], ASSET_TYPES["index.html"])
+            return
+        if self.command == "GET" and route == "/console.css":
+            self._write(200, self.server.state.assets["console.css"], ASSET_TYPES["console.css"])
+            return
+        if self.command == "GET" and route == "/console.js":
+            self._write(200, self.server.state.assets["console.js"], ASSET_TYPES["console.js"])
+            return
+        if self.command == "POST" and route == "/api/session":
+            self._handle_session()
+            return
+        if self.command == "GET" and route == "/api/state":
+            if not self._require_session_csrf():
+                return
+            self._handle_state()
+            return
+        if self.command == "GET" and route == "/api/transcript":
+            if not self._require_session_csrf():
+                return
+            self._handle_transcript(parsed.query)
+            return
+        if route in ROUTES_GET or route in ROUTES_POST:
+            self._json_error(404, "not found")
+            return
+        self._json_error(404, "not found")
+
+    def _handle_session(self) -> None:
+        body = self._read_body()
+        if body is None:
+            self._json_error(403, "forbidden")
+            return
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
+        token = payload.get("token") if isinstance(payload, dict) else None
+        session_id = secrets.token_urlsafe(32)
+        csrf = secrets.token_urlsafe(32)
+        granted = False
+        expired_now = False
+        with self.server.state.lock:
+            state = self.server.state
+            if state.bootstrap_token is not None:
+                if time.monotonic() - state.started_at >= state.token_ttl:
+                    state.bootstrap_token = None
+                    expired_now = True
+            expected = state.bootstrap_token
+            if (
+                isinstance(token, str)
+                and expected is not None
+                and tokens_equal(token, expected)
+            ):
+                state.bootstrap_token = None
+                state.sessions[session_id] = csrf
+                granted = True
+        if expired_now:
+            print(
+                "loop-console: bootstrap token expired",
+                file=sys.stderr,
+                flush=True,
+            )
+        if not granted:
+            self._json_error(403, "forbidden")
+            return
+        cookie = SimpleCookie()
+        cookie["session"] = session_id
+        cookie["session"]["path"] = "/"
+        cookie["session"]["httponly"] = True
+        cookie["session"]["samesite"] = "Strict"
+        morsel = cookie["session"].OutputString()
+        self._write(
+            200,
+            dump_json({"csrf": csrf}),
+            "application/json",
+            [("Set-Cookie", morsel)],
+        )
+
+    def _handle_state(self) -> None:
+        document, status, error = run_loop_index(
+            self.server.state.index, self.server.state.canonical
+        )
+        if document is None:
+            self._json_error(status, error or "loop-index failed")
+            return
+        self._write(200, dump_json(document), "application/json")
+
+    def _handle_transcript(self, query: str) -> None:
+        values = parse_qs(query, keep_blank_values=True).get("dispatch", [])
+        if len(values) != 1 or not values[0]:
+            self._json_error(404, "not found")
+            return
+        wanted = values[0]
+        document, status, error = run_loop_index(
+            self.server.state.index, self.server.state.canonical
+        )
+        if document is None:
+            self._json_error(status, error or "loop-index failed")
+            return
+        record = find_dispatch(document, wanted)
+        if record is None:
+            self._json_error(404, "not found")
+            return
+        backend = record.get("backend")
+        dispatch_id = record.get("dispatch_id")
+        if not isinstance(backend, str) or not isinstance(dispatch_id, str):
+            self._json_error(404, "not found")
+            return
+        state_dir = derive_state_dir(
+            backend,
+            dispatch_id,
+            self.server.state.home,
+            self.server.state.key,
+            self.server.state.canonical,
+        )
+        if state_dir is None:
+            self._json_error(404, "not found")
+            return
+        source = derive_liveness_source(backend, state_dir)
+        if source is None:
+            self._json_error(404, "not found")
+            return
+        data = read_tail(source)
+        if data is None:
+            self._json_error(404, "not found")
+            return
+        self._write(
+            200,
+            dump_json(
+                {
+                    "dispatch": dispatch_id,
+                    "path": os.path.realpath(source),
+                    "tail": data.decode("utf-8", errors="replace"),
+                }
+            ),
+            "application/json",
+        )
+
+
+class ConsoleServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 64
+    state: ConsoleState
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="loop-console",
+        add_help=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=HELP,
+    )
+    parser.add_argument("-h", "--help", action="store_true")
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        help="workspace directory (default: $PWD)",
+    )
+    return parser
+
+
+def serve(state: ConsoleState) -> int:
+    try:
+        server = ConsoleServer(("127.0.0.1", 0), ConsoleHandler)
+    except OSError as error:
+        fail(f"cannot bind 127.0.0.1: {error}", EXIT_STORE)
+    server.state = state
+    state.port = int(server.server_address[1])
+    url = f"http://127.0.0.1:{state.port}/#{state.bootstrap_token}"
+    stop = {"flag": False}
+
+    def handle_stop(signum: int, frame: object) -> None:
+        stop["flag"] = True
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+
+    signal.signal(signal.SIGTERM, handle_stop)
+    signal.signal(signal.SIGINT, handle_stop)
+    print(url, flush=True)
+    print(
+        f"loop-console: workspace {state.canonical}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        f"loop-console: listening 127.0.0.1:{state.port}",
+        file=sys.stderr,
+        flush=True,
+    )
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        while not stop["flag"] and worker.is_alive():
+            expire_bootstrap_token(state)
+            worker.join(timeout=0.2)
+        return EXIT_OK
+    finally:
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+        try:
+            server.server_close()
+        except OSError:
+            pass
+
+
+def main(argv: list[str]) -> int:
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as error:
+        return int(error.code) if isinstance(error.code, int) else EXIT_USAGE
+    if args.help:
+        sys.stdout.write(HELP)
+        return EXIT_OK
+    workspace = args.workspace
+    if workspace is None:
+        workspace = os.environ.get("PWD") or os.getcwd()
+    canonical = resolve_workspace(workspace)
+    home = home_dir()
+    key = workspace_key_for(canonical)
+    scripts = script_dir()
+    try:
+        assets = load_assets(scripts)
+    except ConsoleError as error:
+        fail(str(error), error.code)
+    paths = console_paths(home, key)
+    try:
+        bootstrap_store(paths)
+        lock_fd = acquire_singleton(paths, canonical)
+    except ConsoleError as error:
+        fail(str(error), error.code)
+    state = ConsoleState(
+        canonical=canonical,
+        key=key,
+        home=home,
+        scripts=scripts,
+        index=index_bin(scripts),
+        assets=assets,
+        lock_fd=lock_fd,
+        token=secrets.token_urlsafe(32),
+        token_ttl=token_ttl_sec(),
+    )
+    try:
+        return serve(state)
+    finally:
+        if state.lock_fd >= 0:
+            try:
+                fcntl.flock(state.lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(state.lock_fd)
+            except OSError:
+                pass
+            state.lock_fd = -1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
+PY
