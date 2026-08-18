@@ -423,7 +423,8 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# HTTP checks 1-8, 12 (python3 http.client)
+# HTTP checks (python3 http.client). First assertions are a browser-realistic
+# navigation profile: a real browser must be able to open the inert shell.
 # ---------------------------------------------------------------------------
 if [[ -n "$PORT" && -n "$TOKEN" ]]; then
   HTTP_TAP="$TMP_ROOT/http.tap"
@@ -547,6 +548,103 @@ def css_ok():
     if status != 200:
         raise RuntimeError("GET /console.css status %s" % status)
     require_security(headers, "GET /console.css")
+
+
+def browser_navigation_shell():
+    status, raw, headers = capture(
+        "GET",
+        "/",
+        headers={
+            "Host": host_ok,
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "document",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            ),
+        },
+    )
+    if status != 200:
+        raise RuntimeError("browser navigation GET / status %s" % status)
+    require_security(headers, "browser navigation GET /")
+    if not raw.startswith(b"<!DOCTYPE html>"):
+        raise RuntimeError("browser navigation body %r" % raw[:64])
+    no_csrf(raw, "browser navigation GET /")
+
+
+def _inert_fetch_sites(path):
+    for site in ("none", "same-origin", "cross-site"):
+        status, raw, headers = capture(
+            "GET",
+            path,
+            headers={"Host": host_ok, "Sec-Fetch-Site": site},
+        )
+        if status != 200:
+            raise RuntimeError(
+                "GET %s Sec-Fetch-Site=%s status %s" % (path, site, status)
+            )
+        require_security(headers, "GET %s Sec-Fetch-Site=%s" % (path, site))
+        if path == "/":
+            no_csrf(raw, "GET %s Sec-Fetch-Site=%s" % (path, site))
+
+
+def inert_root_fetch_sites():
+    _inert_fetch_sites("/")
+
+
+def inert_css_fetch_sites():
+    _inert_fetch_sites("/console.css")
+
+
+def inert_js_fetch_sites():
+    _inert_fetch_sites("/console.js")
+
+
+def _api_browser_headers(path):
+    if not cookie or not csrf:
+        raise RuntimeError("no session")
+    status, raw, headers = capture(
+        "GET",
+        path,
+        headers=auth_headers(extra={"Sec-Fetch-Site": "same-origin"}),
+    )
+    if status != 200:
+        raise RuntimeError(
+            "GET %s Sec-Fetch-Site=same-origin status %s body %r"
+            % (path, status, raw)
+        )
+    require_security(headers, "GET %s same-origin" % path)
+    for site in ("cross-site", "none"):
+        status, raw, headers = capture(
+            "GET",
+            path,
+            headers=auth_headers(extra={"Sec-Fetch-Site": site}),
+        )
+        if status != 403:
+            raise RuntimeError(
+                "GET %s Sec-Fetch-Site=%s status %s want 403"
+                % (path, site, status)
+            )
+        require_security(headers, "GET %s Sec-Fetch-Site=%s" % (path, site))
+    status, raw, headers = capture(
+        "GET",
+        path,
+        headers=auth_headers(extra={"Origin": "https://evil.example"}),
+    )
+    if status != 403:
+        raise RuntimeError("GET %s evil Origin status %s" % (path, status))
+    require_security(headers, "GET %s evil Origin" % path)
+
+
+def api_state_browser_headers():
+    _api_browser_headers("/api/state")
+
+
+def api_dials_browser_headers():
+    _api_browser_headers("/api/dials")
 
 
 def wrong_token():
@@ -1204,6 +1302,10 @@ def dials_rejected():
         raise RuntimeError("409 message %r" % err)
 
 
+check("browser: GET / with a realistic navigation header set is 200 HTML", browser_navigation_shell)
+check("browser: GET / accepts Sec-Fetch-Site none, same-origin, and cross-site", inert_root_fetch_sites)
+check("browser: GET /console.css accepts Sec-Fetch-Site none, same-origin, and cross-site", inert_css_fetch_sites)
+check("browser: GET /console.js accepts Sec-Fetch-Site none, same-origin, and cross-site", inert_js_fetch_sites)
 check("inert shell: GET / has no CSRF or run data and exact security headers", inert_root)
 check("headers: GET /console.js carries the same security headers", asset_headers)
 check("headers: GET /console.css is served", css_ok)
@@ -1219,6 +1321,8 @@ check("csrf: /api/state with correct header is 200", csrf_good_state)
 check("csrf: /api/transcript with correct header is 200", csrf_good_transcript)
 check("origin: cross-origin GET is 403", get_origin_mismatch)
 check("origin: Sec-Fetch-Site not same-origin is 403", get_sec_fetch_site)
+check("browser: GET /api/state same-origin is 200; none, cross-site, evil Origin are 403", api_state_browser_headers)
+check("browser: GET /api/dials same-origin is 200; none, cross-site, evil Origin are 403", api_dials_browser_headers)
 check("auth: /api/state with cookie matches the fixture", state_auth)
 check("host: localhost is 400", host_localhost)
 check("host: 127.0.0.1 with the wrong port is 400", host_other_port)

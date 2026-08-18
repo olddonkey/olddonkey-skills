@@ -100,9 +100,11 @@ per-session CSRF token, then invalidates the bootstrap token.
 Authenticated GET /api/state, /api/transcript, and /api/dials require
 that session cookie and request header X-Console-CSRF matching the
 session. The header is compared with hmac.compare_digest. Missing or
-wrong CSRF is 403; no session is 401. A GET that sends Origin not
-equal to the console origin, or Sec-Fetch-Site other than same-origin,
-is 403. Absent Origin or Sec-Fetch-Site is allowed on same-origin GET.
+wrong CSRF is 403; no session is 401. A GET /api/* that sends Origin
+not equal to the console origin, or Sec-Fetch-Site other than
+same-origin, is 403. Absent Origin or Sec-Fetch-Site is allowed on
+GET /api/*. GET /, /console.css, and /console.js are inert and do
+not apply the Origin or Sec-Fetch-Site restriction.
 POST /api/dials and /api/dials/reset are mutations: they require the
 same session+CSRF checks plus an exact Origin match (already required
 for every POST). The console writes no calibration bytes itself; it
@@ -893,12 +895,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if self.command == "POST" and not self._origin_ok():
             self._json_error(403, "forbidden")
             return
-        if self.command in {"GET", "HEAD"}:
+        parsed = urlparse(self.path)
+        route = parsed.path
+        if self.command in {"GET", "HEAD"} and route.startswith("/api/"):
             if not self._optional_origin_ok() or not self._fetch_site_ok():
                 self._json_error(403, "forbidden")
                 return
-        parsed = urlparse(self.path)
-        route = parsed.path
         if self.command == "GET" and route == "/":
             self._write(200, self.server.state.assets["index.html"], ASSET_TYPES["index.html"])
             return
