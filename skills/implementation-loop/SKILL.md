@@ -220,3 +220,5 @@ Recognize both `loop[<repo>]` and the legacy `codex-loop[<repo>]` prefixes in us
 Record format example: [references/dials.md](references/dials.md).
 
 A setting stored in **user-level memory** IS standing authorization for the scope it was given in — that's what lets sessions resume without re-asking. It does not stretch to work of a different character: a `light`-depth unit that turns out to touch a security boundary, or a `merge` stop point meeting money, gets surfaced and re-checked.
+
+When a calibration store exists for the workspace (`~/.config/olddonkey-loop/calibration/<workspace-key>.tsv`) it is the machine-read authority: kickoff reads it instead of asking about the dials it covers. A rejected store means **no standing authorization** — kickoff asks, and must not fall back to memory (that is what would resurrect a revoked grant). After a workspace has a store, a permission granted in chat is valid for that session but does not persist; persisting it takes a console action.

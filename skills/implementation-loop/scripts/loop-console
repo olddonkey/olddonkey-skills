@@ -6,12 +6,15 @@
 #
 # Binds 127.0.0.1 on an ephemeral port. Prints one URL on stdout:
 #   http://127.0.0.1:<port>/#<one-time-token>
-# Sessions live in RAM. The only on-disk file is console.lock under
-# $HOME/.config/olddonkey-loop/console/<workspace-key>/.
+# Sessions live in RAM. The console process writes only console.lock under
+# $HOME/.config/olddonkey-loop/console/<workspace-key>/. Dial mutations
+# shell out to loop-calibration, which owns
+# $HOME/.config/olddonkey-loop/calibration/<workspace-key>.tsv.
 #
 # Test-only overrides (not for production):
-#   LOOP_CONSOLE_TEST=1            required to honor LOOP_INDEX
+#   LOOP_CONSOLE_TEST=1            required to honor LOOP_INDEX / LOOP_CALIBRATION
 #   LOOP_INDEX                     path to loop-index (default: sibling)
+#   LOOP_CALIBRATION               path to loop-calibration (default: sibling)
 #   LOOP_CONSOLE_TOKEN_TTL_SEC     bootstrap token TTL (default 120)
 
 set -euo pipefail
@@ -72,8 +75,9 @@ ROUTES_GET = {
     "/console.js",
     "/api/state",
     "/api/transcript",
+    "/api/dials",
 }
-ROUTES_POST = {"/api/session"}
+ROUTES_POST = {"/api/session", "/api/dials", "/api/dials/reset"}
 
 HELP = """\
 Read-only local web console for loop journal evidence.
@@ -93,12 +97,16 @@ after startup if unused. The inert shell posts it to /api/session;
 success issues an HttpOnly SameSite=Strict session cookie and a
 per-session CSRF token, then invalidates the bootstrap token.
 
-Authenticated GET /api/state and /api/transcript require that session
-cookie and request header X-Console-CSRF matching the session. The
-header is compared with hmac.compare_digest. Missing or wrong CSRF
-is 403; no session is 401. A GET that sends Origin not equal to the
-console origin, or Sec-Fetch-Site other than same-origin, is 403.
-Absent Origin or Sec-Fetch-Site is allowed on same-origin GET.
+Authenticated GET /api/state, /api/transcript, and /api/dials require
+that session cookie and request header X-Console-CSRF matching the
+session. The header is compared with hmac.compare_digest. Missing or
+wrong CSRF is 403; no session is 401. A GET that sends Origin not
+equal to the console origin, or Sec-Fetch-Site other than same-origin,
+is 403. Absent Origin or Sec-Fetch-Site is allowed on same-origin GET.
+POST /api/dials and /api/dials/reset are mutations: they require the
+same session+CSRF checks plus an exact Origin match (already required
+for every POST). The console writes no calibration bytes itself; it
+shells out to loop-calibration with --set-by console.
 
 State directory (D4a):
   $HOME/.config/olddonkey-loop/console/<workspace-key>/
@@ -109,10 +117,14 @@ A second console for the same workspace is refused. Serve until
 SIGTERM/SIGINT; clean shutdown exits 0.
 
 Test-only environment:
-  LOOP_CONSOLE_TEST=1             required to honor LOOP_INDEX
+  LOOP_CONSOLE_TEST=1             required to honor LOOP_INDEX and
+                                  LOOP_CALIBRATION
   LOOP_INDEX                      loop-index executable (default:
                                   sibling loop-index); ignored unless
                                   LOOP_CONSOLE_TEST=1
+  LOOP_CALIBRATION                loop-calibration executable (default:
+                                  sibling loop-calibration); ignored
+                                  unless LOOP_CONSOLE_TEST=1
   LOOP_CONSOLE_TOKEN_TTL_SEC      bootstrap token TTL in seconds
                                   (default 120; test-only)
 
@@ -292,6 +304,14 @@ def index_bin(scripts: str) -> str:
         if override:
             return override
     return os.path.join(scripts, "loop-index")
+
+
+def calibration_bin(scripts: str) -> str:
+    if os.environ.get("LOOP_CONSOLE_TEST") == "1":
+        override = os.environ.get("LOOP_CALIBRATION")
+        if override:
+            return override
+    return os.path.join(scripts, "loop-calibration")
 
 
 def read_regular_bytes(path: str) -> bytes:
@@ -583,6 +603,67 @@ def run_loop_index(
     return document, 200, None
 
 
+def helper_stderr(completed: subprocess.CompletedProcess[bytes]) -> str:
+    try:
+        text = completed.stderr.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+    if text.startswith("error: "):
+        return text[len("error: ") :]
+    return text
+
+
+def run_loop_calibration(
+    calibration: str, argv: list[str]
+) -> tuple[subprocess.CompletedProcess[bytes] | None, int, str | None]:
+    try:
+        completed = subprocess.run(
+            [calibration, *argv],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        return None, 504, "loop-calibration timed out"
+    except OSError as error:
+        return None, 502, f"loop-calibration could not be executed: {error}"
+    return completed, 200, None
+
+
+def parse_calibration_document(
+    completed: subprocess.CompletedProcess[bytes],
+) -> tuple[dict | None, int, str | None]:
+    if completed.returncode != 0:
+        message = helper_stderr(completed) or "loop-calibration failed"
+        if completed.returncode == 2:
+            return None, 400, message
+        if completed.returncode == 6:
+            if "repair or remove" not in message:
+                message = (
+                    message + "; repair or remove the store file"
+                    if message
+                    else "calibration store is rejected; repair or remove the store file"
+                )
+            return None, 409, message
+        return None, 502, message
+    try:
+        document = json.loads(completed.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, 502, "loop-calibration returned invalid JSON"
+    if not isinstance(document, dict):
+        return None, 502, "loop-calibration returned invalid JSON"
+    return document, 200, None
+
+
+def show_dials(calibration: str, workspace: str) -> tuple[dict | None, int, str | None]:
+    completed, status, error = run_loop_calibration(
+        calibration, ["show", "--json", "--workspace", workspace]
+    )
+    if completed is None:
+        return None, status, error
+    return parse_calibration_document(completed)
+
+
 def find_dispatch(document: dict, dispatch_id: str) -> dict | None:
     runs = document.get("runs")
     if not isinstance(runs, list):
@@ -610,6 +691,7 @@ class ConsoleState:
         home: str,
         scripts: str,
         index: str,
+        calibration: str,
         assets: dict[str, bytes],
         lock_fd: int,
         token: str,
@@ -620,6 +702,7 @@ class ConsoleState:
         self.home = home
         self.scripts = scripts
         self.index = index
+        self.calibration = calibration
         self.assets = assets
         self.lock_fd = lock_fd
         self.bootstrap_token: str | None = token
@@ -838,6 +921,21 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
                 return
             self._handle_transcript(parsed.query)
             return
+        if self.command == "GET" and route == "/api/dials":
+            if not self._require_session_csrf():
+                return
+            self._handle_dials_get()
+            return
+        if self.command == "POST" and route == "/api/dials":
+            if not self._require_session_csrf():
+                return
+            self._handle_dials_set()
+            return
+        if self.command == "POST" and route == "/api/dials/reset":
+            if not self._require_session_csrf():
+                return
+            self._handle_dials_reset()
+            return
         if route in ROUTES_GET or route in ROUTES_POST:
             self._json_error(404, "not found")
             return
@@ -954,6 +1052,119 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             "application/json",
         )
 
+    def _parse_json_object(self) -> tuple[dict | None, str | None]:
+        body = self._read_body()
+        if body is None:
+            return None, "invalid body"
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None, "invalid JSON"
+        if not isinstance(payload, dict):
+            return None, "JSON body must be an object"
+        return payload, None
+
+    def _handle_dials_get(self) -> None:
+        document, status, error = show_dials(
+            self.server.state.calibration, self.server.state.canonical
+        )
+        if document is None:
+            self._json_error(status, error or "loop-calibration failed")
+            return
+        self._write(200, dump_json(document), "application/json")
+
+    def _handle_dials_set(self) -> None:
+        payload, error = self._parse_json_object()
+        if payload is None:
+            self._json_error(400, error or "invalid JSON")
+            return
+        extra = set(payload) - {"key", "value", "provenance"}
+        if extra:
+            self._json_error(400, "unknown field(s)")
+            return
+        key = payload.get("key")
+        value = payload.get("value")
+        if not isinstance(key, str) or not key:
+            self._json_error(400, "key is required")
+            return
+        if not isinstance(value, str) or not value:
+            self._json_error(400, "value is required")
+            return
+        argv = [
+            "set",
+            "--workspace",
+            self.server.state.canonical,
+            "--key",
+            key,
+            "--value",
+            value,
+            "--set-by",
+            "console",
+        ]
+        if "provenance" in payload:
+            provenance = payload.get("provenance")
+            if not isinstance(provenance, str):
+                self._json_error(400, "provenance must be a string")
+                return
+            argv.extend(["--provenance", provenance])
+        completed, status, run_error = run_loop_calibration(
+            self.server.state.calibration, argv
+        )
+        if completed is None:
+            self._json_error(status, run_error or "loop-calibration failed")
+            return
+        if completed.returncode != 0:
+            _document, status, parse_error = parse_calibration_document(completed)
+            self._json_error(status, parse_error or "loop-calibration failed")
+            return
+        refreshed, status, error = show_dials(
+            self.server.state.calibration, self.server.state.canonical
+        )
+        if refreshed is None:
+            self._json_error(status, error or "loop-calibration failed")
+            return
+        self._write(200, dump_json(refreshed), "application/json")
+
+    def _handle_dials_reset(self) -> None:
+        payload, error = self._parse_json_object()
+        if payload is None:
+            self._json_error(400, error or "invalid JSON")
+            return
+        extra = set(payload) - {"key"}
+        if extra:
+            self._json_error(400, "unknown field(s)")
+            return
+        key = payload.get("key")
+        if not isinstance(key, str) or not key:
+            self._json_error(400, "key is required")
+            return
+        argv = [
+            "unset",
+            "--workspace",
+            self.server.state.canonical,
+            "--key",
+            key,
+            "--set-by",
+            "console",
+        ]
+        completed, status, run_error = run_loop_calibration(
+            self.server.state.calibration, argv
+        )
+        if completed is None:
+            self._json_error(status, run_error or "loop-calibration failed")
+            return
+        if completed.returncode != 0:
+            _document, status, parse_error = parse_calibration_document(completed)
+            self._json_error(status, parse_error or "loop-calibration failed")
+            return
+        refreshed, status, error = show_dials(
+            self.server.state.calibration, self.server.state.canonical
+        )
+        if refreshed is None:
+            self._json_error(status, error or "loop-calibration failed")
+            return
+        self._write(200, dump_json(refreshed), "application/json")
+
 
 class ConsoleServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
@@ -1057,6 +1268,7 @@ def main(argv: list[str]) -> int:
         home=home,
         scripts=scripts,
         index=index_bin(scripts),
+        calibration=calibration_bin(scripts),
         assets=assets,
         lock_fd=lock_fd,
         token=secrets.token_urlsafe(32),

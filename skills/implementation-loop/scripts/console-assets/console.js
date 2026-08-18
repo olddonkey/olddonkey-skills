@@ -5,7 +5,30 @@
   var sessionCsrf = null;
   var selectedDispatch = null;
   var lastState = null;
+  var lastDials = null;
+  var dialsBusy = false;
   var pollId = null;
+  var DIAL_ORDER = [
+    "backend",
+    "stop",
+    "cadence",
+    "dispatch-mode",
+    "gate",
+    "on-red",
+    "depth",
+    "fix-lane",
+  ];
+  var DIAL_OPTIONS = {
+    backend: ["codex", "grok", "cursor-agent"],
+    stop: ["worktree", "commit", "pr", "merge"],
+    cadence: ["confirm", "continuous"],
+    "dispatch-mode": ["implement", "read-only"],
+    gate: ["baseline", "strict", "skip"],
+    "on-red": ["stop", "iterate"],
+    depth: ["light", "standard", "deep"],
+    "fix-lane": ["codex", "claude-trivial-ok"],
+  };
+  var PERMISSION_KEYS = ["stop", "cadence", "fix-lane"];
 
   function el(name) {
     return document.createElement(name);
@@ -364,26 +387,275 @@
     }
   }
 
-  function renderDials() {
+  function isPermissionKey(key) {
+    return PERMISSION_KEYS.indexOf(key) !== -1;
+  }
+
+  function setControlsDisabled(root, disabled) {
+    var nodes = root.querySelectorAll("button, select");
+    for (var i = 0; i < nodes.length; i += 1) {
+      if (disabled) {
+        nodes[i].setAttribute("disabled", "disabled");
+      } else {
+        nodes[i].removeAttribute("disabled");
+      }
+    }
+  }
+
+  function renderDialRow(parent, key, record, locked) {
+    var box = el("div");
+    box.className = "dial";
+    box.appendChild(kv("Dial", key));
+    box.appendChild(kv("Value", record && record.value ? record.value : ""));
+    box.appendChild(kv("Scope", record && record.scope ? record.scope : ""));
+    box.appendChild(kv("Source", record && record.source ? record.source : ""));
+    box.appendChild(kv("Set by", record && record.set_by ? record.set_by : ""));
+    box.appendChild(kv("Set at", record && record.set_at ? record.set_at : ""));
+    box.appendChild(
+      kv("Provenance", record && record.provenance ? record.provenance : "")
+    );
+    var controls = el("div");
+    controls.className = "dial-controls";
+    var select = el("select");
+    select.setAttribute("data-dial", key);
+    var options = DIAL_OPTIONS[key] || [];
+    var current = record && record.value ? String(record.value) : options[0];
+    for (var i = 0; i < options.length; i += 1) {
+      var option = el("option");
+      option.setAttribute("value", options[i]);
+      txt(option, options[i]);
+      if (options[i] === current) {
+        option.setAttribute("selected", "selected");
+      }
+      select.appendChild(option);
+    }
+    var apply = el("button");
+    apply.setAttribute("type", "button");
+    apply.className = "dial-apply";
+    txt(apply, "Apply");
+    apply.addEventListener("click", function () {
+      postDial(key, select.value);
+    });
+    var reset = el("button");
+    reset.setAttribute("type", "button");
+    reset.className = "dial-reset";
+    txt(reset, "Reset to default");
+    reset.addEventListener("click", function () {
+      resetDial(key);
+    });
+    controls.appendChild(select);
+    controls.appendChild(apply);
+    controls.appendChild(reset);
+    box.appendChild(controls);
+    if (locked) {
+      select.setAttribute("disabled", "disabled");
+      apply.setAttribute("disabled", "disabled");
+      reset.setAttribute("disabled", "disabled");
+    }
+    parent.appendChild(box);
+  }
+
+  function renderDials(doc) {
     var root = document.getElementById("dials-root");
     if (!root) {
       return;
     }
     clear(root);
-    var p = el("p");
-    p.className = "empty";
+    if (!doc) {
+      var inert = el("p");
+      inert.className = "empty";
+      txt(inert, "Authenticate to read and set the workspace dials.");
+      root.appendChild(inert);
+      return;
+    }
+    lastDials = doc;
+    var rejected = doc.store === "rejected";
+    var absent = doc.store === "absent";
+    if (rejected) {
+      var ban = el("p");
+      ban.className = "dials-notice is-rejected";
+      txt(
+        ban,
+        "The calibration store was rejected: " +
+          (doc.reason ? String(doc.reason) : "unknown reason") +
+          ". Repair or remove the store file. Controls are disabled."
+      );
+      root.appendChild(ban);
+    } else if (absent) {
+      var notice = el("p");
+      notice.className = "dials-notice is-absent";
+      txt(
+        notice,
+        "The calibration store is absent. Safe defaults are in effect; nothing was imported from memory. Confirming a value here records it. Permission dials recorded here are granted via this console."
+      );
+      root.appendChild(notice);
+    }
+    if (doc.store) {
+      root.appendChild(kv("Store", String(doc.store)));
+    }
+    var locked = rejected || dialsBusy;
+    var permHead = el("h3");
+    txt(permHead, "These grant authority");
+    root.appendChild(permHead);
+    var permNote = el("p");
+    permNote.className = "dials-section-note";
     txt(
-      p,
-      "Dials arrive with the calibration store. This version has no controls."
+      permNote,
+      "Permission dials. Setting one here grants standing authorization for this workspace."
     );
-    root.appendChild(p);
+    root.appendChild(permNote);
+    var permBox = el("div");
+    permBox.className = "dials-permission";
+    var dials = doc.dials || {};
+    for (var p = 0; p < PERMISSION_KEYS.length; p += 1) {
+      renderDialRow(permBox, PERMISSION_KEYS[p], dials[PERMISSION_KEYS[p]], locked);
+    }
+    root.appendChild(permBox);
+    var polHead = el("h3");
+    txt(polHead, "Policy");
+    root.appendChild(polHead);
+    var polBox = el("div");
+    polBox.className = "dials-policy";
+    for (var i = 0; i < DIAL_ORDER.length; i += 1) {
+      var key = DIAL_ORDER[i];
+      if (isPermissionKey(key)) {
+        continue;
+      }
+      renderDialRow(polBox, key, dials[key], locked);
+    }
+    root.appendChild(polBox);
+    var err = el("p");
+    err.id = "dials-error";
+    err.className = "dials-error";
+    txt(err, "");
+    root.appendChild(err);
+    if (dialsBusy) {
+      setControlsDisabled(root, true);
+    }
+  }
+
+  function setDialError(message) {
+    var node = document.getElementById("dials-error");
+    if (node) {
+      txt(node, message);
+    }
+  }
+
+  function postDial(key, value) {
+    if (dialsBusy) {
+      return;
+    }
+    dialsBusy = true;
+    if (lastDials) {
+      renderDials(lastDials);
+    }
+    fetch("/api/dials", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: Object.assign(
+        { "content-type": "application/json" },
+        apiHeaders()
+      ),
+      body: JSON.stringify({ key: key, value: value }),
+    })
+      .then(function (response) {
+        return response.json().then(function (payload) {
+          return { ok: response.ok, status: response.status, payload: payload };
+        });
+      })
+      .then(function (result) {
+        dialsBusy = false;
+        if (!result.ok) {
+          if (lastDials) {
+            renderDials(lastDials);
+          }
+          setDialError(
+            result.payload && result.payload.error
+              ? String(result.payload.error)
+              : "Dial update failed."
+          );
+          return;
+        }
+        renderDials(result.payload);
+      })
+      .catch(function () {
+        dialsBusy = false;
+        if (lastDials) {
+          renderDials(lastDials);
+        }
+        setDialError("Dial update failed.");
+      });
+  }
+
+  function resetDial(key) {
+    if (dialsBusy) {
+      return;
+    }
+    dialsBusy = true;
+    if (lastDials) {
+      renderDials(lastDials);
+    }
+    fetch("/api/dials/reset", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: Object.assign(
+        { "content-type": "application/json" },
+        apiHeaders()
+      ),
+      body: JSON.stringify({ key: key }),
+    })
+      .then(function (response) {
+        return response.json().then(function (payload) {
+          return { ok: response.ok, status: response.status, payload: payload };
+        });
+      })
+      .then(function (result) {
+        dialsBusy = false;
+        if (!result.ok) {
+          if (lastDials) {
+            renderDials(lastDials);
+          }
+          setDialError(
+            result.payload && result.payload.error
+              ? String(result.payload.error)
+              : "Dial reset failed."
+          );
+          return;
+        }
+        renderDials(result.payload);
+      })
+      .catch(function () {
+        dialsBusy = false;
+        if (lastDials) {
+          renderDials(lastDials);
+        }
+        setDialError("Dial reset failed.");
+      });
+  }
+
+  function pullDials() {
+    fetch("/api/dials", { credentials: "same-origin", headers: apiHeaders() })
+      .then(function (response) {
+        if (!response.ok) {
+          return null;
+        }
+        return response.json();
+      })
+      .then(function (doc) {
+        if (!doc) {
+          return;
+        }
+        renderDials(doc);
+      })
+      .catch(function () {
+        return;
+      });
   }
 
   function renderAll(state) {
     lastState = state;
     renderNow(state);
     renderThisRun(state);
-    renderDials();
   }
 
   function apiHeaders() {
@@ -444,6 +716,7 @@
 
   function afterAuth() {
     pullState();
+    pullDials();
     pollId = setInterval(pullState, POLL_MS);
   }
 
