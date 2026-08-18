@@ -1,0 +1,165 @@
+:root {
+  --bg: #161513;
+  --fg: #ece7dc;
+  --muted: #9a9486;
+  --line: #2c2a26;
+  --panel: #1e1c19;
+  --clean-fg: #c8f0d2;
+  --clean-bg: #1b3324;
+  --other-fg: #d8c4a0;
+  --other-bg: #322818;
+  --path: #8ec8c3;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.45;
+}
+
+header,
+main {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1.25rem 1.5rem;
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+h1 {
+  margin: 0 0 0.35rem;
+  font-size: 1.35rem;
+}
+
+h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+h3 {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.95rem;
+}
+
+#shell-status {
+  margin: 0;
+  color: var(--muted);
+}
+
+section {
+  margin-top: 1.5rem;
+  padding: 1rem 1.1rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+
+.empty {
+  color: var(--muted);
+  margin: 0;
+}
+
+.meta,
+.dispatch,
+.unit,
+.gate {
+  margin: 0 0 0.75rem;
+}
+
+.kv {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.35rem;
+}
+
+.kv span {
+  color: var(--muted);
+}
+
+.kv strong {
+  font-weight: 600;
+}
+
+.path {
+  color: var(--path);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+
+.liveness {
+  font-weight: 600;
+}
+
+button.pick {
+  margin: 0 0.35rem 0.35rem 0;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+button.pick.is-selected {
+  border-color: var(--path);
+}
+
+#transcript-tail {
+  margin: 0.5rem 0 0;
+  padding: 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 16rem;
+  overflow: auto;
+}
+
+.gate-binding {
+  display: inline-block;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.15rem 0.5rem;
+}
+
+.gate-binding.is-clean {
+  background: var(--clean-bg);
+  color: var(--clean-fg);
+  border: 2px solid var(--clean-fg);
+}
+
+.gate-binding.is-other {
+  background: var(--other-bg);
+  color: var(--other-fg);
+  border: 1px dashed var(--other-fg);
+}
+
+.binding-note {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+a {
+  color: var(--path);
+}

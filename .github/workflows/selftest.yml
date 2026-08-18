@@ -32,6 +32,7 @@ jobs:
           bash -n skills/implementation-loop/scripts/loop-journal
           bash -n skills/implementation-loop/scripts/loop-run
           bash -n skills/implementation-loop/scripts/loop-index
+          bash -n skills/implementation-loop/scripts/loop-console
           bash -n skills/implementation-loop/scripts/run-gate.sh
           bash -n skills/implementation-loop/scripts/selftest.sh
           bash -n skills/implementation-loop/tests/contract-core.sh
@@ -40,6 +41,7 @@ jobs:
           bash -n skills/implementation-loop/tests/integration-test.sh
           bash -n skills/implementation-loop/tests/journal-selftest.sh
           bash -n skills/implementation-loop/tests/index-selftest.sh
+          bash -n skills/implementation-loop/tests/console-selftest.sh
           bash -n skills/implementation-loop/tests/shim-selftest.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
@@ -86,6 +88,8 @@ jobs:
         run: bash skills/implementation-loop/tests/journal-selftest.sh
       - name: Index selftest
         run: bash skills/implementation-loop/tests/index-selftest.sh
+      - name: Console selftest
+        run: bash skills/implementation-loop/tests/console-selftest.sh
       - name: Cursor gate selftest
         run: bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
       - name: Cursor installer selftest
