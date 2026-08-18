@@ -242,10 +242,15 @@ forbidden = (
     "setTimeout",
     "document.writeln",
     "javascript:",
+    "element.style",
 )
 missing = [name for name in forbidden if name in js]
 if missing:
     raise SystemExit("js tokens: " + ",".join(missing))
+if re.search(r"\.style\.", js):
+    raise SystemExit("js .style. assignment")
+if re.search(r"""\bstyle\s*=\s*["']""", js):
+    raise SystemExit("js inline style string")
 if re.search(r"<script(?![^>]*\bsrc=)", html, re.I):
     raise SystemExit("inline script")
 if re.search(r"\son[a-z]+=", html, re.I):
@@ -277,6 +282,116 @@ else
   fail "assets: exactly the three committed files"
 fi
 
+if python3 - "$ASSETS" <<'PY'
+import os, re, sys
+root = sys.argv[1]
+css = open(os.path.join(root, "console.css"), encoding="utf-8").read()
+css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+media = re.search(
+    r"@media\s*\(\s*prefers-color-scheme\s*:\s*dark\s*\)",
+    css,
+)
+if media is None:
+    raise SystemExit("missing prefers-color-scheme: dark")
+
+
+def brace_block(text, open_at):
+    if open_at >= len(text) or text[open_at] != "{":
+        raise SystemExit("expected '{' at %d" % open_at)
+    depth = 0
+    for index in range(open_at, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_at + 1 : index]
+    raise SystemExit("unbalanced braces")
+
+
+def first_rule(text, selector):
+    match = re.search(r"(?<![\w-])" + selector + r"\s*\{", text)
+    if match is None:
+        return None
+    return brace_block(text, match.end() - 1)
+
+
+def props(block):
+    found = {}
+    for name, value in re.findall(r"--([a-z0-9-]+)\s*:\s*([^;]+);", block):
+        found[name] = value.strip()
+    return found
+
+
+prefix = css[: media.start()]
+light = first_rule(prefix, r":root")
+if light is None:
+    raise SystemExit("bare :root missing before dark media")
+dark_media = brace_block(css, media.end() + css[media.end() :].find("{"))
+dark = first_rule(dark_media, r":root")
+if dark is None:
+    raise SystemExit("dark media has no :root override")
+stripped = re.sub(r":root\s*\{.*\}\s*", "", dark_media, count=1, flags=re.S).strip()
+if stripped:
+    raise SystemExit("dark media defines more than :root tokens: %r" % stripped[:80])
+light_props = props(light)
+dark_props = props(dark)
+required = (
+    "bg",
+    "surface",
+    "surface-raised",
+    "border",
+    "border-control",
+    "text",
+    "muted",
+    "accent",
+    "ok",
+    "caution",
+    "danger",
+    "neutral",
+)
+missing_light = [name for name in required if name not in light_props]
+if missing_light:
+    raise SystemExit("bare :root missing --%s" % ",".join(missing_light))
+missing_dark = [name for name in required if name not in dark_props]
+if missing_dark:
+    raise SystemExit("dark :root missing --%s" % ",".join(missing_dark))
+only_dark = sorted(name for name in dark_props if name not in light_props)
+if only_dark:
+    raise SystemExit("tokens only in dark media: %s" % ",".join(only_dark))
+PY
+then
+  pass "assets: console.css defines light tokens on :root and overrides them in dark"
+else
+  fail "assets: console.css defines light tokens on :root and overrides them in dark"
+fi
+
+if python3 - "$ASSETS" <<'PY'
+import os, re, sys
+root = sys.argv[1]
+js = open(os.path.join(root, "console.js"), encoding="utf-8").read()
+html = open(os.path.join(root, "index.html"), encoding="utf-8").read()
+if re.search(r"<script(?![^>]*\bsrc=)", html, re.I):
+    raise SystemExit("inline script")
+if re.search(r"\son[a-z]+=", html, re.I):
+    raise SystemExit("inline handler")
+if re.search(r"\sstyle=", html, re.I):
+    raise SystemExit("inline style")
+if "aria-pressed" not in js:
+    raise SystemExit("missing aria-pressed")
+if 'setAttribute("role", "status")' not in js:
+    raise SystemExit("missing role=status")
+if 'el("label")' not in js:
+    raise SystemExit("missing label factory")
+PY
+then
+  pass "assets: index.html stays an inert shell"
+  pass "assets: console.js exposes aria-pressed, role=status, and dial labels"
+else
+  fail "assets: index.html stays an inert shell"
+  fail "assets: console.js exposes aria-pressed, role=status, and dial labels"
+fi
+
 if python3 - "$ASSETS/console.js" <<'PY'
 import re, sys
 js = open(sys.argv[1], encoding="utf-8").read()
@@ -286,13 +401,240 @@ if "apiHeaders" not in js:
     raise SystemExit("missing apiHeaders helper")
 if "/api/dials" not in js or "/api/dials/reset" not in js:
     raise SystemExit("missing dials API surface")
-if not re.search(r"txt\(\s*link\s*,\s*href\s*\)", js):
-    raise SystemExit("link text is not the parsed href")
+if re.search(r"txt\(\s*link\s*,\s*href\s*\)", js):
+    raise SystemExit("link text is still the raw href")
+if 'setAttribute("href", href)' not in js:
+    raise SystemExit("link href is not the parsed href")
+if 'setAttribute("title", href)' not in js:
+    raise SystemExit("link title is not the parsed href")
+if "linkLabel" not in js or "parseHttpUrl" not in js:
+    raise SystemExit("missing parsed-URL link helpers")
 PY
 then
-  pass "assets: console.js sends X-Console-CSRF and displays parsed href"
+  pass "assets: console.js sends X-Console-CSRF and labels publish links from the parsed URL"
 else
-  fail "assets: console.js sends X-Console-CSRF and displays parsed href"
+  fail "assets: console.js sends X-Console-CSRF and labels publish links from the parsed URL"
+fi
+
+if python3 - "$ASSETS/console.js" <<'PY'
+import sys
+js = open(sys.argv[1], encoding="utf-8").read()
+if "Setting one here grants standing authorization for this workspace." in js:
+    raise SystemExit("stale unconditional permission-group copy")
+if "when set beyond their default" not in js:
+    raise SystemExit("group note missing the conditional grant")
+if "carry no authority" not in js:
+    raise SystemExit("group note missing the default-has-no-authority clause")
+if 'record.scope === "permission"' not in js:
+    raise SystemExit("grant chip is not gated on the API scope field")
+if 'chip("grants authority", "caution")' not in js:
+    raise SystemExit("missing grants-authority caution chip")
+if "derived_scope" in js or "deriveScope" in js or "scopeForValue" in js:
+    raise SystemExit("reimplemented scope derivation")
+PY
+then
+  pass "assets: permission group copy is conditional; grant chip uses record.scope"
+else
+  fail "assets: permission group copy is conditional; grant chip uses record.scope"
+fi
+
+if node - "$ASSETS/console.js" >"$TMP_ROOT/render.tap" 2>"$TMP_ROOT/render.err" <<'JS'
+const fs = require("fs");
+const vm = require("vm");
+const src = fs.readFileSync(process.argv[2], "utf8");
+
+function extractBlock(headerRe) {
+  const match = headerRe.exec(src);
+  if (!match) {
+    throw new Error("missing " + headerRe);
+  }
+  const brace = src.indexOf("{", match.index);
+  if (brace < 0) {
+    throw new Error("no brace for " + headerRe);
+  }
+  let depth = 0;
+  for (let i = brace; i < src.length; i += 1) {
+    if (src[i] === "{") {
+      depth += 1;
+    } else if (src[i] === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return src.slice(match.index, i + 1);
+      }
+    }
+  }
+  throw new Error("unbalanced " + headerRe);
+}
+
+function makeNode(name) {
+  return {
+    nodeName: name,
+    className: "",
+    textContent: "",
+    attrs: {},
+    children: [],
+    setAttribute: function (key, value) {
+      this.attrs[key] = String(value);
+    },
+    getAttribute: function (key) {
+      return this.attrs[key];
+    },
+    appendChild: function (child) {
+      this.children.push(child);
+      return child;
+    },
+    addEventListener: function () {},
+  };
+}
+
+function walk(node, visit) {
+  visit(node);
+  (node.children || []).forEach(function (child) {
+    walk(child, visit);
+  });
+}
+
+const sandbox = {
+  document: {
+    createElement: function (name) {
+      return makeNode(name);
+    },
+  },
+  URL: URL,
+  postDial: function () {},
+  resetDial: function () {},
+};
+vm.createContext(sandbox);
+vm.runInContext(extractBlock(/var DIAL_OPTIONS =/), sandbox);
+[
+  "el",
+  "txt",
+  "chip",
+  "parseHttpUrl",
+  "linkLabel",
+  "appendLinkOrText",
+  "renderDialRow",
+].forEach(function (name) {
+  vm.runInContext(
+    "this." + name + " = " + extractBlock(new RegExp("function " + name + "\\(")),
+    sandbox
+  );
+});
+
+function check(name, fn) {
+  try {
+    fn();
+    console.log("ok - %s", name);
+  } catch (error) {
+    console.log("not ok - %s: %s", name, error && error.message ? error.message : error);
+    process.exitCode = 1;
+  }
+}
+
+check("render: permission-scope dial shows grants-authority chip; default does not", function () {
+  const granted = makeNode("div");
+  sandbox.renderDialRow(
+    granted,
+    "stop",
+    { value: "merge", scope: "permission", source: "store" },
+    false
+  );
+  const grantChips = [];
+  walk(granted, function (node) {
+    if (
+      typeof node.className === "string" &&
+      /\bchip\b/.test(node.className) &&
+      node.textContent === "grants authority"
+    ) {
+      grantChips.push(node);
+    }
+  });
+  if (grantChips.length !== 1) {
+    throw new Error("permission dial chip count " + grantChips.length);
+  }
+  if (!/\bis-caution\b/.test(grantChips[0].className)) {
+    throw new Error("grant chip class " + grantChips[0].className);
+  }
+
+  const def = makeNode("div");
+  sandbox.renderDialRow(
+    def,
+    "stop",
+    { value: "worktree", scope: "policy", source: "default" },
+    false
+  );
+  const defaultChips = [];
+  walk(def, function (node) {
+    if (
+      typeof node.className === "string" &&
+      /\bchip\b/.test(node.className) &&
+      node.textContent === "grants authority"
+    ) {
+      defaultChips.push(node);
+    }
+  });
+  if (defaultChips.length !== 0) {
+    throw new Error("default dial unexpectedly rendered a grant chip");
+  }
+});
+
+check("render: publish link text is host-plus-path; href stays the parsed URL", function () {
+  const href = "https://github.com/olddonkey/olddonkey-skills/pull/50";
+  const parent = makeNode("p");
+  sandbox.appendLinkOrText(parent, href);
+  const link = parent.children[0];
+  if (!link || link.nodeName !== "a") {
+    throw new Error("expected an anchor");
+  }
+  if (link.attrs.href !== href) {
+    throw new Error("href " + link.attrs.href);
+  }
+  if (link.attrs.title !== href) {
+    throw new Error("title " + link.attrs.title);
+  }
+  if (link.attrs.rel !== "noopener noreferrer") {
+    throw new Error("rel " + link.attrs.rel);
+  }
+  if (link.textContent !== "github.com · pull/50") {
+    throw new Error("label " + link.textContent);
+  }
+  if (sandbox.linkLabel(new URL("https://example.com/")) !== "example.com") {
+    throw new Error("host-only label " + sandbox.linkLabel(new URL("https://example.com/")));
+  }
+  if (sandbox.linkLabel(new URL("http://127.0.0.1:8080/a/b/c")) !== "127.0.0.1:8080 · b/c") {
+    throw new Error("host+port label");
+  }
+  const plain = makeNode("p");
+  sandbox.appendLinkOrText(plain, "javascript:alert(1)");
+  if (!plain.children[0] || plain.children[0].nodeName !== "span") {
+    throw new Error("non-http should be plain text");
+  }
+  if (plain.children[0].textContent !== "javascript:alert(1)") {
+    throw new Error("non-http text changed");
+  }
+});
+JS
+then
+  :
+else
+  printf 'not ok - render driver crashed\n' >>"$TMP_ROOT/render.tap"
+fi
+if [[ -f "$TMP_ROOT/render.tap" ]]; then
+  while IFS= read -r line; do
+    case "$line" in
+      "ok - "*) pass "${line#ok - }" ;;
+      "not ok - "*)
+        CASE_STDOUT="$TMP_ROOT/render.tap"
+        CASE_STDERR="$TMP_ROOT/render.err"
+        fail "${line#not ok - }"
+        CASE_STDOUT=""
+        CASE_STDERR=""
+        ;;
+    esac
+  done < "$TMP_ROOT/render.tap"
+else
+  fail "render: permission-scope dial shows grants-authority chip; default does not"
+  fail "render: publish link text is host-plus-path; href stays the parsed URL"
 fi
 
 # ---------------------------------------------------------------------------
@@ -541,6 +883,21 @@ def asset_headers():
     require_security(headers, "GET /console.js")
     if b"innerHTML" in raw:
         raise RuntimeError("served console.js contains innerHTML")
+
+
+def served_a11y_hooks():
+    status, raw, headers = capture("GET", "/console.js", headers={"Host": host_ok})
+    if status != 200:
+        raise RuntimeError("GET /console.js status %s" % status)
+    require_security(headers, "served console.js")
+    if b"aria-pressed" not in raw:
+        raise RuntimeError("served console.js missing aria-pressed")
+    if b'setAttribute("role", "status")' not in raw:
+        raise RuntimeError("served console.js missing role=status")
+    if b'el("label")' not in raw:
+        raise RuntimeError("served console.js missing label factory")
+    if b"element.style" in raw or b".style." in raw:
+        raise RuntimeError("served console.js assigns element.style")
 
 
 def css_ok():
@@ -1308,6 +1665,7 @@ check("browser: GET /console.css accepts Sec-Fetch-Site none, same-origin, and c
 check("browser: GET /console.js accepts Sec-Fetch-Site none, same-origin, and cross-site", inert_js_fetch_sites)
 check("inert shell: GET / has no CSRF or run data and exact security headers", inert_root)
 check("headers: GET /console.js carries the same security headers", asset_headers)
+check("assets: served console.js exposes aria-pressed, role=status, and dial labels", served_a11y_hooks)
 check("headers: GET /console.css is served", css_ok)
 check("handshake: wrong token is 403", wrong_token)
 check("handshake: correct token sets HttpOnly SameSite=Strict session + csrf", good_session)

@@ -45,29 +45,123 @@
     }
   }
 
-  function kv(label, value, className) {
-    var row = el("div");
-    row.className = "kv";
-    var key = el("span");
-    txt(key, label);
-    var val = el("strong");
-    if (className) {
-      val.className = className;
+  function wordVariant(word) {
+    var w = String(word || "unknown");
+    if (
+      w === "recent activity" ||
+      w === "ok" ||
+      w === "active" ||
+      w === "done" ||
+      w === "completed" ||
+      w === "fresh" ||
+      w === "clean"
+    ) {
+      return "ok";
     }
-    txt(val, value);
-    row.appendChild(key);
-    row.appendChild(val);
-    return row;
+    if (
+      w === "idle" ||
+      w === "stale" ||
+      w === "dirty" ||
+      w === "changed" ||
+      w === "parked" ||
+      w === "missing"
+    ) {
+      return "caution";
+    }
+    if (
+      w === "suspected stall" ||
+      w === "unavailable" ||
+      w === "failed" ||
+      w === "abandoned" ||
+      w === "degraded" ||
+      w === "rejected"
+    ) {
+      return "danger";
+    }
+    return "neutral";
+  }
+
+  function livenessVariant(word) {
+    if (word === "recent activity") {
+      return "ok";
+    }
+    if (word === "idle") {
+      return "caution";
+    }
+    if (word === "suspected stall") {
+      return "danger";
+    }
+    return "neutral";
+  }
+
+  function bindingVariant(binding) {
+    if (binding === "clean") {
+      return "ok";
+    }
+    if (binding === "dirty" || binding === "changed") {
+      return "caution";
+    }
+    return "danger";
+  }
+
+  function chip(label, variant, filled) {
+    var node = el("span");
+    node.className =
+      "chip is-" + (variant || "neutral") + (filled ? " is-filled" : "");
+    txt(node, label);
+    return node;
+  }
+
+  function pad2(value) {
+    var text = String(value);
+    return text.length < 2 ? "0" + text : text;
+  }
+
+  function stampUpdated() {
+    var node = document.getElementById("updated-at");
+    if (!node) {
+      return;
+    }
+    var now = new Date();
+    txt(
+      node,
+      "Updated " +
+        pad2(now.getHours()) +
+        ":" +
+        pad2(now.getMinutes()) +
+        ":" +
+        pad2(now.getSeconds())
+    );
+  }
+
+  function bindLiveRegions() {
+    var status = document.getElementById("shell-status");
+    if (status) {
+      status.setAttribute("role", "status");
+    }
+    var err = document.getElementById("dials-error");
+    if (err) {
+      err.setAttribute("role", "status");
+    }
   }
 
   function setStatus(value) {
     var node = document.getElementById("shell-status");
-    if (node) {
-      txt(node, value);
+    if (!node) {
+      return;
     }
+    txt(node, value);
+    var variant = "neutral";
+    if (value === "Connected.") {
+      variant = "ok";
+    } else if (value === "State unavailable." || value === "Authentication failed.") {
+      variant = "danger";
+    }
+    node.className = "chip is-" + variant;
+    node.setAttribute("role", "status");
   }
 
-  function httpUrl(value) {
+  function parseHttpUrl(value) {
     if (!value || typeof value !== "string") {
       return null;
     }
@@ -80,17 +174,35 @@
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return null;
     }
-    return parsed.href;
+    return parsed;
+  }
+
+  function linkLabel(parsed) {
+    var parts = [];
+    var segs = String(parsed.pathname || "").split("/");
+    var i;
+    for (i = 0; i < segs.length; i += 1) {
+      if (segs[i]) {
+        parts.push(segs[i]);
+      }
+    }
+    var tail = parts.slice(-2).join("/");
+    if (tail) {
+      return parsed.host + " · " + tail;
+    }
+    return parsed.host;
   }
 
   function appendLinkOrText(parent, value) {
-    var href = httpUrl(value);
-    if (href) {
+    var parsed = parseHttpUrl(value);
+    if (parsed) {
+      var href = parsed.href;
       var link = el("a");
       link.setAttribute("href", href);
       link.setAttribute("rel", "noopener noreferrer");
       link.setAttribute("target", "_blank");
-      txt(link, href);
+      link.setAttribute("title", href);
+      txt(link, linkLabel(parsed));
       parent.appendChild(link);
       return;
     }
@@ -139,10 +251,80 @@
   }
 
   function renderEmpty(root) {
-    var p = el("p");
-    p.className = "empty";
-    txt(p, "no runs recorded");
-    root.appendChild(p);
+    var box = el("div");
+    box.className = "empty";
+    var title = el("p");
+    title.className = "empty-title";
+    txt(title, "No runs recorded yet");
+    var hint = el("p");
+    hint.className = "empty-hint";
+    hint.appendChild(document.createTextNode("Start one with "));
+    var cmd = el("code");
+    txt(cmd, "loop-run begin");
+    hint.appendChild(cmd);
+    hint.appendChild(document.createTextNode("."));
+    box.appendChild(title);
+    box.appendChild(hint);
+    root.appendChild(box);
+  }
+
+  function tile(label, value, qualifier, variant) {
+    var card = el("div");
+    card.className = "card tile";
+    var eye = el("p");
+    eye.className = "eyebrow";
+    txt(eye, label);
+    var val = el("p");
+    val.className = "tile-value tabular is-" + (variant || "neutral");
+    txt(val, value);
+    card.appendChild(eye);
+    card.appendChild(val);
+    if (qualifier) {
+      var q = el("p");
+      q.className = "tile-qualifier";
+      q.setAttribute("title", qualifier);
+      txt(q, qualifier);
+      card.appendChild(q);
+    }
+    return card;
+  }
+
+  function renderVitals(state) {
+    var root = document.getElementById("vitals-root");
+    if (!root) {
+      return;
+    }
+    clear(root);
+    var grid = el("div");
+    grid.className = "vitals";
+    var journal = state.journal || {};
+    var jstatus = journal.status || "unknown";
+    grid.appendChild(tile("Journal", jstatus, "", wordVariant(jstatus)));
+    var context = state.context || {};
+    var cstate = context.state || "unknown";
+    var cqual = context.run ? String(context.run) : "No active run";
+    grid.appendChild(tile("Context", cstate, cqual, wordVariant(cstate)));
+    var run = pickRun(state);
+    var checkpoint = run && run.checkpoint ? run.checkpoint : { state: "unknown" };
+    var axis = checkpoint.state || "unknown";
+    var quals = [];
+    if (checkpoint.age_minutes != null) {
+      quals.push(String(checkpoint.age_minutes) + " min");
+    }
+    if (checkpoint.note) {
+      quals.push(String(checkpoint.note));
+    }
+    grid.appendChild(tile("Checkpoint", axis, quals.join(" · "), wordVariant(axis)));
+    var openCount = run ? openItems(run).length : 0;
+    grid.appendChild(
+      tile(
+        "Open dispatches",
+        String(openCount),
+        run ? "In this run" : "No run selected",
+        openCount ? "ok" : "neutral"
+      )
+    );
+    root.appendChild(grid);
   }
 
   function renderNow(state) {
@@ -151,10 +333,6 @@
       return;
     }
     clear(root);
-    var journal = state.journal || {};
-    var context = state.context || {};
-    root.appendChild(kv("Journal", journal.status || "unknown"));
-    root.appendChild(kv("Context", context.state || "unknown"));
     var runs = state.runs || [];
     if (!runs.length) {
       renderEmpty(root);
@@ -165,19 +343,10 @@
       renderEmpty(root);
       return;
     }
-    var checkpoint = run.checkpoint || {};
-    var axis = checkpoint.state || "unknown";
-    if (checkpoint.age_minutes != null) {
-      axis += " · " + String(checkpoint.age_minutes) + " min";
-    }
-    if (checkpoint.note) {
-      axis += " · " + String(checkpoint.note);
-    }
-    root.appendChild(kv("Checkpoint", axis));
     var open = openItems(run);
     if (!open.length) {
       var none = el("p");
-      none.className = "empty";
+      none.className = "empty-hint";
       txt(none, "No open dispatches.");
       root.appendChild(none);
       return;
@@ -191,73 +360,88 @@
     if (!stillOpen) {
       selectedDispatch = open[0].dispatch_id;
     }
-    var heading = el("h3");
-    txt(heading, "Open dispatches");
-    root.appendChild(heading);
+    var grid = el("div");
+    grid.className = "card-grid";
     for (var n = 0; n < open.length; n += 1) {
-      renderOpenDispatch(root, open[n]);
+      renderOpenDispatch(grid, open[n]);
     }
-    var tailWrap = el("div");
-    var tailLabel = el("h3");
-    txt(tailLabel, "Transcript tail");
-    tailWrap.appendChild(tailLabel);
+    root.appendChild(grid);
+    var panel = el("section");
+    panel.className = "card transcript-panel";
+    var head = el("div");
+    head.className = "transcript-head";
+    var heading = el("h3");
+    txt(heading, "Transcript");
+    var ident = el("p");
+    ident.className = "mono";
+    txt(ident, selectedDispatch || "");
+    head.appendChild(heading);
+    head.appendChild(ident);
     var pre = el("pre");
     pre.id = "transcript-tail";
     txt(pre, "");
-    tailWrap.appendChild(pre);
-    root.appendChild(tailWrap);
+    panel.appendChild(head);
+    panel.appendChild(pre);
+    root.appendChild(panel);
     pullTranscript(selectedDispatch);
   }
 
   function renderOpenDispatch(root, item) {
-    var box = el("div");
-    box.className = "dispatch";
     var live = item.liveness || {};
     var word = live.state || "unknown";
-    var idle = live.idle_minutes != null ? String(live.idle_minutes) + " min idle" : "";
-    var source = live.source || "no source path";
     var pick = el("button");
     pick.setAttribute("type", "button");
-    pick.className = "pick" + (item.dispatch_id === selectedDispatch ? " is-selected" : "");
-    txt(pick, item.dispatch_id);
+    var selected = item.dispatch_id === selectedDispatch;
+    pick.className =
+      "card dispatch-card pick" + (selected ? " is-selected" : "");
+    pick.setAttribute("aria-pressed", selected ? "true" : "false");
     pick.addEventListener("click", function () {
       selectedDispatch = item.dispatch_id;
       if (lastState) {
         renderAll(lastState);
       }
     });
-    box.appendChild(pick);
-    box.appendChild(kv("Liveness", word, "liveness"));
-    if (idle) {
-      box.appendChild(kv("Idle", idle));
+    var title = el("h3");
+    title.className = "mono dispatch-id";
+    txt(title, item.dispatch_id);
+    pick.appendChild(title);
+    pick.appendChild(chip(word, livenessVariant(word)));
+    var meta = el("p");
+    meta.className = "meta";
+    txt(meta, (item.backend || "unknown") + " · " + (item.mode || "unknown"));
+    pick.appendChild(meta);
+    if (live.idle_minutes != null) {
+      var idle = el("p");
+      idle.className = "meta tabular";
+      txt(idle, String(live.idle_minutes) + " min idle");
+      pick.appendChild(idle);
     }
-    var pathRow = el("div");
-    pathRow.className = "kv";
-    var pathKey = el("span");
-    txt(pathKey, "Source path");
-    var pathVal = el("strong");
-    pathVal.className = "path";
-    txt(pathVal, source);
-    pathRow.appendChild(pathKey);
-    pathRow.appendChild(pathVal);
-    box.appendChild(pathRow);
-    root.appendChild(box);
+    var path = el("p");
+    path.className = "path";
+    var source = live.source || "no source path";
+    path.setAttribute("title", source);
+    txt(path, source);
+    pick.appendChild(path);
+    root.appendChild(pick);
   }
 
   function renderPublish(parent, publish) {
     var row = el("div");
-    row.className = "kv";
+    row.className = "publish";
     var key = el("span");
+    key.className = "muted-label";
     txt(key, "Publish");
     row.appendChild(key);
     if (!publish || publish === "not recorded") {
-      var none = el("strong");
+      var none = el("p");
+      none.className = "meta";
       txt(none, "not recorded");
       row.appendChild(none);
       parent.appendChild(row);
       return;
     }
-    var facts = el("span");
+    var facts = el("p");
+    facts.className = "meta";
     var parts = [];
     if (publish.branch) {
       parts.push("branch " + publish.branch);
@@ -269,7 +453,7 @@
       parts.push(publish.note);
     }
     if (parts.length) {
-      var extra = el("strong");
+      var extra = el("span");
       txt(extra, parts.join(" · "));
       facts.appendChild(extra);
     }
@@ -280,7 +464,7 @@
       appendLinkOrText(facts, publish.pr);
     }
     if (!facts.firstChild) {
-      var empty = el("strong");
+      var empty = el("span");
       txt(empty, "recorded");
       facts.appendChild(empty);
     }
@@ -291,29 +475,32 @@
   function renderGate(parent, gate) {
     var box = el("div");
     box.className = "gate";
-    box.appendChild(kv("Policy", gate.policy || "unknown"));
-    box.appendChild(kv("Purpose", gate.purpose || "unknown"));
-    var bind = el("div");
-    bind.className = "kv";
-    var bindKey = el("span");
-    txt(bindKey, "Binding");
-    var badge = el("strong");
-    var clean = gate.binding === "clean";
-    badge.className = "gate-binding " + (clean ? "is-clean" : "is-other");
-    txt(badge, gate.binding || "unknown");
-    bind.appendChild(bindKey);
-    bind.appendChild(badge);
-    box.appendChild(bind);
+    var binding = gate.binding || "unknown";
+    var clean = binding === "clean";
+    var badge = chip(binding, bindingVariant(binding), clean);
+    badge.className += " gate-binding";
+    box.appendChild(badge);
+    var meta = el("p");
+    meta.className = "meta";
+    txt(
+      meta,
+      (gate.policy || "unknown") + " · " + (gate.purpose || "unknown")
+    );
+    box.appendChild(meta);
     var note = el("span");
     note.className = "binding-note";
-    txt(
-      note,
-      clean
-        ? "binding=clean is publication evidence"
-        : "not publication readiness — binding is not clean"
-    );
+    txt(note, clean ? "Publication evidence" : "Not publication evidence");
     box.appendChild(note);
     parent.appendChild(box);
+  }
+
+  function appendCell(row, value, className) {
+    var cell = el("td");
+    if (className) {
+      cell.className = className;
+    }
+    txt(cell, value);
+    row.appendChild(cell);
   }
 
   function renderThisRun(state) {
@@ -332,45 +519,96 @@
       renderEmpty(root);
       return;
     }
-    root.appendChild(kv("Run", run.run_id || "unknown"));
-    root.appendChild(kv("Status", run.status || "unknown"));
+    var head = el("div");
+    head.className = "run-head";
+    var rid = el("p");
+    rid.className = "mono run-id";
+    txt(rid, run.run_id || "unknown");
+    head.appendChild(rid);
+    head.appendChild(chip(run.status || "unknown", wordVariant(run.status)));
+    root.appendChild(head);
     var units = run.units || [];
     var unitHead = el("h3");
     txt(unitHead, "Units");
     root.appendChild(unitHead);
     if (!units.length) {
       var noUnits = el("p");
-      noUnits.className = "empty";
+      noUnits.className = "empty-hint";
       txt(noUnits, "No units recorded.");
       root.appendChild(noUnits);
-    }
-    for (var i = 0; i < units.length; i += 1) {
-      var unit = units[i];
-      var box = el("div");
-      box.className = "unit";
-      box.appendChild(kv("Unit", unit.unit || "unknown"));
-      box.appendChild(kv("Status", unit.status || "unknown"));
-      box.appendChild(kv("Rounds", unit.rounds == null ? "0" : String(unit.rounds)));
-      box.appendChild(kv("Review", reviewLabel(unit.review)));
-      renderPublish(box, unit.publish);
-      root.appendChild(box);
+    } else {
+      var unitGrid = el("div");
+      unitGrid.className = "card-grid";
+      for (var i = 0; i < units.length; i += 1) {
+        var unit = units[i];
+        var box = el("div");
+        box.className = "card unit";
+        var name = el("h3");
+        txt(name, unit.unit || "unknown");
+        box.appendChild(name);
+        box.appendChild(chip(unit.status || "unknown", wordVariant(unit.status)));
+        var rounds = el("p");
+        rounds.className = "meta";
+        var rlabel = el("span");
+        txt(rlabel, "Rounds ");
+        var rval = el("span");
+        rval.className = "tabular";
+        txt(rval, unit.rounds == null ? "0" : String(unit.rounds));
+        rounds.appendChild(rlabel);
+        rounds.appendChild(rval);
+        box.appendChild(rounds);
+        var review = el("p");
+        review.className = "meta";
+        txt(review, "Review " + reviewLabel(unit.review));
+        box.appendChild(review);
+        renderPublish(box, unit.publish);
+        unitGrid.appendChild(box);
+      }
+      root.appendChild(unitGrid);
     }
     var items = run.dispatches || [];
     var dispHead = el("h3");
     txt(dispHead, "Dispatches");
     root.appendChild(dispHead);
-    for (var d = 0; d < items.length; d += 1) {
-      var item = items[d];
-      var dbox = el("div");
-      dbox.className = "dispatch";
-      dbox.appendChild(kv("Dispatch", item.dispatch_id || "unknown"));
-      dbox.appendChild(kv("Backend", item.backend || "unknown"));
-      dbox.appendChild(kv("Mode", item.mode || "unknown"));
-      dbox.appendChild(kv("State", item.state || "unknown"));
-      if (item.exit != null) {
-        dbox.appendChild(kv("Exit", String(item.exit)));
+    if (!items.length) {
+      var noDisp = el("p");
+      noDisp.className = "empty-hint";
+      txt(noDisp, "No dispatches recorded.");
+      root.appendChild(noDisp);
+    } else {
+      var wrap = el("div");
+      wrap.className = "table-wrap";
+      var table = el("table");
+      table.className = "records";
+      var thead = el("thead");
+      var headerRow = el("tr");
+      var cols = ["Id", "Backend", "Mode", "State", "Exit"];
+      for (var c = 0; c < cols.length; c += 1) {
+        var th = el("th");
+        th.setAttribute("scope", "col");
+        txt(th, cols[c]);
+        headerRow.appendChild(th);
       }
-      root.appendChild(dbox);
+      thead.appendChild(headerRow);
+      table.appendChild(thead);
+      var tbody = el("tbody");
+      for (var d = 0; d < items.length; d += 1) {
+        var item = items[d];
+        var tr = el("tr");
+        appendCell(tr, item.dispatch_id || "unknown", "mono");
+        appendCell(tr, item.backend || "unknown", "");
+        appendCell(tr, item.mode || "unknown", "");
+        appendCell(tr, item.state || "unknown", "");
+        appendCell(
+          tr,
+          item.exit == null ? "" : String(item.exit),
+          "tabular"
+        );
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      root.appendChild(wrap);
     }
     var gates = run.gates || [];
     var gateHead = el("h3");
@@ -378,12 +616,16 @@
     root.appendChild(gateHead);
     if (!gates.length) {
       var noGates = el("p");
-      noGates.className = "empty";
+      noGates.className = "empty-hint";
       txt(noGates, "No gates recorded.");
       root.appendChild(noGates);
-    }
-    for (var g = 0; g < gates.length; g += 1) {
-      renderGate(root, gates[g]);
+    } else {
+      var gateRow = el("div");
+      gateRow.className = "gate-row";
+      for (var g = 0; g < gates.length; g += 1) {
+        renderGate(gateRow, gates[g]);
+      }
+      root.appendChild(gateRow);
     }
   }
 
@@ -404,19 +646,47 @@
 
   function renderDialRow(parent, key, record, locked) {
     var box = el("div");
-    box.className = "dial";
-    box.appendChild(kv("Dial", key));
-    box.appendChild(kv("Value", record && record.value ? record.value : ""));
-    box.appendChild(kv("Scope", record && record.scope ? record.scope : ""));
-    box.appendChild(kv("Source", record && record.source ? record.source : ""));
-    box.appendChild(kv("Set by", record && record.set_by ? record.set_by : ""));
-    box.appendChild(kv("Set at", record && record.set_at ? record.set_at : ""));
-    box.appendChild(
-      kv("Provenance", record && record.provenance ? record.provenance : "")
-    );
+    box.className = "card dial";
+    var selectId = "dial-select-" + key;
+    var head = el("div");
+    head.className = "dial-head";
+    var label = el("label");
+    label.setAttribute("for", selectId);
+    label.className = "dial-name";
+    txt(label, key);
+    head.appendChild(label);
+    if (record && record.scope === "permission") {
+      head.appendChild(chip("grants authority", "caution"));
+    }
+    box.appendChild(head);
+    var value = el("p");
+    value.className = "dial-value mono";
+    txt(value, record && record.value ? record.value : "");
+    box.appendChild(value);
+    var meta = el("p");
+    meta.className = "meta dial-meta";
+    var bits = [];
+    if (record && record.scope) {
+      bits.push(record.scope);
+    }
+    if (record && record.source) {
+      bits.push(record.source);
+    }
+    if (record && record.set_by) {
+      bits.push(record.set_by);
+    }
+    if (record && record.set_at) {
+      bits.push(record.set_at);
+    }
+    if (record && record.provenance) {
+      bits.push(record.provenance);
+    }
+    txt(meta, bits.join(" · "));
+    box.appendChild(meta);
     var controls = el("div");
     controls.className = "dial-controls";
     var select = el("select");
+    select.setAttribute("id", selectId);
     select.setAttribute("data-dial", key);
     var options = DIAL_OPTIONS[key] || [];
     var current = record && record.value ? String(record.value) : options[0];
@@ -461,9 +731,10 @@
       return;
     }
     clear(root);
+    bindLiveRegions();
     if (!doc) {
       var inert = el("p");
-      inert.className = "empty";
+      inert.className = "empty-hint";
       txt(inert, "Authenticate to read and set the workspace dials.");
       root.appendChild(inert);
       return;
@@ -491,25 +762,31 @@
       root.appendChild(notice);
     }
     if (doc.store) {
-      root.appendChild(kv("Store", String(doc.store)));
+      var store = el("p");
+      store.className = "meta";
+      txt(store, "Store " + String(doc.store));
+      root.appendChild(store);
     }
     var locked = rejected || dialsBusy;
+    var permBox = el("div");
+    permBox.className = "dials-permission";
     var permHead = el("h3");
-    txt(permHead, "These grant authority");
-    root.appendChild(permHead);
+    txt(permHead, "Permission dials");
+    permBox.appendChild(permHead);
     var permNote = el("p");
     permNote.className = "dials-section-note";
     txt(
       permNote,
-      "Permission dials. Setting one here grants standing authorization for this workspace."
+      "These dials grant standing authorization when set beyond their default. At their default value they carry no authority."
     );
-    root.appendChild(permNote);
-    var permBox = el("div");
-    permBox.className = "dials-permission";
+    permBox.appendChild(permNote);
+    var permList = el("div");
+    permList.className = "dial-list";
     var dials = doc.dials || {};
     for (var p = 0; p < PERMISSION_KEYS.length; p += 1) {
-      renderDialRow(permBox, PERMISSION_KEYS[p], dials[PERMISSION_KEYS[p]], locked);
+      renderDialRow(permList, PERMISSION_KEYS[p], dials[PERMISSION_KEYS[p]], locked);
     }
+    permBox.appendChild(permList);
     root.appendChild(permBox);
     var polHead = el("h3");
     txt(polHead, "Policy");
@@ -524,11 +801,6 @@
       renderDialRow(polBox, key, dials[key], locked);
     }
     root.appendChild(polBox);
-    var err = el("p");
-    err.id = "dials-error";
-    err.className = "dials-error";
-    txt(err, "");
-    root.appendChild(err);
     if (dialsBusy) {
       setControlsDisabled(root, true);
     }
@@ -537,6 +809,7 @@
   function setDialError(message) {
     var node = document.getElementById("dials-error");
     if (node) {
+      node.setAttribute("role", "status");
       txt(node, message);
     }
   }
@@ -654,8 +927,10 @@
 
   function renderAll(state) {
     lastState = state;
+    renderVitals(state);
     renderNow(state);
     renderThisRun(state);
+    stampUpdated();
   }
 
   function apiHeaders() {
@@ -753,5 +1028,6 @@
       });
   }
 
+  bindLiveRegions();
   startSession();
 })();
