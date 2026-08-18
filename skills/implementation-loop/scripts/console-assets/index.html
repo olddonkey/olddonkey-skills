@@ -2,15 +2,23 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Loop console</title>
   <link rel="stylesheet" href="/console.css">
 </head>
 <body>
-  <header>
+  <header class="page-header">
     <h1>Loop console</h1>
-    <p id="shell-status">Inert shell. Open the printed console URL to authenticate.</p>
+    <div class="header-meta">
+      <p id="shell-status" class="chip is-neutral" role="status">Open the console URL printed in your terminal to connect.</p>
+      <p id="updated-at" class="updated-at tabular"></p>
+    </div>
   </header>
   <main>
+    <section id="section-vitals" aria-label="Vitals">
+      <h2 class="visually-hidden">Vitals</h2>
+      <div id="vitals-root"></div>
+    </section>
     <section id="section-now">
       <h2>Now</h2>
       <div id="now-root"></div>
@@ -22,6 +30,7 @@
     <section id="section-dials">
       <h2>Dials</h2>
       <div id="dials-root"></div>
+      <p id="dials-error" class="dials-error" role="status"></p>
     </section>
   </main>
   <script src="/console.js"></script>
