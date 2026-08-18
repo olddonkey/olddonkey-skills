@@ -1,0 +1,749 @@
+#!/usr/bin/env bash
+# Machine-readable calibration store for the eight loop dials.
+#
+# Usage:
+#   loop-calibration show [--workspace DIR] [--json]
+#   loop-calibration set --key K --value V --set-by console|import-confirmed
+#       [--provenance TEXT] [--workspace DIR]
+#   loop-calibration unset --key K --set-by console|import-confirmed
+#       [--workspace DIR]
+#
+# Store: $HOME/.config/olddonkey-loop/calibration/<sha256(canonical workspace)>.tsv
+# The store is the sole machine-read authority. A rejected or D4a-broken
+# store is no standing authorization.
+
+set -euo pipefail
+umask 077
+exec python3 - "$@" <<'PY'
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import secrets
+import stat
+import sys
+from datetime import datetime, timezone
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_D4A = 5
+EXIT_STORE = 6
+
+OWNER = os.getuid()
+ISO_Z_RE = __import__("re").compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+)
+PROVENANCE_MAX = 200
+SET_BY_VALUES = ("console", "import-confirmed")
+PERMISSION_GRANT_MSG = (
+    "a permission dial can only be granted through the authenticated console"
+)
+
+DIAL_ORDER = (
+    "backend",
+    "stop",
+    "cadence",
+    "dispatch-mode",
+    "gate",
+    "on-red",
+    "depth",
+    "fix-lane",
+)
+DIAL_VALUES = {
+    "backend": ("codex", "grok", "cursor-agent"),
+    "stop": ("worktree", "commit", "pr", "merge"),
+    "cadence": ("confirm", "continuous"),
+    "dispatch-mode": ("implement", "read-only"),
+    "gate": ("baseline", "strict", "skip"),
+    "on-red": ("stop", "iterate"),
+    "depth": ("light", "standard", "deep"),
+    "fix-lane": ("codex", "claude-trivial-ok"),
+}
+SAFE_DEFAULTS = {
+    "backend": "codex",
+    "stop": "worktree",
+    "cadence": "confirm",
+    "dispatch-mode": "implement",
+    "gate": "baseline",
+    "on-red": "stop",
+    "depth": "standard",
+    "fix-lane": "codex",
+}
+
+HELP = """\
+Machine-readable calibration store for the eight loop dials.
+
+Usage:
+  loop-calibration show [--workspace DIR] [--json]
+  loop-calibration set --key K --value V --set-by console|import-confirmed
+      [--provenance TEXT] [--workspace DIR]
+  loop-calibration unset --key K --set-by console|import-confirmed
+      [--workspace DIR]
+
+--workspace DIR   workspace whose store to use (default: $PWD)
+--json            show: print the resolved dials document
+--key K           one of the eight dials
+--value V         a documented option for that dial
+--set-by          console | import-confirmed
+--provenance TEXT optional free text (no tab/newline, max 200 chars)
+
+Store:
+  $HOME/.config/olddonkey-loop/calibration/<workspace-key>.tsv
+  workspace-key = sha256 of the canonical workspace path
+
+File format:
+  #schema=1
+  #workspace=<canonical path>
+  #workspace_key=<sha256 hex>
+  then zero or more TAB-separated rows of exactly six columns:
+    key, value, scope, set_by, set_at, provenance
+
+scope is derived, not chosen:
+  permission  stop (any value other than worktree),
+              cadence=continuous, fix-lane=claude-trivial-ok
+  policy      everything else
+A stored scope that disagrees with that derivation rejects the file.
+
+A permission row may only be written with --set-by console.
+--set-by import-confirmed on a permission key is refused: a permission
+dial can only be granted through the authenticated console. Policy rows
+accept either set_by. Revocation (unset) returns the dial to its safe
+default.
+
+show prints the resolved dials. Default output is a short human table.
+--json prints {schema:1, workspace, workspace_key,
+store:"present"|"absent"|"rejected", reason?, dials:{...}}.
+When the store is absent or rejected, every dial reports its safe
+default with source "default". rejected is data: show exits 0 and
+never applies values from a broken file. A D4a violation on the file
+is a hard refusal (exit 5), not a JSON document.
+
+set validates, then atomically rewrites the whole file with the row
+replaced (creating headers if the file is absent). A rejected existing
+store is refused and left untouched — repair or remove it deliberately.
+
+unset removes the row.
+
+Safe defaults:
+  backend=codex stop=worktree cadence=confirm dispatch-mode=implement
+  gate=baseline on-red=stop depth=standard fix-lane=codex
+
+D4a: 0700 dirs, 0600 file, owner check, O_NOFOLLOW, symlink refusal,
+hard-link refusal (st_nlink==1), atomic replace (temp in the same dir,
+fsync, rename, directory fsync).
+
+Exit codes:
+  0  ok (show: present, absent, or content-rejected)
+  2  usage (including a permission grant with --set-by import-confirmed)
+  5  D4a
+  6  store rejected / operational (set/unset against a rejected store;
+     HOME unreadable)
+"""
+
+
+class CalibrationError(Exception):
+    def __init__(self, message: str, code: int) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def fail(message: str, code: int) -> None:
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def contains_newline(value: object) -> bool:
+    if isinstance(value, str):
+        return "\n" in value or "\r" in value
+    if isinstance(value, dict):
+        return any(contains_newline(item) for item in value.values()) or any(
+            contains_newline(item) for item in value.keys()
+        )
+    if isinstance(value, list):
+        return any(contains_newline(item) for item in value)
+    return False
+
+
+def derived_scope(key: str, value: str) -> str:
+    if key == "stop" and value != "worktree":
+        return "permission"
+    if key == "cadence" and value == "continuous":
+        return "permission"
+    if key == "fix-lane" and value == "claude-trivial-ok":
+        return "permission"
+    return "policy"
+
+
+def is_permission(key: str, value: str) -> bool:
+    return derived_scope(key, value) == "permission"
+
+
+def parse_iso_z(value: str) -> bool:
+    if not ISO_Z_RE.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return True
+
+
+def resolve_workspace(raw: str) -> str:
+    if not raw or contains_newline(raw) or "\t" in raw:
+        fail("workspace path is invalid", EXIT_USAGE)
+    if not os.path.isdir(raw):
+        fail(f"workspace is not a directory: {raw}", EXIT_USAGE)
+    canonical = os.path.realpath(raw)
+    if not os.path.isdir(canonical):
+        fail(f"workspace is not a directory: {raw}", EXIT_USAGE)
+    if contains_newline(canonical) or "\t" in canonical:
+        fail("canonical workspace path contains a forbidden character", EXIT_USAGE)
+    return canonical
+
+
+def workspace_key_for(canonical: str) -> str:
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def home_dir() -> str:
+    home = os.environ.get("HOME")
+    if not home:
+        fail("HOME is not set", EXIT_STORE)
+    home = os.path.abspath(home)
+    if not os.path.isdir(home):
+        fail("HOME is not a readable directory", EXIT_STORE)
+    try:
+        os.listdir(home)
+    except OSError as error:
+        fail(f"HOME is unreadable: {error}", EXIT_STORE)
+    return home
+
+
+def managed_loop_root(home: str) -> str:
+    return os.path.join(home, ".config", "olddonkey-loop")
+
+
+def calibration_dir(home: str) -> str:
+    return os.path.join(managed_loop_root(home), "calibration")
+
+
+def store_path(home: str, key: str) -> str:
+    return os.path.join(calibration_dir(home), f"{key}.tsv")
+
+
+def no_symlink_from(root: str, path: str) -> None:
+    root = os.path.abspath(root)
+    path = os.path.abspath(path)
+    if path != root and not path.startswith(root + os.sep):
+        raise CalibrationError(f"path escapes managed root: {path}", EXIT_D4A)
+    current = root
+    try:
+        info = os.lstat(current)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode):
+        raise CalibrationError(f"managed path contains a symlink: {current}", EXIT_D4A)
+    rest = path[len(root) :].lstrip(os.sep)
+    for part in [piece for piece in rest.split(os.sep) if piece]:
+        current = os.path.join(current, part)
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(info.st_mode):
+            raise CalibrationError(f"managed path contains a symlink: {current}", EXIT_D4A)
+
+
+def validate_directory(path: str, mode: int = 0o700) -> None:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError as error:
+        raise CalibrationError(f"directory is missing: {path}", EXIT_D4A) from error
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise CalibrationError(f"not a real directory: {path}", EXIT_D4A)
+    if info.st_uid != OWNER:
+        raise CalibrationError(f"directory is foreign-owned: {path}", EXIT_D4A)
+    if stat.S_IMODE(info.st_mode) != mode:
+        raise CalibrationError(f"directory mode must be {mode:04o}: {path}", EXIT_D4A)
+
+
+def ensure_directory(path: str) -> None:
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    validate_directory(path)
+
+
+def validate_regular(path: str, *, allow_missing: bool = False) -> os.stat_result | None:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        raise CalibrationError(f"file is missing: {path}", EXIT_D4A) from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise CalibrationError(f"not a regular file: {path}", EXIT_D4A)
+    if info.st_uid != OWNER:
+        raise CalibrationError(f"file is foreign-owned: {path}", EXIT_D4A)
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        raise CalibrationError(f"file mode must be 0600: {path}", EXIT_D4A)
+    if info.st_nlink != 1:
+        raise CalibrationError(f"file has multiple hard links: {path}", EXIT_D4A)
+    return info
+
+
+def open_nofollow(path: str, flags: int, mode: int = 0o600) -> int:
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        return os.open(path, flags, mode)
+    except OSError as error:
+        raise CalibrationError(f"cannot open {path}: {error}", EXIT_D4A) from error
+
+
+def fsync_dir(path: str) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def atomic_write(path: str, content: str) -> None:
+    directory = os.path.dirname(path)
+    temporary = os.path.join(
+        directory, f".tmp-{os.getpid()}-{secrets.token_hex(4)}"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = open_nofollow(temporary, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        data = content.encode("utf-8")
+        os.write(descriptor, data)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, path)
+        fsync_dir(directory)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    validate_regular(path)
+
+
+def bootstrap_store(home: str, path: str) -> None:
+    config = os.path.join(home, ".config")
+    loop_root = managed_loop_root(home)
+    cal_dir = calibration_dir(home)
+    try:
+        os.mkdir(config, 0o700)
+    except FileExistsError:
+        pass
+    if not os.path.isdir(config):
+        raise CalibrationError(f"not a directory: {config}", EXIT_D4A)
+    ensure_directory(loop_root)
+    ensure_directory(cal_dir)
+    no_symlink_from(loop_root, path)
+
+
+def read_file_bytes(path: str) -> bytes:
+    validate_regular(path)
+    descriptor = open_nofollow(path, os.O_RDONLY)
+    try:
+        chunks: list[bytes] = []
+        while True:
+            piece = os.read(descriptor, 1024 * 1024)
+            if not piece:
+                break
+            chunks.append(piece)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def validate_field(name: str, value: str) -> str | None:
+    if "\t" in value:
+        return f"tab in {name}"
+    if contains_newline(value):
+        return f"newline in {name}"
+    return None
+
+
+def parse_store_text(
+    text: str, canonical: str, key: str
+) -> tuple[dict[str, dict], str | None]:
+    if "\r" in text:
+        return {}, "carriage return in store"
+    raw_lines = text.split("\n")
+    if raw_lines and raw_lines[-1] == "":
+        raw_lines = raw_lines[:-1]
+    if len(raw_lines) < 3:
+        return {}, "missing header lines"
+    if raw_lines[0] != "#schema=1":
+        return {}, "bad schema header"
+    if not raw_lines[1].startswith("#workspace="):
+        return {}, "missing workspace header"
+    header_workspace = raw_lines[1][len("#workspace=") :]
+    if header_workspace != canonical:
+        return {}, "workspace header does not match"
+    if not raw_lines[2].startswith("#workspace_key="):
+        return {}, "missing workspace_key header"
+    header_key = raw_lines[2][len("#workspace_key=") :]
+    if header_key != key:
+        return {}, "workspace_key header does not match"
+    rows: dict[str, dict] = {}
+    for line in raw_lines[3:]:
+        if line == "":
+            return {}, "blank row"
+        if "\t" not in line and line.startswith("#"):
+            return {}, "unexpected header line"
+        parts = line.split("\t")
+        if len(parts) != 6:
+            if len(parts) > 6:
+                return {}, "tab in value"
+            return {}, "wrong column count"
+        row_key, value, scope, set_by, set_at, provenance = parts
+        for name, field in (
+            ("key", row_key),
+            ("value", value),
+            ("scope", scope),
+            ("set_by", set_by),
+            ("set_at", set_at),
+            ("provenance", provenance),
+        ):
+            reason = validate_field(name, field)
+            if reason:
+                return {}, reason
+        if row_key not in DIAL_VALUES:
+            return {}, "unknown key"
+        if row_key in rows:
+            return {}, "duplicate key"
+        if value not in DIAL_VALUES[row_key]:
+            return {}, "unknown value"
+        if scope not in {"permission", "policy"}:
+            return {}, "unknown scope"
+        if set_by not in SET_BY_VALUES:
+            return {}, "unknown set_by"
+        if not parse_iso_z(set_at):
+            return {}, "invalid set_at"
+        if len(provenance) > PROVENANCE_MAX:
+            return {}, "provenance too long"
+        expected_scope = derived_scope(row_key, value)
+        if scope != expected_scope:
+            return {}, "scope/key mismatch"
+        rows[row_key] = {
+            "key": row_key,
+            "value": value,
+            "scope": scope,
+            "set_by": set_by,
+            "set_at": set_at,
+            "provenance": provenance,
+        }
+    return rows, None
+
+
+def load_existing_store(
+    path: str, canonical: str, key: str, home: str
+) -> tuple[str, str | None, dict[str, dict]]:
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return "absent", None, {}
+    loop_root = managed_loop_root(home)
+    cal_dir = calibration_dir(home)
+    no_symlink_from(loop_root, path)
+    validate_directory(loop_root)
+    validate_directory(cal_dir)
+    validate_regular(path)
+    try:
+        data = read_file_bytes(path)
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return "rejected", "store is not valid UTF-8", {}
+    except CalibrationError:
+        raise
+    rows, reason = parse_store_text(text, canonical, key)
+    if reason:
+        return "rejected", reason, {}
+    return "present", None, rows
+
+
+def default_dial(key: str) -> dict:
+    value = SAFE_DEFAULTS[key]
+    return {
+        "value": value,
+        "scope": derived_scope(key, value),
+        "set_by": "",
+        "set_at": "",
+        "provenance": "",
+        "source": "default",
+    }
+
+
+def build_document(
+    canonical: str,
+    key: str,
+    status: str,
+    reason: str | None,
+    rows: dict[str, dict],
+) -> dict:
+    dials: dict[str, dict] = {}
+    use_store = status == "present"
+    for name in DIAL_ORDER:
+        if use_store and name in rows:
+            row = rows[name]
+            dials[name] = {
+                "value": row["value"],
+                "scope": row["scope"],
+                "set_by": row["set_by"],
+                "set_at": row["set_at"],
+                "provenance": row["provenance"],
+                "source": "store",
+            }
+        else:
+            dials[name] = default_dial(name)
+    document: dict = {
+        "schema": 1,
+        "workspace": canonical,
+        "workspace_key": key,
+        "store": status,
+        "dials": dials,
+    }
+    if status == "rejected" and reason:
+        document["reason"] = reason
+    return document
+
+
+def format_table(document: dict) -> str:
+    lines = [f"store\t{document['store']}"]
+    if document.get("reason"):
+        lines[0] += f"\t{document['reason']}"
+    lines.append("key\tvalue\tscope\tsource\tset_by\tset_at\tprovenance")
+    for name in DIAL_ORDER:
+        row = document["dials"][name]
+        lines.append(
+            "\t".join(
+                [
+                    name,
+                    str(row["value"]),
+                    str(row["scope"]),
+                    str(row["source"]),
+                    str(row["set_by"]),
+                    str(row["set_at"]),
+                    str(row["provenance"]),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def render_store(canonical: str, key: str, rows: dict[str, dict]) -> str:
+    lines = [
+        "#schema=1",
+        f"#workspace={canonical}",
+        f"#workspace_key={key}",
+    ]
+    for name in DIAL_ORDER:
+        if name not in rows:
+            continue
+        row = rows[name]
+        lines.append(
+            "\t".join(
+                [
+                    name,
+                    row["value"],
+                    row["scope"],
+                    row["set_by"],
+                    row["set_at"],
+                    row["provenance"],
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def validate_key(key: str) -> None:
+    if key not in DIAL_VALUES:
+        fail(f"unknown key: {key}", EXIT_USAGE)
+
+
+def validate_value(key: str, value: str) -> None:
+    if value not in DIAL_VALUES[key]:
+        fail(f"unknown value for {key}: {value}", EXIT_USAGE)
+
+
+def validate_set_by(set_by: str) -> None:
+    if set_by not in SET_BY_VALUES:
+        fail(f"unknown set_by: {set_by}", EXIT_USAGE)
+
+
+def validate_provenance(provenance: str) -> None:
+    if "\t" in provenance:
+        fail("provenance must not contain a tab", EXIT_USAGE)
+    if contains_newline(provenance):
+        fail("provenance must not contain a newline", EXIT_USAGE)
+    if len(provenance) > PROVENANCE_MAX:
+        fail("provenance must be at most 200 characters", EXIT_USAGE)
+
+
+def refuse_permission_import(key: str, value: str, set_by: str) -> None:
+    if set_by != "console" and is_permission(key, value):
+        fail(PERMISSION_GRANT_MSG, EXIT_USAGE)
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    canonical = resolve_workspace(args.workspace)
+    home = home_dir()
+    key = workspace_key_for(canonical)
+    path = store_path(home, key)
+    try:
+        status, reason, rows = load_existing_store(path, canonical, key, home)
+    except CalibrationError as error:
+        fail(str(error), error.code)
+    document = build_document(canonical, key, status, reason, rows)
+    if args.json:
+        sys.stdout.write(
+            json.dumps(document, ensure_ascii=True, separators=(",", ":")) + "\n"
+        )
+    else:
+        sys.stdout.write(format_table(document))
+    return EXIT_OK
+
+
+def cmd_set(args: argparse.Namespace) -> int:
+    validate_key(args.key)
+    validate_value(args.key, args.value)
+    validate_set_by(args.set_by)
+    provenance = args.provenance if args.provenance is not None else ""
+    validate_provenance(provenance)
+    refuse_permission_import(args.key, args.value, args.set_by)
+    canonical = resolve_workspace(args.workspace)
+    home = home_dir()
+    key = workspace_key_for(canonical)
+    path = store_path(home, key)
+    try:
+        status, reason, rows = load_existing_store(path, canonical, key, home)
+    except CalibrationError as error:
+        fail(str(error), error.code)
+    if status == "rejected":
+        fail(
+            f"store rejected ({reason}); repair or remove the store file",
+            EXIT_STORE,
+        )
+    rows = dict(rows)
+    rows[args.key] = {
+        "key": args.key,
+        "value": args.value,
+        "scope": derived_scope(args.key, args.value),
+        "set_by": args.set_by,
+        "set_at": utc_iso(),
+        "provenance": provenance,
+    }
+    try:
+        bootstrap_store(home, path)
+        atomic_write(path, render_store(canonical, key, rows))
+    except CalibrationError as error:
+        fail(str(error), error.code)
+    return EXIT_OK
+
+
+def cmd_unset(args: argparse.Namespace) -> int:
+    validate_key(args.key)
+    validate_set_by(args.set_by)
+    canonical = resolve_workspace(args.workspace)
+    home = home_dir()
+    key = workspace_key_for(canonical)
+    path = store_path(home, key)
+    try:
+        status, reason, rows = load_existing_store(path, canonical, key, home)
+    except CalibrationError as error:
+        fail(str(error), error.code)
+    if status == "rejected":
+        fail(
+            f"store rejected ({reason}); repair or remove the store file",
+            EXIT_STORE,
+        )
+    if status == "absent" or args.key not in rows:
+        return EXIT_OK
+    rows = dict(rows)
+    del rows[args.key]
+    try:
+        bootstrap_store(home, path)
+        atomic_write(path, render_store(canonical, key, rows))
+    except CalibrationError as error:
+        fail(str(error), error.code)
+    return EXIT_OK
+
+
+def default_workspace() -> str:
+    return os.environ.get("PWD") or os.getcwd()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="loop-calibration",
+        add_help=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=HELP,
+    )
+    parser.add_argument("-h", "--help", action="store_true")
+    sub = parser.add_subparsers(dest="command")
+
+    show = sub.add_parser("show", add_help=True, help="print the resolved dials")
+    show.add_argument("--workspace", default=None)
+    show.add_argument("--json", action="store_true")
+    show.set_defaults(func=cmd_show)
+
+    set_cmd = sub.add_parser("set", add_help=True, help="write one dial row")
+    set_cmd.add_argument("--workspace", default=None)
+    set_cmd.add_argument("--key", required=True)
+    set_cmd.add_argument("--value", required=True)
+    set_cmd.add_argument("--set-by", required=True, dest="set_by")
+    set_cmd.add_argument("--provenance", default=None)
+    set_cmd.set_defaults(func=cmd_set)
+
+    unset = sub.add_parser("unset", add_help=True, help="remove one dial row")
+    unset.add_argument("--workspace", default=None)
+    unset.add_argument("--key", required=True)
+    unset.add_argument("--set-by", required=True, dest="set_by")
+    unset.set_defaults(func=cmd_unset)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    if argv and argv[0] in {"-h", "--help"}:
+        sys.stdout.write(HELP)
+        return EXIT_OK
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as error:
+        return int(error.code) if isinstance(error.code, int) else EXIT_USAGE
+    if args.help or not args.command:
+        if args.help:
+            sys.stdout.write(HELP)
+            return EXIT_OK
+        sys.stderr.write(HELP)
+        return EXIT_USAGE
+    if getattr(args, "workspace", None) is None:
+        args.workspace = default_workspace()
+    try:
+        return int(args.func(args))
+    except CalibrationError as error:
+        fail(str(error), error.code)
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
+PY

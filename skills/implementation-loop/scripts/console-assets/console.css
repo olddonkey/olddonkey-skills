@@ -163,3 +163,71 @@ button.pick.is-selected {
 a {
   color: var(--path);
 }
+
+.dials-notice {
+  margin: 0 0 0.85rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  color: var(--fg);
+}
+
+.dials-notice.is-rejected {
+  background: var(--other-bg);
+  border-color: var(--other-fg);
+  color: var(--other-fg);
+  font-weight: 600;
+}
+
+.dials-notice.is-absent {
+  background: var(--bg);
+}
+
+.dials-section-note {
+  margin: 0 0 0.5rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.dials-permission {
+  margin: 0 0 1rem;
+  padding: 0.75rem 0.85rem;
+  border: 2px solid var(--other-fg);
+  background: var(--other-bg);
+}
+
+.dials-policy {
+  margin: 0 0 0.75rem;
+}
+
+.dial {
+  margin: 0 0 0.85rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.dial-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.35rem;
+}
+
+.dial-controls select,
+.dial-controls button {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  padding: 0.2rem 0.55rem;
+}
+
+.dial-controls button:disabled,
+.dial-controls select:disabled {
+  opacity: 0.5;
+}
+
+.dials-error {
+  min-height: 1.2em;
+  margin: 0.5rem 0 0;
+  color: var(--other-fg);
+}

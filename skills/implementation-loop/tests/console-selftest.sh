@@ -113,14 +113,30 @@ print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode("utf-8")).hexdigest())
 PY
 }
 
-tree_manifest() { # $1=root $2=output-file [$3=skip-rel]
-  python3 - "$1" "$2" "${3:-}" <<'PY'
+tree_manifest() { # $1=root $2=output-file [skip-rel...]
+  python3 - "$@" <<'PY'
 import hashlib, os, sys
-root, dest, skip = sys.argv[1], sys.argv[2], sys.argv[3]
+root, dest = sys.argv[1], sys.argv[2]
+skips = [item for item in sys.argv[3:] if item]
+
+def skipped_dir(rel):
+    for skip in skips:
+        if rel == skip or rel.startswith(skip + os.sep):
+            return True
+    return False
+
+def skipped_file(rel_file):
+    for skip in skips:
+        if rel_file == skip or rel_file.startswith(skip + os.sep):
+            return True
+    return False
+
 rows = []
 for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
     rel = os.path.relpath(dirpath, root)
-    if skip and (rel == skip or rel.startswith(skip + os.sep)):
+    if rel == ".":
+        rel = ""
+    if skipped_dir(rel):
         dirnames[:] = []
         continue
     dirnames.sort()
@@ -128,6 +144,8 @@ for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
     for name in filenames:
         path = os.path.join(dirpath, name)
         rel_file = os.path.relpath(path, root)
+        if skipped_file(rel_file):
+            continue
         digest = hashlib.sha256()
         if os.path.islink(path):
             digest.update(b"link:")
@@ -144,7 +162,13 @@ PY
 }
 
 home_manifest() { # $1=output-file
-  tree_manifest "$HOME" "$1" "$(printf '%s' ".config/olddonkey-loop/console")"
+  if [[ -n "${CAL_REL:-}" ]]; then
+    tree_manifest "$HOME" "$1" \
+      ".config/olddonkey-loop/console" \
+      "$CAL_REL"
+  else
+    tree_manifest "$HOME" "$1" ".config/olddonkey-loop/console"
+  fi
 }
 
 workspace_manifest() { # $1=workspace $2=output-file
@@ -216,6 +240,8 @@ forbidden = (
     "createContextualFragment",
     "new Function",
     "setTimeout",
+    "document.writeln",
+    "javascript:",
 )
 missing = [name for name in forbidden if name in js]
 if missing:
@@ -258,6 +284,8 @@ if js.count("X-Console-CSRF") < 1:
     raise SystemExit("missing X-Console-CSRF")
 if "apiHeaders" not in js:
     raise SystemExit("missing apiHeaders helper")
+if "/api/dials" not in js or "/api/dials/reset" not in js:
+    raise SystemExit("missing dials API surface")
 if not re.search(r"txt\(\s*link\s*,\s*href\s*\)", js):
     raise SystemExit("link text is not the parsed href")
 PY
@@ -297,6 +325,8 @@ run_cmd start-disp "$JOURNAL" append --workspace "$WS" --event dispatch.start \
 expect_status 0 "fixture: open codex dispatch"
 
 KEY="$(workspace_key "$WS")"
+CAL_REL=".config/olddonkey-loop/calibration/${KEY}.tsv"
+CAL_FILE="$HOME/$CAL_REL"
 CODEX_DIR="$HOME/.config/olddonkey-loop/codex/$KEY/$DISPATCH_ID"
 mkdir -p "$CODEX_DIR"
 python3 - "$CODEX_DIR/transcript.log" "$HOSTILE" <<'PY'
@@ -399,9 +429,11 @@ if [[ -n "$PORT" && -n "$TOKEN" ]]; then
   HTTP_TAP="$TMP_ROOT/http.tap"
   if python3 - "$PORT" "$TOKEN" "$RUN_ID" "$DISPATCH_ID" "$HOSTILE" "$WS_REAL" \
     "$HOSTILE_ID" "$UNKNOWN_ID" "$HL_ID" "$SL_ID" "$GROK_ID" "$TRANSCRIPT_REAL" \
+    "$CAL_FILE" \
     >"$HTTP_TAP" 2>"$TMP_ROOT/http.err" <<'PY'
 import http.client
 import json
+import os
 import sys
 from urllib.parse import quote
 
@@ -417,6 +449,7 @@ hardlink_id = sys.argv[9]
 symlink_id = sys.argv[10]
 grok_id = sys.argv[11]
 transcript_real = sys.argv[12]
+cal_path = sys.argv[13]
 host_ok = "127.0.0.1:%d" % port
 origin_ok = "http://127.0.0.1:%d" % port
 csp = (
@@ -934,6 +967,243 @@ def no_cors_anywhere():
                 raise RuntimeError("CORS on %s %s" % (method, path))
 
 
+def store_bytes():
+    if not os.path.lexists(cal_path):
+        return b""
+    with open(cal_path, "rb") as handle:
+        return handle.read()
+
+
+def write_rejected_store():
+    directory = os.path.dirname(cal_path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    os.chmod(directory, 0o700)
+    content = (
+        b"#schema=0\n"
+        b"#workspace=rejected-fixture\n"
+        b"#workspace_key=not-the-real-key\n"
+        b"stop\tmerge\tpermission\tconsole\t2026-08-18T00:00:00Z\tx\n"
+    )
+    fd = os.open(cal_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, content)
+    finally:
+        os.close(fd)
+    return content
+
+
+def dials_unauth():
+    status, raw, headers = capture("GET", "/api/dials", headers={"Host": host_ok})
+    if status != 401:
+        raise RuntimeError("unauth dials status %s" % status)
+    no_csrf(raw, "unauth dials")
+    require_security(headers, "unauth dials")
+
+
+def dials_missing_csrf():
+    if not cookie:
+        raise RuntimeError("no session cookie")
+    status, raw, headers = capture(
+        "GET", "/api/dials", headers=auth_headers(with_csrf=False)
+    )
+    if status != 403:
+        raise RuntimeError("dials without csrf status %s" % status)
+    require_security(headers, "dials missing csrf")
+
+
+def dials_wrong_csrf():
+    if not cookie:
+        raise RuntimeError("no session cookie")
+    status, raw, headers = capture(
+        "GET",
+        "/api/dials",
+        headers=auth_headers(csrf_value="wrong-csrf-token-value-xxx"),
+    )
+    if status != 403:
+        raise RuntimeError("dials wrong csrf status %s" % status)
+    require_security(headers, "dials wrong csrf")
+
+
+def dials_ok():
+    if not cookie or not csrf:
+        raise RuntimeError("no session")
+    status, raw, headers = capture("GET", "/api/dials", headers=auth_headers())
+    if status != 200:
+        raise RuntimeError("dials status %s body %r" % (status, raw))
+    require_security(headers, "dials ok")
+    payload = json.loads(raw.decode("utf-8"))
+    if payload.get("schema") != 1:
+        raise RuntimeError("dials schema %r" % payload.get("schema"))
+    if payload.get("store") != "absent":
+        raise RuntimeError("dials store %r" % payload.get("store"))
+    if payload.get("workspace") != workspace:
+        raise RuntimeError("dials workspace %r" % payload.get("workspace"))
+    dials = payload.get("dials") or {}
+    if dials.get("backend", {}).get("value") != "codex":
+        raise RuntimeError("default backend %r" % dials.get("backend"))
+    if dials.get("backend", {}).get("source") != "default":
+        raise RuntimeError("default source %r" % dials.get("backend"))
+
+
+def dials_post_unauth():
+    status, raw, headers = capture(
+        "POST",
+        "/api/dials",
+        body=json.dumps({"key": "backend", "value": "grok"}),
+        headers={
+            "Host": host_ok,
+            "Origin": origin_ok,
+            "Content-Type": "application/json",
+        },
+    )
+    if status != 401:
+        raise RuntimeError("unauth post dials status %s" % status)
+    no_csrf(raw, "unauth post dials")
+    require_security(headers, "unauth post dials")
+
+
+def dials_post_missing_csrf():
+    if not cookie:
+        raise RuntimeError("no session cookie")
+    status, raw, headers = capture(
+        "POST",
+        "/api/dials",
+        body=json.dumps({"key": "backend", "value": "grok"}),
+        headers=auth_headers(
+            extra={"Origin": origin_ok, "Content-Type": "application/json"},
+            with_csrf=False,
+        ),
+    )
+    if status != 403:
+        raise RuntimeError("post dials without csrf status %s" % status)
+    require_security(headers, "post dials missing csrf")
+
+
+def dials_post_foreign_origin():
+    if not cookie or not csrf:
+        raise RuntimeError("no session")
+    status, raw, headers = capture(
+        "POST",
+        "/api/dials",
+        body=json.dumps({"key": "backend", "value": "grok"}),
+        headers=auth_headers(
+            extra={
+                "Origin": "http://127.0.0.1:%d" % (port + 1),
+                "Content-Type": "application/json",
+            }
+        ),
+    )
+    if status != 403:
+        raise RuntimeError("post dials foreign origin status %s" % status)
+    require_security(headers, "post dials foreign origin")
+
+
+def dials_post_ok():
+    if not cookie or not csrf:
+        raise RuntimeError("no session")
+    status, raw, headers = capture(
+        "POST",
+        "/api/dials",
+        body=json.dumps(
+            {"key": "backend", "value": "grok", "provenance": "console-selftest"}
+        ),
+        headers=auth_headers(
+            extra={"Origin": origin_ok, "Content-Type": "application/json"}
+        ),
+    )
+    if status != 200:
+        raise RuntimeError("post dials status %s body %r" % (status, raw))
+    require_security(headers, "post dials ok")
+    payload = json.loads(raw.decode("utf-8"))
+    row = (payload.get("dials") or {}).get("backend") or {}
+    if row.get("value") != "grok" or row.get("source") != "store":
+        raise RuntimeError("post dials body %r" % row)
+    if not os.path.isfile(cal_path):
+        raise RuntimeError("calibration file was not written")
+    text = open(cal_path, encoding="utf-8").read()
+    if "backend\tgrok\tpolicy\tconsole\t" not in text:
+        raise RuntimeError("store file missing console-written backend row: %r" % text)
+    if "\timport-confirmed\t" in text:
+        raise RuntimeError("store file has import-confirmed: %r" % text)
+
+
+def dials_post_invalid():
+    if not cookie or not csrf:
+        raise RuntimeError("no session")
+    before = store_bytes()
+    status, raw, headers = capture(
+        "POST",
+        "/api/dials",
+        body=json.dumps({"key": "backend", "value": "nope"}),
+        headers=auth_headers(
+            extra={"Origin": origin_ok, "Content-Type": "application/json"}
+        ),
+    )
+    if status != 400:
+        raise RuntimeError("invalid post dials status %s body %r" % (status, raw))
+    require_security(headers, "invalid post dials")
+    if store_bytes() != before:
+        raise RuntimeError("invalid post mutated the store")
+
+
+def dials_reset():
+    if not cookie or not csrf:
+        raise RuntimeError("no session")
+    status, raw, headers = capture(
+        "POST",
+        "/api/dials/reset",
+        body=json.dumps({"key": "backend"}),
+        headers=auth_headers(
+            extra={"Origin": origin_ok, "Content-Type": "application/json"}
+        ),
+    )
+    if status != 200:
+        raise RuntimeError("reset dials status %s body %r" % (status, raw))
+    require_security(headers, "reset dials")
+    payload = json.loads(raw.decode("utf-8"))
+    row = (payload.get("dials") or {}).get("backend") or {}
+    if row.get("value") != "codex" or row.get("source") != "default":
+        raise RuntimeError("reset body %r" % row)
+    text = open(cal_path, encoding="utf-8").read()
+    if "backend\t" in text:
+        raise RuntimeError("backend row still in file: %r" % text)
+
+
+def dials_rejected():
+    if not cookie or not csrf:
+        raise RuntimeError("no session")
+    rejected = write_rejected_store()
+    status, raw, headers = capture("GET", "/api/dials", headers=auth_headers())
+    if status != 200:
+        raise RuntimeError("rejected get status %s body %r" % (status, raw))
+    require_security(headers, "rejected get")
+    payload = json.loads(raw.decode("utf-8"))
+    if payload.get("store") != "rejected":
+        raise RuntimeError("rejected store %r" % payload.get("store"))
+    if not payload.get("reason"):
+        raise RuntimeError("rejected reason missing")
+    before = store_bytes()
+    if before != rejected:
+        raise RuntimeError("rejected fixture was rewritten on GET")
+    status, raw, headers = capture(
+        "POST",
+        "/api/dials",
+        body=json.dumps({"key": "gate", "value": "strict"}),
+        headers=auth_headers(
+            extra={"Origin": origin_ok, "Content-Type": "application/json"}
+        ),
+    )
+    if status != 409:
+        raise RuntimeError("rejected post status %s body %r" % (status, raw))
+    require_security(headers, "rejected post")
+    if store_bytes() != before:
+        raise RuntimeError("rejected post mutated the store")
+    err = json.loads(raw.decode("utf-8")).get("error") or ""
+    if "repair or remove" not in err:
+        raise RuntimeError("409 message %r" % err)
+
+
 check("inert shell: GET / has no CSRF or run data and exact security headers", inert_root)
 check("headers: GET /console.js carries the same security headers", asset_headers)
 check("headers: GET /console.css is served", css_ok)
@@ -963,6 +1233,17 @@ check("transcript: hard-linked transcript.log is 404", transcript_hardlink)
 check("transcript: symlinked transcript.log leaf is 404", transcript_symlink_leaf)
 check("routes: unknown paths return the exact expected status", routes)
 check("cors: no Access-Control-Allow-* header on captured responses", no_cors_anywhere)
+check("dials: GET /api/dials without session is 401", dials_unauth)
+check("dials: GET /api/dials without CSRF is 403", dials_missing_csrf)
+check("dials: GET /api/dials with wrong CSRF is 403", dials_wrong_csrf)
+check("dials: GET /api/dials with session+CSRF is 200", dials_ok)
+check("dials: POST /api/dials unauthenticated is 401", dials_post_unauth)
+check("dials: POST /api/dials without CSRF is 403", dials_post_missing_csrf)
+check("dials: POST /api/dials with foreign Origin is 403", dials_post_foreign_origin)
+check("dials: POST /api/dials writes set_by=console on disk", dials_post_ok)
+check("dials: POST /api/dials invalid key/value is 400 and unchanged", dials_post_invalid)
+check("dials: POST /api/dials/reset removes the row", dials_reset)
+check("dials: rejected store GET is rejected; POST is 409 and unchanged", dials_rejected)
 PY
   then
     :
@@ -1024,6 +1305,38 @@ else
   diff -u "$TMP_ROOT/home-before.txt" "$TMP_ROOT/home-after.txt" >"$CASE_STDOUT" || true
   fail "readonly: HOME hash excluding console/ is unchanged"
   CASE_STDOUT=""
+fi
+
+if [[ -f "$CAL_FILE" ]]; then
+  if python3 - "$CAL_FILE" <<'PY'
+import os, stat, sys
+path = sys.argv[1]
+info = os.lstat(path)
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+    raise SystemExit("not a regular file")
+if stat.S_IMODE(info.st_mode) != 0o600:
+    raise SystemExit("mode %04o" % stat.S_IMODE(info.st_mode))
+text = open(path, encoding="utf-8").read()
+if not text.startswith("#schema=0\n"):
+    raise SystemExit("expected rejected fixture, got %r" % text[:80])
+if "stop\tmerge\t" not in text:
+    raise SystemExit("rejected fixture lost the planted row")
+PY
+  then
+    pass "readonly: only the calibration file changed, and it is the rejected fixture"
+  else
+    fail "readonly: only the calibration file changed, and it is the rejected fixture"
+  fi
+  cal_dir="$(dirname "$CAL_FILE")"
+  extras="$(find "$cal_dir" -mindepth 1 ! -name "$(basename "$CAL_FILE")" | wc -l | tr -d ' ')"
+  if [[ "$extras" == "0" ]]; then
+    pass "readonly: calibration dir contains only the helper store file"
+  else
+    fail "readonly: calibration dir contains only the helper store file"
+  fi
+else
+  fail "readonly: only the calibration file changed, and it is the rejected fixture"
+  fail "readonly: calibration dir contains only the helper store file"
 fi
 
 WS_HASH_AFTER="$(workspace_manifest "$WS" "$TMP_ROOT/ws-after.txt")"
