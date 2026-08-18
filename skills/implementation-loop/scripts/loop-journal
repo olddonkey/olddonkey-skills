@@ -1,0 +1,1301 @@
+#!/usr/bin/env bash
+# Durable loop-level journal: locked append, context mutations, rebuild, gc.
+#
+# Usage:
+#   loop-journal append --workspace DIR --event TYPE [--field k=v]... [--json OBJ]
+#   loop-journal rebuild [--workspace DIR]
+#   loop-journal gc [--workspace DIR]
+#   loop-journal begin-run [--workspace DIR] [--plan TEXT]
+#   loop-journal end-run --status STATUS [--workspace DIR]
+#   loop-journal recover [--acknowledge ID]... [--workspace DIR]
+#
+# Store: $HOME/.config/olddonkey-loop/journal/<sha256(canonical workspace)>/
+# JSONL segments are authoritative; runs.tsv is a rebuildable cache.
+#
+# Test-only overrides (not for production):
+#   LOOP_JOURNAL_GC_CAP_BYTES     default 52428800 (50 MB)
+#   LOOP_JOURNAL_LOCK_TIMEOUT_SEC default 5
+
+set -euo pipefail
+umask 077
+exec python3 - "$@" <<'PY'
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import secrets
+import stat
+import sys
+import time
+from datetime import datetime, timezone
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_LOCK_BUSY = 3
+EXIT_MID_CORRUPT = 4
+EXIT_D4A = 5
+EXIT_STORE = 6
+EXIT_RECOVER = 7
+EXIT_ACTIVE_RUN = 8
+
+OWNER = os.getuid()
+RUN_ID_RE = __import__("re").compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$")
+D2A_SENTENCE = (
+    "Supplying --acknowledge <dispatch-id> asserts that the dispatch and its "
+    "descendants have terminated or otherwise cannot produce further side effects. "
+    "Mere notice that the event is missing is insufficient and must not retire the run."
+)
+
+ENVELOPE_KEYS = frozenset({"schema", "seq", "ts", "event", "run", "attribution_failure"})
+EVENT_SPECS = {
+    "run.begin": {
+        "required": {"workspace": str, "workspace_key": str, "generation": int},
+        "optional": {"plan": str},
+    },
+    "run.end": {
+        "required": {"status": ("completed", "abandoned", "failed")},
+        "optional": {},
+    },
+    "unit.begin": {"required": {"unit": str}, "optional": {}},
+    "unit.end": {
+        "required": {"unit": str, "status": ("done", "parked")},
+        "optional": {},
+    },
+    "round.begin": {"required": {"unit": str, "round": int}, "optional": {}},
+    "checkpoint": {"required": {}, "optional": {"note": str}},
+    "review.recorded": {
+        "required": {
+            "unit": str,
+            "round": int,
+            "verdict": ("pass", "iterate"),
+        },
+        "optional": {"findings": str},
+    },
+    "publish.recorded": {
+        "required": {"unit": str},
+        "optional": {"branch": str, "pr": str, "sha": str, "note": str},
+    },
+    "dispatch.start": {
+        "required": {
+            "dispatch_id": str,
+            "backend": ("codex", "grok", "cursor"),
+            "mode": ("implement", "read-only"),
+        },
+        "optional": {},
+    },
+    "dispatch.end": {
+        "required": {"dispatch_id": str, "exit": int},
+        "optional": {"session": str},
+    },
+    "dispatch.abandoned": {
+        "required": {"dispatch_id": str, "attested_by": ("user",)},
+        "optional": {},
+    },
+    "gate.result": {
+        "required": {
+            "policy": ("strict", "baseline", "passthrough"),
+            "purpose": (
+                "unit-final",
+                "baseline-generation",
+                "focused",
+                "unspecified",
+            ),
+            "binding": ("clean", "dirty", "changed", "unavailable"),
+        },
+        "optional": {
+            "totals": object,
+            "pre_head": str,
+            "pre_tree": str,
+            "post_head": str,
+            "post_tree": str,
+            "reason": str,
+        },
+    },
+    "journal.repaired": {"required": {"truncated_bytes": int}, "optional": {}},
+}
+INT_FIELDS = frozenset(
+    {"generation", "round", "exit", "truncated_bytes", "seq"}
+)
+
+
+class JournalError(Exception):
+    def __init__(self, message: str, code: int) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def fail(message: str, code: int) -> None:
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def utc_basic() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def gc_cap_bytes() -> int:
+    raw = os.environ.get("LOOP_JOURNAL_GC_CAP_BYTES", "52428800")
+    try:
+        value = int(raw)
+    except ValueError:
+        fail("LOOP_JOURNAL_GC_CAP_BYTES must be an integer", EXIT_USAGE)
+    if value < 1:
+        fail("LOOP_JOURNAL_GC_CAP_BYTES must be >= 1", EXIT_USAGE)
+    return value
+
+
+def lock_timeout_sec() -> float:
+    raw = os.environ.get("LOOP_JOURNAL_LOCK_TIMEOUT_SEC", "5")
+    try:
+        value = float(raw)
+    except ValueError:
+        fail("LOOP_JOURNAL_LOCK_TIMEOUT_SEC must be a number", EXIT_USAGE)
+    if value < 0:
+        fail("LOOP_JOURNAL_LOCK_TIMEOUT_SEC must be >= 0", EXIT_USAGE)
+    return value
+
+
+def contains_newline(value: object) -> bool:
+    if isinstance(value, str):
+        return "\n" in value or "\r" in value
+    if isinstance(value, dict):
+        return any(contains_newline(item) for item in value.values()) or any(
+            contains_newline(item) for item in value.keys()
+        )
+    if isinstance(value, list):
+        return any(contains_newline(item) for item in value)
+    return False
+
+
+def no_symlink_from(root: str, path: str) -> None:
+    root = os.path.abspath(root)
+    path = os.path.abspath(path)
+    if path != root and not path.startswith(root + os.sep):
+        raise JournalError(f"path escapes managed root: {path}", EXIT_D4A)
+    current = root
+    try:
+        info = os.lstat(current)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode):
+        raise JournalError(f"managed path contains a symlink: {current}", EXIT_D4A)
+    rest = path[len(root) :].lstrip(os.sep)
+    for part in [piece for piece in rest.split(os.sep) if piece]:
+        current = os.path.join(current, part)
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(info.st_mode):
+            raise JournalError(f"managed path contains a symlink: {current}", EXIT_D4A)
+
+
+def validate_directory(path: str, mode: int = 0o700) -> None:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError as error:
+        raise JournalError(f"directory is missing: {path}", EXIT_D4A) from error
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise JournalError(f"not a real directory: {path}", EXIT_D4A)
+    if info.st_uid != OWNER:
+        raise JournalError(f"directory is foreign-owned: {path}", EXIT_D4A)
+    if stat.S_IMODE(info.st_mode) != mode:
+        raise JournalError(f"directory mode must be {mode:04o}: {path}", EXIT_D4A)
+
+
+def ensure_directory(path: str) -> None:
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    validate_directory(path)
+
+
+def validate_regular(path: str, *, allow_missing: bool = False) -> os.stat_result | None:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        raise JournalError(f"file is missing: {path}", EXIT_D4A) from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise JournalError(f"not a regular file: {path}", EXIT_D4A)
+    if info.st_uid != OWNER:
+        raise JournalError(f"file is foreign-owned: {path}", EXIT_D4A)
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        raise JournalError(f"file mode must be 0600: {path}", EXIT_D4A)
+    if info.st_nlink != 1:
+        raise JournalError(f"file has multiple hard links: {path}", EXIT_D4A)
+    return info
+
+
+def open_nofollow(path: str, flags: int, mode: int = 0o600) -> int:
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        return os.open(path, flags, mode)
+    except OSError as error:
+        raise JournalError(f"cannot open {path}: {error}", EXIT_D4A) from error
+
+
+def fsync_dir(path: str) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def atomic_write(path: str, content: str) -> None:
+    directory = os.path.dirname(path)
+    temporary = os.path.join(
+        directory, f".tmp-{os.getpid()}-{secrets.token_hex(4)}"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = open_nofollow(temporary, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        data = content.encode("utf-8")
+        os.write(descriptor, data)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, path)
+        fsync_dir(directory)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    validate_regular(path)
+
+
+def create_regular(path: str, content: bytes = b"") -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = open_nofollow(path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        if content:
+            os.write(descriptor, content)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    validate_regular(path)
+
+
+def resolve_workspace(raw: str) -> str:
+    if not raw or contains_newline(raw):
+        fail("workspace path is invalid", EXIT_USAGE)
+    if not os.path.isdir(raw):
+        fail(f"workspace is not a directory: {raw}", EXIT_USAGE)
+    canonical = os.path.realpath(raw)
+    if not os.path.isdir(canonical):
+        fail(f"workspace is not a directory: {raw}", EXIT_USAGE)
+    if contains_newline(canonical):
+        fail("canonical workspace path contains a newline", EXIT_USAGE)
+    return canonical
+
+
+def workspace_key_for(canonical: str) -> str:
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def home_dir() -> str:
+    home = os.environ.get("HOME")
+    if not home:
+        fail("HOME is not set", EXIT_STORE)
+    return os.path.abspath(home)
+
+
+def managed_loop_root() -> str:
+    return os.path.join(home_dir(), ".config", "olddonkey-loop")
+
+
+def journal_root() -> str:
+    return os.path.join(managed_loop_root(), "journal")
+
+
+def store_paths(canonical: str) -> dict[str, str]:
+    key = workspace_key_for(canonical)
+    root = os.path.join(journal_root(), key)
+    return {
+        "key": key,
+        "root": root,
+        "runs_dir": os.path.join(root, "runs"),
+        "runs_tsv": os.path.join(root, "runs.tsv"),
+        "context": os.path.join(root, "context"),
+        "unattributed": os.path.join(root, "unattributed.jsonl"),
+        "generation": os.path.join(root, "generation"),
+        "lock": os.path.join(root, "meta.lock"),
+    }
+
+
+def bootstrap_store(paths: dict[str, str]) -> None:
+    home = home_dir()
+    config = os.path.join(home, ".config")
+    loop_root = managed_loop_root()
+    journal = journal_root()
+    try:
+        os.mkdir(config, 0o700)
+    except FileExistsError:
+        pass
+    if not os.path.isdir(config):
+        raise JournalError(f"not a directory: {config}", EXIT_D4A)
+    ensure_directory(loop_root)
+    ensure_directory(journal)
+    no_symlink_from(loop_root, paths["root"])
+    ensure_directory(paths["root"])
+    no_symlink_from(paths["root"], paths["runs_dir"])
+    ensure_directory(paths["runs_dir"])
+    if not os.path.lexists(paths["lock"]):
+        create_regular(paths["lock"])
+    else:
+        validate_regular(paths["lock"])
+    if not os.path.lexists(paths["generation"]):
+        atomic_write(paths["generation"], "0\n")
+    else:
+        validate_regular(paths["generation"])
+    if not os.path.lexists(paths["runs_tsv"]):
+        atomic_write(paths["runs_tsv"], "")
+    else:
+        validate_regular(paths["runs_tsv"])
+
+
+def acquire_lock(paths: dict[str, str]) -> int:
+    no_symlink_from(paths["root"], paths["lock"])
+    validate_regular(paths["lock"])
+    descriptor = open_nofollow(paths["lock"], os.O_RDWR)
+    os.set_inheritable(descriptor, False)
+    deadline = time.monotonic() + lock_timeout_sec()
+    delay = 0.01
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return descriptor
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                os.close(descriptor)
+                fail("lock busy", EXIT_LOCK_BUSY)
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 0.1)
+
+
+class Lock:
+    def __init__(self, paths: dict[str, str]) -> None:
+        self.paths = paths
+        self.fd = -1
+
+    def __enter__(self) -> "Lock":
+        self.fd = acquire_lock(self.paths)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self.fd >= 0:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(self.fd)
+            self.fd = -1
+
+
+def segment_path(paths: dict[str, str], run_id: str) -> str:
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise JournalError(f"invalid run id: {run_id}", EXIT_USAGE)
+    return os.path.join(paths["runs_dir"], f"{run_id}.jsonl")
+
+
+def read_file_bytes(path: str) -> bytes:
+    validate_regular(path)
+    descriptor = open_nofollow(path, os.O_RDONLY)
+    try:
+        chunks: list[bytes] = []
+        while True:
+            piece = os.read(descriptor, 1024 * 1024)
+            if not piece:
+                break
+            chunks.append(piece)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def parse_segment(data: bytes) -> tuple[list[dict], int, bool]:
+    if not data:
+        return [], 0, False
+    parts = data.split(b"\n")
+    ended = data.endswith(b"\n")
+    if ended:
+        parts = parts[:-1]
+    events: list[dict] = []
+    for index, line in enumerate(parts):
+        is_last = index == len(parts) - 1
+        try:
+            obj = json.loads(line.decode("utf-8"))
+            if not isinstance(obj, dict):
+                raise ValueError("event is not an object")
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            # Incomplete tail is unterminated. A newline-terminated invalid
+            # line is mid-file corruption: fail closed, do not repair.
+            if is_last and not ended:
+                return events, len(line), False
+            return events, 0, True
+        if not ended and is_last:
+            # Valid JSON missing the JSONL terminator: keep it; no repair.
+            events.append(obj)
+            return events, 0, False
+        events.append(obj)
+    return events, 0, False
+
+
+def inspect_run(paths: dict[str, str], run_id: str) -> dict:
+    path = segment_path(paths, run_id)
+    if not os.path.lexists(path):
+        return {
+            "exists": False,
+            "events": [],
+            "truncated_bytes": 0,
+            "mid_corrupt": False,
+            "terminal": False,
+            "bytes": 0,
+            "generation": None,
+            "status": "missing",
+        }
+    validate_regular(path)
+    info = os.lstat(path)
+    data = read_file_bytes(path)
+    events, truncated, mid = parse_segment(data)
+    terminal = False
+    status = "degraded" if mid else "active"
+    generation = None
+    if not mid:
+        for event in events:
+            if event.get("event") == "run.begin":
+                try:
+                    generation = int(event.get("generation"))
+                except (TypeError, ValueError):
+                    generation = None
+            if event.get("event") == "run.end" and event.get("status") in {
+                "completed",
+                "abandoned",
+                "failed",
+            }:
+                terminal = True
+                status = str(event.get("status"))
+    else:
+        status = "degraded"
+        for event in events:
+            if event.get("event") == "run.begin":
+                try:
+                    generation = int(event.get("generation"))
+                except (TypeError, ValueError):
+                    pass
+    return {
+        "exists": True,
+        "path": path,
+        "events": events,
+        "truncated_bytes": truncated,
+        "mid_corrupt": mid,
+        "terminal": False if mid else terminal,
+        "bytes": info.st_size,
+        "generation": generation,
+        "status": status,
+    }
+
+
+def list_run_ids(paths: dict[str, str]) -> list[str]:
+    validate_directory(paths["runs_dir"])
+    found: list[str] = []
+    for entry in os.scandir(paths["runs_dir"]):
+        no_symlink_from(paths["runs_dir"], entry.path)
+        if entry.name.startswith(".tmp-"):
+            if entry.is_file(follow_symlinks=False):
+                validate_regular(entry.path)
+            continue
+        if entry.is_symlink():
+            raise JournalError(f"symlink in runs directory: {entry.path}", EXIT_D4A)
+        if not entry.name.endswith(".jsonl"):
+            raise JournalError(f"unexpected entry in runs directory: {entry.path}", EXIT_D4A)
+        run_id = entry.name[: -len(".jsonl")]
+        if not RUN_ID_RE.fullmatch(run_id):
+            raise JournalError(f"unexpected run segment name: {entry.path}", EXIT_D4A)
+        validate_regular(entry.path)
+        found.append(run_id)
+    return found
+
+
+def rebuild_runs_tsv(paths: dict[str, str]) -> list[dict]:
+    rows: list[dict] = []
+    for run_id in list_run_ids(paths):
+        info = inspect_run(paths, run_id)
+        generation = info["generation"]
+        if generation is None:
+            generation = 0
+        rows.append(
+            {
+                "generation": int(generation),
+                "run_id": run_id,
+                "status": info["status"],
+                "segment_bytes": int(info["bytes"]),
+            }
+        )
+    rows.sort(key=lambda row: (row["generation"], row["run_id"]))
+    lines = [
+        f"{row['generation']}\t{row['run_id']}\t{row['status']}\t{row['segment_bytes']}"
+        for row in rows
+    ]
+    text = "\n".join(lines)
+    if lines:
+        text += "\n"
+    atomic_write(paths["runs_tsv"], text)
+    return rows
+
+
+def read_generation(paths: dict[str, str]) -> int:
+    validate_regular(paths["generation"])
+    raw = read_file_bytes(paths["generation"]).decode("utf-8")
+    text = raw.strip()
+    try:
+        value = int(text)
+    except ValueError as error:
+        raise JournalError("generation file is corrupt", EXIT_STORE) from error
+    if value < 0:
+        raise JournalError("generation file is corrupt", EXIT_STORE)
+    return value
+
+
+def max_segment_generation(paths: dict[str, str]) -> int:
+    highest = 0
+    for run_id in list_run_ids(paths):
+        info = inspect_run(paths, run_id)
+        if info["generation"] is not None:
+            highest = max(highest, int(info["generation"]))
+    return highest
+
+
+def allocate_generation(paths: dict[str, str]) -> int:
+    current = max(read_generation(paths), max_segment_generation(paths))
+    nxt = current + 1
+    atomic_write(paths["generation"], f"{nxt}\n")
+    return nxt
+
+
+def dump_json(obj: dict) -> str:
+    return json.dumps(obj, ensure_ascii=True, separators=(",", ":"))
+
+
+def coerce_int(name: str, value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        fail(f"{name} must be an int", EXIT_USAGE)
+    return value
+
+
+def parse_field_value(key: str, raw: str) -> object:
+    if key in INT_FIELDS:
+        try:
+            if raw.startswith(("+", "-")):
+                if not raw[1:].isdigit():
+                    fail(f"{key} must be an int", EXIT_USAGE)
+            elif not raw.isdigit():
+                fail(f"{key} must be an int", EXIT_USAGE)
+            return int(raw)
+        except ValueError:
+            fail(f"{key} must be an int", EXIT_USAGE)
+    return raw
+
+
+def validate_payload(event: str, payload: dict) -> dict:
+    if event not in EVENT_SPECS:
+        fail(f"unknown event type: {event}", EXIT_USAGE)
+    spec = EVENT_SPECS[event]
+    allowed = set(spec["required"]) | set(spec["optional"])
+    extra = set(payload) - allowed
+    if extra:
+        fail(f"unknown payload key(s): {', '.join(sorted(extra))}", EXIT_USAGE)
+    missing = set(spec["required"]) - set(payload)
+    if missing:
+        fail(f"missing payload key(s): {', '.join(sorted(missing))}", EXIT_USAGE)
+    cleaned: dict = {}
+    for key, value in payload.items():
+        if contains_newline(key) or contains_newline(value):
+            fail("values must not contain raw newlines", EXIT_USAGE)
+        expected = spec["required"].get(key, spec["optional"].get(key))
+        if expected is int:
+            cleaned[key] = coerce_int(key, value)
+            if key == "round" and cleaned[key] < 1:
+                fail("round must be >= 1", EXIT_USAGE)
+            if key == "truncated_bytes" and cleaned[key] < 0:
+                fail("truncated_bytes must be >= 0", EXIT_USAGE)
+        elif expected is str:
+            if not isinstance(value, str):
+                fail(f"{key} must be a string", EXIT_USAGE)
+            cleaned[key] = value
+        elif expected is object:
+            cleaned[key] = value
+        elif isinstance(expected, tuple):
+            if value not in expected:
+                fail(f"invalid {key}: {value}", EXIT_USAGE)
+            cleaned[key] = value
+        else:
+            fail(f"invalid field {key}", EXIT_USAGE)
+    return cleaned
+
+
+def validate_event_object(obj: dict, *, require_seq: bool) -> None:
+    if obj.get("schema") != 1:
+        raise JournalError("event schema must be 1", EXIT_STORE)
+    if "event" not in obj or obj["event"] not in EVENT_SPECS:
+        raise JournalError("event type is invalid", EXIT_STORE)
+    if contains_newline(obj):
+        raise JournalError("event contains a raw newline", EXIT_STORE)
+    if require_seq:
+        seq = obj.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+            raise JournalError("event seq is invalid", EXIT_STORE)
+    payload = {key: value for key, value in obj.items() if key not in ENVELOPE_KEYS}
+    validate_payload(obj["event"], payload)
+
+
+def next_seq(events: list[dict]) -> int:
+    highest = 0
+    for event in events:
+        seq = event.get("seq")
+        if isinstance(seq, int) and not isinstance(seq, bool):
+            highest = max(highest, seq)
+    return highest + 1
+
+
+def append_line(path: str, obj: dict) -> None:
+    line = dump_json(obj) + "\n"
+    if "\n" in line[:-1] or "\r" in line:
+        fail("serialized event contains a raw newline", EXIT_USAGE)
+    data = line.encode("utf-8")
+    created = False
+    if not os.path.lexists(path):
+        create_regular(path)
+        created = True
+    validate_regular(path)
+    descriptor = open_nofollow(path, os.O_RDWR)
+    try:
+        os.lseek(descriptor, 0, os.SEEK_END)
+        written = os.write(descriptor, data)
+        if written != len(data):
+            raise JournalError("short write to journal segment", EXIT_STORE)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    if created:
+        validate_regular(path)
+
+
+def repair_and_prepare(paths: dict[str, str], run_id: str) -> tuple[list[dict], int]:
+    path = segment_path(paths, run_id)
+    if not os.path.lexists(path):
+        return [], 1
+    validate_regular(path)
+    data = read_file_bytes(path)
+    events, truncated, mid = parse_segment(data)
+    if mid:
+        fail("mid-file corruption", EXIT_MID_CORRUPT)
+    if truncated:
+        keep = len(data) - truncated
+        descriptor = open_nofollow(path, os.O_RDWR)
+        try:
+            os.ftruncate(descriptor, keep)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        seq = next_seq(events)
+        repaired = {
+            "schema": 1,
+            "seq": seq,
+            "ts": utc_iso(),
+            "event": "journal.repaired",
+            "run": run_id,
+            "truncated_bytes": truncated,
+        }
+        append_line(path, repaired)
+        events.append(repaired)
+        return events, seq + 1
+    if data and not data.endswith(b"\n"):
+        descriptor = open_nofollow(path, os.O_RDWR)
+        try:
+            os.lseek(descriptor, 0, os.SEEK_END)
+            os.write(descriptor, b"\n")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    return events, next_seq(events)
+
+
+def read_context_file(path: str, *, store_file: bool) -> tuple[dict | None, str | None]:
+    if store_file:
+        if os.path.islink(path):
+            raise JournalError(f"context is a symlink: {path}", EXIT_D4A)
+        if not os.path.lexists(path):
+            return None, "context missing"
+        validate_regular(path)
+    else:
+        if not os.path.lexists(path) or os.path.islink(path):
+            return None, "context malformed"
+        try:
+            info = os.lstat(path)
+        except OSError:
+            return None, "context malformed"
+        if not stat.S_ISREG(info.st_mode):
+            return None, "context malformed"
+    try:
+        raw = read_file_bytes(path) if store_file else _read_override(path)
+        obj = json.loads(raw.decode("utf-8"))
+    except (JournalError, UnicodeDecodeError, json.JSONDecodeError, OSError):
+        return None, "context malformed"
+    if not isinstance(obj, dict):
+        return None, "context malformed"
+    try:
+        if obj.get("schema") != 1:
+            return None, "context malformed"
+        workspace = obj.get("workspace")
+        key = obj.get("workspace_key")
+        run = obj.get("run")
+        generation = obj.get("generation")
+        created_at = obj.get("created_at")
+        extra = set(obj) - {
+            "schema",
+            "workspace",
+            "workspace_key",
+            "run",
+            "generation",
+            "created_at",
+        }
+        if extra:
+            return None, "context malformed"
+        if not isinstance(workspace, str) or not isinstance(key, str):
+            return None, "context malformed"
+        if not isinstance(run, str) or not RUN_ID_RE.fullmatch(run):
+            return None, "context malformed"
+        if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+            return None, "context malformed"
+        if not isinstance(created_at, str) or contains_newline(created_at):
+            return None, "context malformed"
+        if contains_newline(workspace) or contains_newline(key) or contains_newline(run):
+            return None, "context malformed"
+    except Exception:
+        return None, "context malformed"
+    return obj, None
+
+
+def _read_override(path: str) -> bytes:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise JournalError(f"cannot read context override: {error}", EXIT_USAGE) from error
+    try:
+        return os.read(descriptor, 1024 * 1024)
+    finally:
+        os.close(descriptor)
+
+
+def context_stale(paths: dict[str, str], context: dict) -> bool:
+    info = inspect_run(paths, context["run"])
+    if not info["exists"]:
+        return True
+    if info["mid_corrupt"]:
+        return False
+    return bool(info["terminal"])
+
+
+def load_context(paths: dict[str, str], canonical: str) -> tuple[dict | None, str | None]:
+    override = os.environ.get("LOOP_CONTEXT")
+    if override:
+        record, reason = read_context_file(override, store_file=False)
+        if reason:
+            return None, "context malformed"
+        assert record is not None
+        if record["workspace"] != canonical or record["workspace_key"] != paths["key"]:
+            return record, "wrong-workspace"
+        if context_stale(paths, record):
+            return record, "context stale"
+        return record, None
+    record, reason = read_context_file(paths["context"], store_file=True)
+    if reason:
+        return None, reason
+    assert record is not None
+    if record["workspace"] != canonical or record["workspace_key"] != paths["key"]:
+        return record, "wrong-workspace"
+    if context_stale(paths, record):
+        return record, "context stale"
+    return record, None
+
+
+def write_context(paths: dict[str, str], record: dict) -> None:
+    no_symlink_from(paths["root"], paths["context"])
+    atomic_write(paths["context"], dump_json(record) + "\n")
+
+
+def retire_context(paths: dict[str, str], run_id: str) -> None:
+    source = paths["context"]
+    if not os.path.lexists(source):
+        return
+    if os.path.islink(source):
+        raise JournalError(f"context is a symlink: {source}", EXIT_D4A)
+    validate_regular(source)
+    dest = os.path.join(paths["root"], f"context.retired-{run_id}")
+    no_symlink_from(paths["root"], dest)
+    os.rename(source, dest)
+    fsync_dir(paths["root"])
+    validate_regular(dest)
+
+
+def append_event(
+    paths: dict[str, str],
+    run_id: str,
+    event: str,
+    payload: dict,
+    *,
+    seq: int | None,
+) -> dict:
+    obj: dict = {"schema": 1}
+    if seq is not None:
+        obj["seq"] = seq
+    obj["ts"] = utc_iso()
+    obj["event"] = event
+    obj["run"] = run_id
+    obj.update(payload)
+    if seq is not None:
+        validate_event_object(obj, require_seq=True)
+    append_line(segment_path(paths, run_id), obj)
+    return obj
+
+
+def append_unattributed(
+    paths: dict[str, str],
+    event: str,
+    payload: dict,
+    reason: str,
+    run_id: str | None,
+) -> dict:
+    obj: dict = {
+        "schema": 1,
+        "ts": utc_iso(),
+        "event": event,
+        "attribution_failure": reason,
+    }
+    if run_id:
+        obj["run"] = run_id
+    obj.update(payload)
+    if contains_newline(obj):
+        fail("values must not contain raw newlines", EXIT_USAGE)
+    path = paths["unattributed"]
+    no_symlink_from(paths["root"], path)
+    if os.path.lexists(path):
+        validate_regular(path)
+        existing = read_file_bytes(path)
+        if existing and not existing.endswith(b"\n"):
+            descriptor = open_nofollow(path, os.O_RDWR)
+            try:
+                os.lseek(descriptor, 0, os.SEEK_END)
+                os.write(descriptor, b"\n")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+    append_line(path, obj)
+    print(
+        f"warning: attribution failed ({reason}); event written to unattributed.jsonl",
+        file=sys.stderr,
+    )
+    return obj
+
+
+def cmd_append(args: argparse.Namespace) -> int:
+    if args.json is not None and args.field:
+        fail("--json and --field are mutually exclusive", EXIT_USAGE)
+    payload: dict = {}
+    if args.json is not None:
+        try:
+            loaded = json.loads(args.json)
+        except json.JSONDecodeError as error:
+            fail(f"invalid --json: {error}", EXIT_USAGE)
+        if not isinstance(loaded, dict):
+            fail("--json must be an object", EXIT_USAGE)
+        payload = loaded
+    seen: set[str] = set()
+    for item in args.field or []:
+        if "=" not in item:
+            fail("--field needs key=value", EXIT_USAGE)
+        key, raw = item.split("=", 1)
+        if key in seen:
+            fail(f"duplicate --field {key}", EXIT_USAGE)
+        if key in ENVELOPE_KEYS:
+            fail(f"reserved field: {key}", EXIT_USAGE)
+        seen.add(key)
+        payload[key] = parse_field_value(key, raw)
+    payload = validate_payload(args.event, payload)
+    canonical = resolve_workspace(args.workspace)
+    paths = store_paths(canonical)
+    try:
+        bootstrap_store(paths)
+        with Lock(paths):
+            record, reason = load_context(paths, canonical)
+            if reason is not None:
+                run_id = record["run"] if record else None
+                append_unattributed(paths, args.event, payload, reason, run_id)
+                return EXIT_OK
+            assert record is not None
+            if args.event in EVENT_SPECS and inspect_run(paths, record["run"])["mid_corrupt"]:
+                fail("mid-file corruption", EXIT_MID_CORRUPT)
+            events, seq = repair_and_prepare(paths, record["run"])
+            _ = events
+            append_event(paths, record["run"], args.event, payload, seq=seq)
+            rebuild_runs_tsv(paths)
+    except JournalError as error:
+        fail(str(error), error.code)
+    return EXIT_OK
+
+
+def cmd_rebuild(args: argparse.Namespace) -> int:
+    canonical = resolve_workspace(args.workspace)
+    paths = store_paths(canonical)
+    try:
+        bootstrap_store(paths)
+        with Lock(paths):
+            rows = rebuild_runs_tsv(paths)
+    except JournalError as error:
+        fail(str(error), error.code)
+    print(f"rebuilt {len(rows)} run(s)")
+    return EXIT_OK
+
+
+def cmd_gc(args: argparse.Namespace) -> int:
+    canonical = resolve_workspace(args.workspace)
+    paths = store_paths(canonical)
+    cap = gc_cap_bytes()
+    try:
+        bootstrap_store(paths)
+        with Lock(paths):
+            infos = []
+            for run_id in list_run_ids(paths):
+                info = inspect_run(paths, run_id)
+                info["run_id"] = run_id
+                if info["generation"] is None:
+                    info["generation"] = 0
+                infos.append(info)
+            total = sum(int(item["bytes"]) for item in infos)
+            terminated = [
+                item
+                for item in infos
+                if item["exists"] and not item["mid_corrupt"] and item["terminal"]
+            ]
+            terminated.sort(key=lambda item: (int(item["generation"]), item["run_id"]))
+            keep_terminated = set(
+                item["run_id"] for item in terminated[-20:]
+            )
+            protected = []
+            unprotected = []
+            for item in infos:
+                is_protected = (
+                    item["mid_corrupt"]
+                    or not item["terminal"]
+                    or item["run_id"] in keep_terminated
+                )
+                item["protected"] = is_protected
+                if is_protected:
+                    protected.append(item)
+                else:
+                    unprotected.append(item)
+            unprotected.sort(key=lambda item: (int(item["generation"]), item["run_id"]))
+            deleted: list[dict] = []
+            if total > cap:
+                remaining = total
+                for item in unprotected:
+                    if remaining <= cap:
+                        break
+                    os.unlink(item["path"])
+                    fsync_dir(paths["runs_dir"])
+                    deleted.append(item)
+                    remaining -= int(item["bytes"])
+                protected_bytes = sum(int(item["bytes"]) for item in protected)
+                if remaining > cap and protected_bytes > cap:
+                    print(
+                        f"warning: soft-cap overage: protected runs occupy "
+                        f"{protected_bytes} bytes (cap {cap})",
+                        file=sys.stderr,
+                    )
+            rebuild_runs_tsv(paths)
+            kept_ids = {item["run_id"] for item in infos} - {
+                item["run_id"] for item in deleted
+            }
+            for item in deleted:
+                print(
+                    f"deleted {item['run_id']} generation={item['generation']} "
+                    f"bytes={item['bytes']}"
+                )
+            for item in infos:
+                if item["run_id"] in kept_ids:
+                    flag = "yes" if item["protected"] else "no"
+                    print(
+                        f"kept {item['run_id']} generation={item['generation']} "
+                        f"bytes={item['bytes']} protected={flag}"
+                    )
+            print(
+                f"gc: deleted {len(deleted)} runs, kept {len(kept_ids)}, "
+                f"counted_bytes={sum(int(item['bytes']) for item in infos if item['run_id'] in kept_ids)} "
+                f"cap={cap}"
+            )
+    except JournalError as error:
+        fail(str(error), error.code)
+    return EXIT_OK
+
+
+def cmd_begin_run(args: argparse.Namespace) -> int:
+    canonical = resolve_workspace(args.workspace)
+    paths = store_paths(canonical)
+    payload: dict = {}
+    if args.plan is not None:
+        payload["plan"] = args.plan
+        if contains_newline(args.plan):
+            fail("values must not contain raw newlines", EXIT_USAGE)
+    try:
+        bootstrap_store(paths)
+        with Lock(paths):
+            record, reason = None, None
+            if os.path.lexists(paths["context"]):
+                record, reason = read_context_file(paths["context"], store_file=True)
+                if record is not None and reason is None and not context_stale(paths, record):
+                    if (
+                        record["workspace"] == canonical
+                        and record["workspace_key"] == paths["key"]
+                    ):
+                        fail(
+                            "a non-stale context already exists for this workspace",
+                            EXIT_ACTIVE_RUN,
+                        )
+                if record is not None and reason is None:
+                    retire_context(paths, record["run"])
+            generation = allocate_generation(paths)
+            run_id = f"{utc_basic()}-{secrets.token_hex(3)}"
+            begin_payload = {
+                "workspace": canonical,
+                "workspace_key": paths["key"],
+                "generation": generation,
+            }
+            begin_payload.update(payload)
+            begin_payload = validate_payload("run.begin", begin_payload)
+            events, seq = repair_and_prepare(paths, run_id)
+            _ = events
+            append_event(paths, run_id, "run.begin", begin_payload, seq=seq)
+            write_context(
+                paths,
+                {
+                    "schema": 1,
+                    "workspace": canonical,
+                    "workspace_key": paths["key"],
+                    "run": run_id,
+                    "generation": generation,
+                    "created_at": utc_iso(),
+                },
+            )
+            rebuild_runs_tsv(paths)
+    except JournalError as error:
+        fail(str(error), error.code)
+    print(f"run={run_id}")
+    print(f"generation={generation}")
+    print(f"workspace_key={paths['key']}")
+    return EXIT_OK
+
+
+def require_fresh_context(paths: dict[str, str], canonical: str) -> dict:
+    record, reason = load_context(paths, canonical)
+    if reason is not None or record is None:
+        fail(f"no fresh context ({reason or 'context missing'})", EXIT_USAGE)
+    return record
+
+
+def cmd_end_run(args: argparse.Namespace) -> int:
+    payload = validate_payload("run.end", {"status": args.status})
+    canonical = resolve_workspace(args.workspace)
+    paths = store_paths(canonical)
+    try:
+        bootstrap_store(paths)
+        with Lock(paths):
+            record = require_fresh_context(paths, canonical)
+            events, seq = repair_and_prepare(paths, record["run"])
+            _ = events
+            append_event(paths, record["run"], "run.end", payload, seq=seq)
+            retire_context(paths, record["run"])
+            rebuild_runs_tsv(paths)
+    except JournalError as error:
+        fail(str(error), error.code)
+    print(f"run={record['run']}")
+    print(f"status={args.status}")
+    return EXIT_OK
+
+
+def unmatched_starts(events: list[dict]) -> list[str]:
+    started: list[str] = []
+    closed: set[str] = set()
+    for event in events:
+        kind = event.get("event")
+        dispatch_id = event.get("dispatch_id")
+        if not isinstance(dispatch_id, str):
+            continue
+        if kind == "dispatch.start":
+            started.append(dispatch_id)
+        elif kind in {"dispatch.end", "dispatch.abandoned"}:
+            closed.add(dispatch_id)
+    return [item for item in started if item not in closed]
+
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    canonical = resolve_workspace(args.workspace)
+    paths = store_paths(canonical)
+    acks = list(args.acknowledge or [])
+    try:
+        bootstrap_store(paths)
+        with Lock(paths):
+            record = require_fresh_context(paths, canonical)
+            info = inspect_run(paths, record["run"])
+            if not info["exists"]:
+                fail("active run segment does not exist", EXIT_STORE)
+            if info["mid_corrupt"]:
+                fail("mid-file corruption", EXIT_MID_CORRUPT)
+            events = list(info["events"])
+            if info["truncated_bytes"]:
+                events, _seq = repair_and_prepare(paths, record["run"])
+            unmatched = unmatched_starts(events)
+            leftover = [item for item in unmatched if item not in acks]
+            unknown = [item for item in acks if item not in unmatched]
+            if leftover:
+                print(D2A_SENTENCE, file=sys.stderr)
+                print(
+                    "error: recover refused; unmatched dispatch_id(s): "
+                    + ", ".join(leftover),
+                    file=sys.stderr,
+                )
+                return EXIT_RECOVER
+            if unknown:
+                fail(
+                    "acknowledge does not match an unmatched dispatch.start: "
+                    + ", ".join(unknown),
+                    EXIT_USAGE,
+                )
+            for dispatch_id in [item for item in unmatched if item in acks]:
+                events, seq = repair_and_prepare(paths, record["run"])
+                _ = events
+                append_event(
+                    paths,
+                    record["run"],
+                    "dispatch.abandoned",
+                    {"dispatch_id": dispatch_id, "attested_by": "user"},
+                    seq=seq,
+                )
+            events, seq = repair_and_prepare(paths, record["run"])
+            _ = events
+            append_event(
+                paths,
+                record["run"],
+                "run.end",
+                {"status": "abandoned"},
+                seq=seq,
+            )
+            retire_context(paths, record["run"])
+            rebuild_runs_tsv(paths)
+    except JournalError as error:
+        fail(str(error), error.code)
+    print(f"recovered run={record['run']} status=abandoned")
+    return EXIT_OK
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="loop-journal",
+        description=(
+            "Locked append-only loop journal. JSONL segments are authoritative. "
+            "LOOP_JOURNAL_GC_CAP_BYTES is a test-only gc cap override (default 52428800). "
+            "LOOP_JOURNAL_LOCK_TIMEOUT_SEC is a test-only lock timeout override (default 5). "
+            "Exit codes: 2 usage, 3 lock busy, 4 mid-corrupt, 5 D4a, 6 store, "
+            "7 recover refusal, 8 active run."
+        ),
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def add_workspace(target: argparse.ArgumentParser) -> None:
+        target.add_argument("--workspace", default=os.environ.get("PWD") or os.getcwd())
+
+    append = sub.add_parser("append", help="append one validated event")
+    add_workspace(append)
+    append.add_argument("--event", required=True)
+    append.add_argument("--field", action="append", default=[])
+    append.add_argument("--json", default=None)
+    append.set_defaults(func=cmd_append)
+
+    rebuild = sub.add_parser("rebuild", help="rebuild runs.tsv from segments")
+    add_workspace(rebuild)
+    rebuild.set_defaults(func=cmd_rebuild)
+
+    gc_cmd = sub.add_parser(
+        "gc",
+        help=(
+            "explicit garbage collection (never automatic). "
+            "LOOP_JOURNAL_GC_CAP_BYTES is a test-only cap override; default 50 MB."
+        ),
+    )
+    add_workspace(gc_cmd)
+    gc_cmd.set_defaults(func=cmd_gc)
+
+    begin = sub.add_parser("begin-run", help="allocate a run and write context")
+    add_workspace(begin)
+    begin.add_argument("--plan", default=None)
+    begin.set_defaults(func=cmd_begin_run)
+
+    end = sub.add_parser("end-run", help="append run.end and retire context")
+    add_workspace(end)
+    end.add_argument(
+        "--status",
+        required=True,
+        choices=("completed", "abandoned", "failed"),
+    )
+    end.set_defaults(func=cmd_end_run)
+
+    recover = sub.add_parser(
+        "recover",
+        help="attest unmatched dispatches and abandon the active run",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=D2A_SENTENCE,
+    )
+    add_workspace(recover)
+    recover.add_argument("--acknowledge", action="append", default=[])
+    recover.set_defaults(func=cmd_recover)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    if argv and argv[0] in {"-h", "--help"}:
+        build_parser().print_help()
+        return 0
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as error:
+        return int(error.code) if isinstance(error.code, int) else EXIT_USAGE
+    try:
+        return int(args.func(args))
+    except JournalError as error:
+        fail(str(error), error.code)
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
+PY

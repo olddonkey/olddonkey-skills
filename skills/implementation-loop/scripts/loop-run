@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# Agent-facing run lifecycle writer. All locking, appends, and context
+# mutations are performed by shelling out to loop-journal; this file only
+# translates the CLI.
+#
+# Usage:
+#   loop-run begin [--workspace DIR] [--plan TEXT]
+#   loop-run end --status completed|abandoned|failed [--workspace DIR]
+#   loop-run unit-begin --unit U [--workspace DIR]
+#   loop-run unit-end --unit U --status done|parked [--workspace DIR]
+#   loop-run round-begin --unit U --round N [--workspace DIR]
+#   loop-run checkpoint [--note TEXT] [--workspace DIR]
+#   loop-run review --unit U --round N --verdict pass|iterate [--findings REF] [--workspace DIR]
+#   loop-run publish --unit U [--branch B] [--pr URL] [--sha SHA] [--note TEXT] [--workspace DIR]
+#   loop-run recover [--acknowledge DISPATCH_ID]... [--workspace DIR]
+
+set -euo pipefail
+umask 077
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+JOURNAL="${LOOP_JOURNAL:-$SCRIPT_DIR/loop-journal}"
+export LOOP_JOURNAL_BIN="$JOURNAL"
+exec python3 - "$@" <<'PY'
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+EXIT_USAGE = 2
+
+D2A_SENTENCE = (
+    "Supplying --acknowledge <dispatch-id> asserts that the dispatch and its "
+    "descendants have terminated or otherwise cannot produce further side effects. "
+    "Mere notice that the event is missing is insufficient and must not retire the run."
+)
+
+USAGE = f"""\
+usage: loop-run <command> [options]
+
+Commands:
+  begin       allocate a run, append run.begin, write the context
+  end         append terminal run.end and retire the context
+  unit-begin  append unit.begin
+  unit-end    append unit.end
+  round-begin append round.begin
+  checkpoint  append checkpoint
+  review      append review.recorded
+  publish     append publish.recorded
+  recover     abandon the active run after every dispatch.start is closed
+
+recover:
+  Every dispatch.start must have a dispatch.end or dispatch.abandoned.
+  {D2A_SENTENCE}
+
+  --acknowledge may be repeated. No code path writes a synthetic dispatch.end.
+"""
+
+RECOVER_HELP = f"""\
+usage: loop-run recover [--workspace DIR] [--acknowledge DISPATCH_ID]...
+
+Scan the active run for dispatch.start events and match them against
+dispatch.end and dispatch.abandoned. Proceeds only when every start is
+matched. Successful recovery appends run.end(status=abandoned) and
+atomically retires the context.
+
+{D2A_SENTENCE}
+
+--acknowledge <dispatch-id> may be repeated. It records
+dispatch.abandoned {{dispatch_id, attested_by:"user"}} for that start
+and retires the context only together with that attestation in the same
+invocation. No code path ever writes a synthetic dispatch.end.
+"""
+
+
+def fail(message: str, code: int = EXIT_USAGE) -> None:
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def journal_bin() -> str:
+    path = os.environ.get("LOOP_JOURNAL_BIN")
+    if not path:
+        fail("loop-journal path is not set")
+    return path
+
+
+def run_journal(argv: list[str]) -> int:
+    helper = journal_bin()
+    try:
+        completed = subprocess.run([helper, *argv], check=False)
+    except OSError as error:
+        fail(f"failed to execute loop-journal: {error}", 5)
+    return int(completed.returncode)
+
+
+def take_flag(args: list[str], name: str, *, required: bool = False) -> str | None:
+    values: list[str] = []
+    rest: list[str] = []
+    index = 0
+    while index < len(args):
+        item = args[index]
+        if item == name:
+            if index + 1 >= len(args):
+                fail(f"{name} needs a value")
+            values.append(args[index + 1])
+            index += 2
+            continue
+        if item.startswith(name + "="):
+            values.append(item.split("=", 1)[1])
+            index += 1
+            continue
+        rest.append(item)
+        index += 1
+    args[:] = rest
+    if not values:
+        if required:
+            fail(f"{name} is required")
+        return None
+    return values[-1]
+
+
+def take_repeatable(args: list[str], name: str) -> list[str]:
+    values: list[str] = []
+    rest: list[str] = []
+    index = 0
+    while index < len(args):
+        item = args[index]
+        if item == name:
+            if index + 1 >= len(args):
+                fail(f"{name} needs a value")
+            values.append(args[index + 1])
+            index += 2
+            continue
+        if item.startswith(name + "="):
+            values.append(item.split("=", 1)[1])
+            index += 1
+            continue
+        rest.append(item)
+        index += 1
+    args[:] = rest
+    return values
+
+
+def refuse_unknown(args: list[str]) -> None:
+    if args:
+        fail(f"unknown argument: {args[0]}")
+
+
+def workspace_args(args: list[str]) -> list[str]:
+    workspace = take_flag(args, "--workspace")
+    if workspace is None:
+        workspace = os.getcwd()
+    return ["--workspace", workspace]
+
+
+def append_event(args: list[str], event: str, fields: list[tuple[str, str]]) -> int:
+    argv = ["append", *workspace_args(args), "--event", event]
+    refuse_unknown(args)
+    for key, value in fields:
+        if value is None:
+            continue
+        argv.extend(["--field", f"{key}={value}"])
+    return run_journal(argv)
+
+
+def cmd_begin(args: list[str]) -> int:
+    plan = take_flag(args, "--plan")
+    argv = ["begin-run", *workspace_args(args)]
+    refuse_unknown(args)
+    if plan is not None:
+        argv.extend(["--plan", plan])
+    return run_journal(argv)
+
+
+def cmd_end(args: list[str]) -> int:
+    status = take_flag(args, "--status", required=True)
+    argv = ["end-run", *workspace_args(args), "--status", status]
+    refuse_unknown(args)
+    return run_journal(argv)
+
+
+def cmd_unit_begin(args: list[str]) -> int:
+    unit = take_flag(args, "--unit", required=True)
+    return append_event(args, "unit.begin", [("unit", unit)])
+
+
+def cmd_unit_end(args: list[str]) -> int:
+    unit = take_flag(args, "--unit", required=True)
+    status = take_flag(args, "--status", required=True)
+    return append_event(args, "unit.end", [("unit", unit), ("status", status)])
+
+
+def cmd_round_begin(args: list[str]) -> int:
+    unit = take_flag(args, "--unit", required=True)
+    round_n = take_flag(args, "--round", required=True)
+    return append_event(args, "round.begin", [("unit", unit), ("round", round_n)])
+
+
+def cmd_checkpoint(args: list[str]) -> int:
+    note = take_flag(args, "--note")
+    fields = [("note", note)] if note is not None else []
+    return append_event(args, "checkpoint", fields)
+
+
+def cmd_review(args: list[str]) -> int:
+    unit = take_flag(args, "--unit", required=True)
+    round_n = take_flag(args, "--round", required=True)
+    verdict = take_flag(args, "--verdict", required=True)
+    findings = take_flag(args, "--findings")
+    fields = [("unit", unit), ("round", round_n), ("verdict", verdict)]
+    if findings is not None:
+        fields.append(("findings", findings))
+    return append_event(args, "review.recorded", fields)
+
+
+def cmd_publish(args: list[str]) -> int:
+    unit = take_flag(args, "--unit", required=True)
+    branch = take_flag(args, "--branch")
+    pr = take_flag(args, "--pr")
+    sha = take_flag(args, "--sha")
+    note = take_flag(args, "--note")
+    fields = [("unit", unit)]
+    if branch is not None:
+        fields.append(("branch", branch))
+    if pr is not None:
+        fields.append(("pr", pr))
+    if sha is not None:
+        fields.append(("sha", sha))
+    if note is not None:
+        fields.append(("note", note))
+    return append_event(args, "publish.recorded", fields)
+
+
+def cmd_recover(args: list[str]) -> int:
+    if args and args[0] in {"-h", "--help"}:
+        sys.stdout.write(RECOVER_HELP)
+        return 0
+    acks = take_repeatable(args, "--acknowledge")
+    argv = ["recover", *workspace_args(args)]
+    refuse_unknown(args)
+    for item in acks:
+        argv.extend(["--acknowledge", item])
+    return run_journal(argv)
+
+
+COMMANDS = {
+    "begin": cmd_begin,
+    "end": cmd_end,
+    "unit-begin": cmd_unit_begin,
+    "unit-end": cmd_unit_end,
+    "round-begin": cmd_round_begin,
+    "checkpoint": cmd_checkpoint,
+    "review": cmd_review,
+    "publish": cmd_publish,
+    "recover": cmd_recover,
+}
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in {"-h", "--help"}:
+        sys.stdout.write(USAGE)
+        return 0
+    command = argv[0]
+    if command not in COMMANDS:
+        fail(f"unknown command: {command}")
+    return COMMANDS[command](argv[1:])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
+PY
