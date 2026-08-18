@@ -1,0 +1,801 @@
+#!/usr/bin/env bash
+# Read-only derived index over the loop journal and per-backend state dirs.
+#
+# Usage:
+#   loop-index [--workspace DIR] [--pretty]
+#
+# Writes nothing: no locks, no repair, no cache rebuild. Never acquires
+# meta.lock. Prints one JSON document on stdout.
+#
+# Test-only overrides (not for production):
+#   LOOP_INDEX_ACTIVITY_SEC            default 300
+#   LOOP_INDEX_STALL_SEC               default 1200
+#   LOOP_INDEX_CHECKPOINT_FRESH_SEC    default 900
+
+set -euo pipefail
+exec python3 - "$@" <<'PY'
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_STORE = 6
+
+RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$")
+
+HELP = """\
+Read-only index of loop journal segments and per-backend dispatch state.
+
+Usage:
+  loop-index [--workspace DIR] [--pretty]
+
+--workspace DIR   workspace to index (default: $PWD)
+--pretty          indent the JSON document
+
+Output: one JSON document on stdout (schema=1). Nothing else on stdout.
+
+This command is read-only by contract. It never writes, never acquires
+meta.lock, and never rebuilds runs.tsv. Repair belongs to writers.
+
+Sources:
+  journal   $HOME/.config/olddonkey-loop/journal/<workspace-key>/
+  codex     $HOME/.config/olddonkey-loop/codex/<workspace-key>/<dispatch-id>/
+  grok      <git-common-dir>/olddonkey-loop/grok/<dispatch-id>/
+  cursor    <git-common-dir>/olddonkey-loop/cursor/<dispatch-id>/
+
+git common dir is `git -C <workspace> rev-parse --git-common-dir`. If git
+or that directory is unavailable, grok and cursor state reads as
+unavailable (not an error). Correlation is exact dispatch_id == state
+directory basename only.
+
+Liveness (open dispatches only; evidence words, never process inspection):
+  recent activity   newest activity artifact younger than ACTIVITY_SEC
+  idle              otherwise, until STALL_SEC; idle_minutes = floor(age/60)
+  suspected stall   age >= STALL_SEC
+  unknown           state_dir missing or unreadable
+
+  Codex activity artifact: transcript.log (size/mtime).
+  Grok and cursor: any regular file in the dispatch state directory.
+
+Checkpoint (every run object, including terminal; degraded is unknown):
+  {state: fresh|stale|unknown, ts?: str, age_minutes?: int, note?: str}
+
+  Evidence is the newest agent-invoked event in the run segment:
+  run.begin, run.end, unit.begin, unit.end, round.begin, checkpoint,
+  review.recorded, publish.recorded. Mechanical events (dispatch.*,
+  gate.result, journal.repaired) do not count.
+
+  The event's ts (ISO-8601 Z) is the timestamp. Unparseable or absent
+  ts → unknown with no other keys. age = now - ts. age below
+  CHECKPOINT_FRESH_SEC is fresh; otherwise stale with
+  age_minutes = floor(age/60). Both fresh and stale carry ts.
+  note is from the newest checkpoint event that has a note, if any,
+  even when a later non-checkpoint agent event is the freshness
+  evidence.
+
+Test-only environment overrides:
+  LOOP_INDEX_ACTIVITY_SEC           default 300
+  LOOP_INDEX_STALL_SEC              default 1200
+  LOOP_INDEX_CHECKPOINT_FRESH_SEC   default 900
+
+Exit codes:
+  0  success, including empty store and degraded journal
+  2  usage
+  6  operational failure (HOME unset or unreadable)
+"""
+
+
+def fail(message: str, code: int) -> None:
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def contains_newline(value: object) -> bool:
+    if isinstance(value, str):
+        return "\n" in value or "\r" in value
+    if isinstance(value, dict):
+        return any(contains_newline(item) for item in value.values()) or any(
+            contains_newline(item) for item in value.keys()
+        )
+    if isinstance(value, list):
+        return any(contains_newline(item) for item in value)
+    return False
+
+
+def resolve_workspace(raw: str) -> str:
+    if not raw or contains_newline(raw):
+        fail("workspace path is invalid", EXIT_USAGE)
+    if not os.path.isdir(raw):
+        fail(f"workspace is not a directory: {raw}", EXIT_USAGE)
+    canonical = os.path.realpath(raw)
+    if not os.path.isdir(canonical):
+        fail(f"workspace is not a directory: {raw}", EXIT_USAGE)
+    if contains_newline(canonical):
+        fail("canonical workspace path contains a newline", EXIT_USAGE)
+    return canonical
+
+
+def workspace_key_for(canonical: str) -> str:
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def home_dir() -> str:
+    home = os.environ.get("HOME")
+    if not home:
+        fail("HOME is not set", EXIT_STORE)
+    home = os.path.abspath(home)
+    if not os.path.isdir(home):
+        fail("HOME is not a readable directory", EXIT_STORE)
+    try:
+        os.listdir(home)
+    except OSError as error:
+        fail(f"HOME is unreadable: {error}", EXIT_STORE)
+    return home
+
+
+def positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        fail(f"{name} must be an integer", EXIT_USAGE)
+    if value < 1:
+        fail(f"{name} must be >= 1", EXIT_USAGE)
+    return value
+
+
+def activity_sec() -> int:
+    return positive_int_env("LOOP_INDEX_ACTIVITY_SEC", 300)
+
+
+def stall_sec() -> int:
+    return positive_int_env("LOOP_INDEX_STALL_SEC", 1200)
+
+
+def checkpoint_fresh_sec() -> int:
+    return positive_int_env("LOOP_INDEX_CHECKPOINT_FRESH_SEC", 900)
+
+
+AGENT_INVOKED_EVENTS = frozenset(
+    {
+        "run.begin",
+        "run.end",
+        "unit.begin",
+        "unit.end",
+        "round.begin",
+        "checkpoint",
+        "review.recorded",
+        "publish.recorded",
+    }
+)
+
+ISO_Z_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+
+
+def journal_paths(home: str, key: str) -> dict[str, str]:
+    root = os.path.join(home, ".config", "olddonkey-loop", "journal", key)
+    return {
+        "key": key,
+        "root": root,
+        "runs_dir": os.path.join(root, "runs"),
+        "context": os.path.join(root, "context"),
+        "unattributed": os.path.join(root, "unattributed.jsonl"),
+    }
+
+
+def read_file_bytes(path: str) -> bytes | None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        chunks: list[bytes] = []
+        while True:
+            piece = os.read(descriptor, 1024 * 1024)
+            if not piece:
+                break
+            chunks.append(piece)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def parse_segment(data: bytes) -> tuple[list[dict], int, bool]:
+    if not data:
+        return [], 0, False
+    parts = data.split(b"\n")
+    ended = data.endswith(b"\n")
+    if ended:
+        parts = parts[:-1]
+    events: list[dict] = []
+    for index, line in enumerate(parts):
+        is_last = index == len(parts) - 1
+        try:
+            obj = json.loads(line.decode("utf-8"))
+            if not isinstance(obj, dict):
+                raise ValueError("event is not an object")
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            if is_last and not ended:
+                return events, len(line), False
+            return events, 0, True
+        if not ended and is_last:
+            events.append(obj)
+            return events, 0, False
+        events.append(obj)
+    return events, 0, False
+
+
+def list_run_ids(runs_dir: str) -> list[str] | None:
+    try:
+        entries = list(os.scandir(runs_dir))
+    except OSError:
+        return None
+    found: list[str] = []
+    for entry in entries:
+        if entry.name.startswith(".tmp-"):
+            continue
+        if not entry.name.endswith(".jsonl"):
+            continue
+        if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+            continue
+        run_id = entry.name[: -len(".jsonl")]
+        if not RUN_ID_RE.fullmatch(run_id):
+            continue
+        found.append(run_id)
+    return found
+
+
+def inspect_run(runs_dir: str, run_id: str) -> dict:
+    path = os.path.join(runs_dir, f"{run_id}.jsonl")
+    data = read_file_bytes(path)
+    if data is None:
+        return {
+            "run_id": run_id,
+            "events": [],
+            "mid_corrupt": True,
+            "generation": None,
+            "status": "degraded",
+        }
+    events, _truncated, mid = parse_segment(data)
+    generation = None
+    status = "degraded" if mid else "active"
+    if not mid:
+        for event in events:
+            if event.get("event") == "run.begin":
+                try:
+                    generation = int(event.get("generation"))
+                except (TypeError, ValueError):
+                    generation = None
+            if event.get("event") == "run.end" and event.get("status") in {
+                "completed",
+                "abandoned",
+                "failed",
+            }:
+                status = str(event.get("status"))
+    else:
+        for event in events:
+            if event.get("event") == "run.begin":
+                try:
+                    generation = int(event.get("generation"))
+                except (TypeError, ValueError):
+                    pass
+        status = "degraded"
+    return {
+        "run_id": run_id,
+        "events": events,
+        "mid_corrupt": mid,
+        "generation": generation,
+        "status": status,
+    }
+
+
+def optional_str(event: dict, key: str) -> str | None:
+    value = event.get(key)
+    return value if isinstance(value, str) else None
+
+
+def parse_iso_z(value: object) -> tuple[str, float] | None:
+    if not isinstance(value, str) or not ISO_Z_RE.fullmatch(value):
+        return None
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
+    return value, parsed.timestamp()
+
+
+def build_checkpoint(events: list[dict], *, degraded: bool, now: float) -> dict:
+    if degraded:
+        return {"state": "unknown"}
+    newest_agent = None
+    newest_note = None
+    for event in events:
+        kind = event.get("event")
+        if kind in AGENT_INVOKED_EVENTS:
+            newest_agent = event
+        if kind == "checkpoint":
+            note = optional_str(event, "note")
+            if note is not None:
+                newest_note = note
+    if newest_agent is None:
+        return {"state": "unknown"}
+    parsed = parse_iso_z(newest_agent.get("ts"))
+    if parsed is None:
+        return {"state": "unknown"}
+    ts, epoch = parsed
+    age = max(0.0, now - epoch)
+    if age < checkpoint_fresh_sec():
+        result: dict = {"state": "fresh", "ts": ts}
+    else:
+        result = {
+            "state": "stale",
+            "ts": ts,
+            "age_minutes": int(age // 60),
+        }
+    if newest_note is not None:
+        result["note"] = newest_note
+    return result
+
+
+def build_units(events: list[dict], *, degraded: bool) -> list[dict]:
+    units: dict[str, dict] = {}
+    order: list[str] = []
+
+    def ensure(name: str) -> dict:
+        if name not in units:
+            units[name] = {
+                "unit": name,
+                "status": "unknown" if degraded else "active",
+                "rounds": 0,
+                "review": "not recorded",
+                "publish": "not recorded",
+                "_round_max": 0,
+            }
+            order.append(name)
+        return units[name]
+
+    for event in events:
+        kind = event.get("event")
+        name = event.get("unit")
+        if not isinstance(name, str) or not name:
+            continue
+        record = ensure(name)
+        if kind == "unit.end" and event.get("status") in {"done", "parked"}:
+            record["status"] = str(event.get("status"))
+        elif kind == "round.begin":
+            try:
+                round_n = int(event.get("round"))
+            except (TypeError, ValueError):
+                continue
+            if round_n > record["_round_max"]:
+                record["_round_max"] = round_n
+        elif kind == "review.recorded":
+            verdict = event.get("verdict")
+            try:
+                round_n = int(event.get("round"))
+            except (TypeError, ValueError):
+                continue
+            if verdict in {"pass", "iterate"}:
+                record["review"] = {"verdict": verdict, "round": round_n}
+        elif kind == "publish.recorded":
+            published = {}
+            for key in ("branch", "pr", "sha", "note"):
+                value = optional_str(event, key)
+                if value is not None:
+                    published[key] = value
+            record["publish"] = published
+    result = []
+    for name in order:
+        record = units[name]
+        record["rounds"] = int(record.pop("_round_max"))
+        result.append(record)
+    return result
+
+
+def build_dispatches(events: list[dict], *, degraded: bool) -> list[dict]:
+    dispatches: dict[str, dict] = {}
+    order: list[str] = []
+    for event in events:
+        kind = event.get("event")
+        dispatch_id = event.get("dispatch_id")
+        if not isinstance(dispatch_id, str) or not dispatch_id:
+            continue
+        if dispatch_id not in dispatches:
+            dispatches[dispatch_id] = {
+                "dispatch_id": dispatch_id,
+                "backend": event.get("backend")
+                if kind == "dispatch.start"
+                else None,
+                "mode": event.get("mode") if kind == "dispatch.start" else None,
+                "state": "unknown" if degraded else "open",
+            }
+            order.append(dispatch_id)
+        record = dispatches[dispatch_id]
+        if kind == "dispatch.start":
+            if event.get("backend") in {"codex", "grok", "cursor"}:
+                record["backend"] = event.get("backend")
+            if event.get("mode") in {"implement", "read-only"}:
+                record["mode"] = event.get("mode")
+            if record["state"] not in {"ended", "abandoned"}:
+                record["state"] = "unknown" if degraded else "open"
+        elif kind == "dispatch.end":
+            record["state"] = "ended"
+            try:
+                record["exit"] = int(event.get("exit"))
+            except (TypeError, ValueError):
+                pass
+            session = optional_str(event, "session")
+            if session:
+                record["session"] = session
+        elif kind == "dispatch.abandoned":
+            record["state"] = "abandoned"
+    result = []
+    for dispatch_id in order:
+        record = dispatches[dispatch_id]
+        if record.get("backend") not in {"codex", "grok", "cursor"}:
+            record["backend"] = "unknown"
+        if record.get("mode") not in {"implement", "read-only"}:
+            record["mode"] = "unknown"
+        result.append(record)
+    return result
+
+
+def build_gates(events: list[dict]) -> list[dict]:
+    gates = []
+    for event in events:
+        if event.get("event") != "gate.result":
+            continue
+        gate = {
+            "policy": event.get("policy"),
+            "purpose": event.get("purpose"),
+            "binding": event.get("binding"),
+        }
+        if "totals" in event:
+            gate["totals"] = event["totals"]
+        for key in ("reason", "pre_head", "post_head"):
+            value = optional_str(event, key)
+            if value is not None:
+                gate[key] = value
+        gates.append(gate)
+    return gates
+
+
+def count_unattributed_lines(path: str) -> int:
+    if not os.path.lexists(path):
+        return 0
+    data = read_file_bytes(path)
+    if data is None:
+        return 0
+    if not data:
+        return 0
+    return len(data.splitlines())
+
+
+def read_context(path: str, canonical: str, key: str, runs: list[dict]) -> dict:
+    if not os.path.lexists(path):
+        return {"state": "none"}
+    data = read_file_bytes(path)
+    if data is None:
+        return {"state": "none"}
+    try:
+        obj = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"state": "none"}
+    if not isinstance(obj, dict):
+        return {"state": "none"}
+    run_id = obj.get("run")
+    if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
+        return {"state": "none"}
+    if obj.get("workspace") != canonical or obj.get("workspace_key") != key:
+        return {"state": "none"}
+    matching = next((item for item in runs if item["run_id"] == run_id), None)
+    if matching is None:
+        return {"state": "none"}
+    if matching["status"] in {"completed", "abandoned", "failed"}:
+        return {"state": "none"}
+    return {"state": "active", "run": run_id}
+
+
+def git_common_dir(workspace: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", workspace, "rev-parse", "--git-common-dir"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    raw = completed.stdout.strip()
+    if not raw or contains_newline(raw):
+        return None
+    if os.path.isabs(raw):
+        path = raw
+    else:
+        path = os.path.join(workspace, raw)
+    path = os.path.realpath(path)
+    if not os.path.isdir(path):
+        return None
+    return path
+
+
+def list_state_ids(root: str) -> list[str]:
+    if not os.path.isdir(root):
+        return []
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return []
+    found: list[str] = []
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        found.append(entry.name)
+    found.sort()
+    return found
+
+
+def expected_state_dir(backend: str, dispatch_id: str, roots: dict) -> str | None:
+    root = roots.get(backend)
+    if root is None:
+        return None
+    if root == "unavailable":
+        return "unavailable"
+    return os.path.join(root, dispatch_id)
+
+
+def resolve_state_dir(path: str | None) -> str:
+    if path is None:
+        return "missing"
+    if path == "unavailable":
+        return "unavailable"
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return "missing"
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return "missing"
+    return path
+
+
+def activity_paths(backend: str, state_dir: str) -> list[str] | None:
+    if backend == "codex":
+        path = os.path.join(state_dir, "transcript.log")
+        try:
+            info = os.lstat(path)
+        except OSError:
+            return []
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            return []
+        return [path]
+    try:
+        entries = list(os.scandir(state_dir))
+    except OSError:
+        return None
+    paths: list[str] = []
+    for entry in entries:
+        if entry.name.startswith(".tmp-"):
+            continue
+        try:
+            if entry.is_file(follow_symlinks=False):
+                paths.append(entry.path)
+        except OSError:
+            continue
+    return paths
+
+
+def compute_liveness(backend: str, state_dir: str, now: float) -> dict:
+    if state_dir in {"missing", "unavailable"}:
+        return {"state": "unknown"}
+    paths = activity_paths(backend, state_dir)
+    if paths is None:
+        return {"state": "unknown"}
+    newest_path = None
+    newest_mtime = None
+    for path in sorted(paths):
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        mtime = info.st_mtime
+        if newest_mtime is None or mtime > newest_mtime:
+            newest_mtime = mtime
+            newest_path = path
+    if newest_mtime is None or newest_path is None:
+        return {"state": "unknown"}
+    age = max(0.0, now - newest_mtime)
+    recent = activity_sec()
+    stall = stall_sec()
+    if age < recent:
+        result = {"state": "recent activity"}
+    elif age >= stall:
+        result = {"state": "suspected stall"}
+    else:
+        result = {"state": "idle", "idle_minutes": int(age // 60)}
+    result["source"] = newest_path
+    return result
+
+
+def attach_state(
+    dispatches: list[dict],
+    roots: dict,
+    attributed: set[str],
+    now: float,
+) -> None:
+    for record in dispatches:
+        backend = record.get("backend")
+        dispatch_id = record["dispatch_id"]
+        if backend in {"codex", "grok", "cursor"}:
+            attributed.add(f"{backend}:{dispatch_id}")
+            expected = expected_state_dir(backend, dispatch_id, roots)
+            record["state_dir"] = resolve_state_dir(expected)
+        else:
+            record["state_dir"] = "missing"
+        if record.get("state") == "open":
+            record["liveness"] = compute_liveness(
+                backend if backend in {"codex", "grok", "cursor"} else "",
+                record["state_dir"],
+                now,
+            )
+
+
+def unattributed_state(roots: dict, attributed: set[str]) -> dict:
+    result: dict[str, object] = {}
+    for backend in ("codex", "grok", "cursor"):
+        root = roots.get(backend)
+        if root == "unavailable" or root is None:
+            result[backend] = "unavailable"
+            continue
+        ids = []
+        for dispatch_id in list_state_ids(root):
+            if f"{backend}:{dispatch_id}" not in attributed:
+                ids.append(dispatch_id)
+        result[backend] = ids
+    return result
+
+
+def dump_json(obj: dict, pretty: bool) -> str:
+    if pretty:
+        return json.dumps(obj, ensure_ascii=True, indent=2) + "\n"
+    return json.dumps(obj, ensure_ascii=True, separators=(",", ":")) + "\n"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="loop-index",
+        add_help=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=HELP,
+    )
+    parser.add_argument("-h", "--help", action="store_true")
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        help="workspace directory (default: $PWD)",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="indent the JSON document",
+    )
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as error:
+        return int(error.code) if isinstance(error.code, int) else EXIT_USAGE
+    if args.help:
+        sys.stdout.write(HELP)
+        return EXIT_OK
+    workspace = args.workspace
+    if workspace is None:
+        workspace = os.environ.get("PWD") or os.getcwd()
+    canonical = resolve_workspace(workspace)
+    home = home_dir()
+    key = workspace_key_for(canonical)
+    paths = journal_paths(home, key)
+    now = time.time()
+
+    journal_status = "missing"
+    runs_out: list[dict] = []
+    if os.path.isdir(paths["root"]) and os.path.isdir(paths["runs_dir"]):
+        run_ids = list_run_ids(paths["runs_dir"])
+        if run_ids is None:
+            journal_status = "degraded"
+        elif run_ids:
+            journal_status = "ok"
+            infos = [inspect_run(paths["runs_dir"], run_id) for run_id in run_ids]
+            if any(item["mid_corrupt"] or item["status"] == "degraded" for item in infos):
+                journal_status = "degraded"
+            infos.sort(
+                key=lambda item: (
+                    item["generation"] is None,
+                    -(item["generation"] or 0),
+                    item["run_id"],
+                )
+            )
+            for info in infos:
+                generation = info["generation"]
+                run = {
+                    "run_id": info["run_id"],
+                    "generation": generation if generation is not None else "unknown",
+                    "status": info["status"],
+                    "units": build_units(
+                        info["events"], degraded=info["mid_corrupt"]
+                    ),
+                    "dispatches": build_dispatches(
+                        info["events"], degraded=info["mid_corrupt"]
+                    ),
+                    "gates": build_gates(info["events"]),
+                    "checkpoint": build_checkpoint(
+                        info["events"],
+                        degraded=info["mid_corrupt"],
+                        now=now,
+                    ),
+                }
+                runs_out.append(run)
+        else:
+            journal_status = "missing"
+
+    roots: dict[str, str] = {
+        "codex": os.path.join(home, ".config", "olddonkey-loop", "codex", key),
+    }
+    common = git_common_dir(canonical)
+    if common is None:
+        roots["grok"] = "unavailable"
+        roots["cursor"] = "unavailable"
+    else:
+        roots["grok"] = os.path.join(common, "olddonkey-loop", "grok")
+        roots["cursor"] = os.path.join(common, "olddonkey-loop", "cursor")
+
+    attributed: set[str] = set()
+    for run in runs_out:
+        attach_state(run["dispatches"], roots, attributed, now)
+
+    document = {
+        "schema": 1,
+        "workspace": canonical,
+        "workspace_key": key,
+        "journal": {"status": journal_status},
+        "context": read_context(paths["context"], canonical, key, runs_out),
+        "runs": runs_out,
+        "unattributed_events": count_unattributed_lines(paths["unattributed"]),
+        "unattributed_state": unattributed_state(roots, attributed),
+    }
+    sys.stdout.write(dump_json(document, args.pretty))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
+PY
