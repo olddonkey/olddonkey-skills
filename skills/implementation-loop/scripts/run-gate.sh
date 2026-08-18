@@ -10,7 +10,9 @@
 # captures the true status, and prints a summary plus any failure headers.
 #
 # Usage:
-#   run-gate.sh [--strict] [--log PATH] [--baseline PATH] -- <test command...>
+#   run-gate.sh [--strict] [--log PATH] [--baseline PATH]
+#               [--purpose unit-final|baseline-generation|focused|unspecified]
+#               -- <test command...>
 #
 # Modes (--strict and --baseline are mutually exclusive):
 #   (default)   pass-through — works with ANY runner. The suite's exit code is
@@ -31,15 +33,34 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+if [[ -n "${LOOP_JOURNAL:-}" ]]; then
+  JOURNAL_HELPER="$LOOP_JOURNAL"
+else
+  JOURNAL_HELPER="$SCRIPT_DIR/loop-journal"
+fi
+
 LOG=""
 BASELINE=""
 STRICT=0
+PURPOSE="unspecified"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --log)      LOG="${2:?--log needs a path}"; shift 2 ;;
     --baseline) BASELINE="${2:?--baseline needs a path}"; shift 2 ;;
     --strict)   STRICT=1; shift ;;
+    --purpose)
+      PURPOSE="${2:?--purpose needs a value}"
+      case "$PURPOSE" in
+        unit-final|baseline-generation|focused|unspecified) ;;
+        *)
+          echo "error: --purpose must be unit-final, baseline-generation, focused, or unspecified" >&2
+          exit 2
+          ;;
+      esac
+      shift 2
+      ;;
     -h|--help)  awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"; exit 0 ;;
     --)         shift; break ;;
     *)          echo "unknown argument: $1" >&2; exit 2 ;;
@@ -160,13 +181,143 @@ set +o noclobber
 
 echo "gate: $*" >&2
 echo "log:  $LOG" >&2
+echo "purpose: $PURPOSE" >&2
 if [[ $STRICT -eq 1 ]]; then
   echo "mode: strict" >&2
+  GATE_POLICY="strict"
 elif [[ -n "$BASELINE" ]]; then
   echo "mode: baseline" >&2
+  GATE_POLICY="baseline"
 else
   echo "mode: pass-through (exit code only — weakest; use --strict for unittest/pytest)" >&2
+  GATE_POLICY="passthrough"
 fi
+
+resolve_tree_oid() {
+  if [[ -n "${LOOP_TREE_OID:-}" ]]; then
+    printf '%s\n' "$LOOP_TREE_OID"
+    return 0
+  fi
+  if [[ -f "$SCRIPT_DIR/tree-oid.sh" && -x "$SCRIPT_DIR/tree-oid.sh" ]]; then
+    printf '%s\n' "$SCRIPT_DIR/tree-oid.sh"
+    return 0
+  fi
+  if [[ -f "$SCRIPT_DIR/../../engineering-mode/scripts/tree-oid.sh" && \
+        -x "$SCRIPT_DIR/../../engineering-mode/scripts/tree-oid.sh" ]]; then
+    printf '%s\n' "$SCRIPT_DIR/../../engineering-mode/scripts/tree-oid.sh"
+    return 0
+  fi
+  return 1
+}
+
+capture_binding() {
+  local head="" tree="" helper="" tree_rc=0 top="" here="" top_canon=""
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf '%s\n' 'fail|||not a git worktree root'
+    return 0
+  fi
+  top="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    printf '%s\n' 'fail|||not a git worktree root'
+    return 0
+  }
+  here="$(pwd -P 2>/dev/null || pwd)"
+  top_canon="$(cd "$top" && pwd -P 2>/dev/null)" || top_canon="$top"
+  if [[ "$here" != "$top_canon" ]]; then
+    printf '%s\n' 'fail|||not a git worktree root'
+    return 0
+  fi
+  if ! head="$(git rev-parse HEAD 2>/dev/null)"; then
+    printf '%s\n' 'fail|||git rev-parse HEAD failed'
+    return 0
+  fi
+  if ! helper="$(resolve_tree_oid)"; then
+    printf '%s\n' 'fail|||tree-oid helper not found'
+    return 0
+  fi
+  if [[ ! -f "$helper" || ! -x "$helper" ]]; then
+    printf '%s\n' 'fail|||tree-oid helper not found'
+    return 0
+  fi
+  tree="$("$helper" 2>/dev/null)" && tree_rc=0 || tree_rc=$?
+  if [[ $tree_rc -ne 0 ]]; then
+    if [[ $tree_rc -eq 3 ]]; then
+      printf '%s\n' 'fail|||tree-oid: binding unavailable'
+    else
+      printf '%s\n' "fail|||tree-oid failed (exit $tree_rc)"
+    fi
+    return 0
+  fi
+  printf '%s\n' "ok|${head}|${tree}|"
+}
+
+classify_binding() {
+  BINDING_REASON=""
+  if [[ "$PRE_CAPTURE_OK" != "ok" || "$POST_CAPTURE_OK" != "ok" ]]; then
+    BINDING="unavailable"
+    if [[ "$PRE_CAPTURE_OK" != "ok" && -n "$PRE_CAPTURE_REASON" ]]; then
+      BINDING_REASON="$PRE_CAPTURE_REASON"
+    elif [[ "$POST_CAPTURE_OK" != "ok" && -n "$POST_CAPTURE_REASON" ]]; then
+      BINDING_REASON="$POST_CAPTURE_REASON"
+    else
+      BINDING_REASON="binding capture failed"
+    fi
+    return 0
+  fi
+  if [[ "$PRE_HEAD" != "$POST_HEAD" || "$PRE_TREE" != "$POST_TREE" ]]; then
+    BINDING="changed"
+    return 0
+  fi
+  local head_tree=""
+  if ! head_tree="$(git rev-parse 'HEAD^{tree}' 2>/dev/null)"; then
+    BINDING="unavailable"
+    BINDING_REASON="git rev-parse HEAD^{tree} failed"
+    return 0
+  fi
+  if [[ "$POST_TREE" == "$head_tree" ]]; then
+    BINDING="clean"
+  else
+    BINDING="dirty"
+  fi
+}
+
+journal_helper_ok() {
+  [[ -n "${JOURNAL_HELPER:-}" && -f "$JOURNAL_HELPER" && -x "$JOURNAL_HELPER" ]]
+}
+
+journal_gate_result() { # $1=suite exit
+  journal_helper_ok || return 0
+  local suite_exit="$1" workspace=""
+  workspace="$(pwd -P 2>/dev/null || pwd)"
+  local -a args
+  args=(append --workspace "$workspace" --event gate.result
+    --field "policy=$GATE_POLICY" --field "purpose=$PURPOSE"
+    --field "binding=$BINDING" --field "totals=exit=${suite_exit}")
+  if [[ "$PRE_CAPTURE_OK" == "ok" ]]; then
+    args+=(--field "pre_head=$PRE_HEAD" --field "pre_tree=$PRE_TREE")
+  fi
+  if [[ "$POST_CAPTURE_OK" == "ok" ]]; then
+    args+=(--field "post_head=$POST_HEAD" --field "post_tree=$POST_TREE")
+  fi
+  if [[ "$BINDING" == "unavailable" && -n "${BINDING_REASON:-}" ]]; then
+    args+=(--field "reason=$BINDING_REASON")
+  fi
+  if ! "$JOURNAL_HELPER" "${args[@]}"; then
+    echo "warning: loop-journal gate.result failed" >&2
+  fi
+  return 0
+}
+
+emit_result() { # $1=exit code $2=RESULT line
+  local code="$1" line="$2"
+  classify_binding
+  printf 'binding: %s\n' "$BINDING"
+  if [[ "$BINDING" == "unavailable" && -n "${BINDING_REASON:-}" ]]; then
+    printf 'binding reason: %s\n' "$BINDING_REASON"
+  fi
+  printf '%s\n' "$line"
+  journal_gate_result "$STATUS"
+  exit "$code"
+}
 
 # pytest emits its formal summary either fenced (`=== 1 failed in 0.1s ===`)
 # or, under -q, as a bare bottom line (`1 failed in 0.1s`). pytest_summary
@@ -345,8 +496,20 @@ START=$SECONDS
 # Output goes to the held descriptor, never through a pipe or a fresh
 # path-based open, so $? is the suite's own and the destination cannot be
 # swapped mid-run.
+PRE_CAPTURE_OK="fail"
+PRE_HEAD=""
+PRE_TREE=""
+PRE_CAPTURE_REASON="binding capture failed"
+POST_CAPTURE_OK="fail"
+POST_HEAD=""
+POST_TREE=""
+POST_CAPTURE_REASON="binding capture failed"
+PRE_CAPTURE="$(capture_binding)"
+IFS='|' read -r PRE_CAPTURE_OK PRE_HEAD PRE_TREE PRE_CAPTURE_REASON <<< "$PRE_CAPTURE"
 "$@" >&9 2>&1
 STATUS=$?
+POST_CAPTURE="$(capture_binding)"
+IFS='|' read -r POST_CAPTURE_OK POST_HEAD POST_TREE POST_CAPTURE_REASON <<< "$POST_CAPTURE"
 ELAPSED=$((SECONDS - START))
 
 echo "=== gate finished in ${ELAPSED}s with exit code ${STATUS} ==="
@@ -356,15 +519,13 @@ echo "=== gate finished in ${ELAPSED}s with exit code ${STATUS} ==="
 # log path swapped mid-run — even for green-looking content — is caught
 # here, and parsing reads through the verified descriptor.
 if ! { exec 8< "$LOG"; } 2>/dev/null || ! [[ /dev/fd/8 -ef /dev/fd/9 ]]; then
-  echo "RESULT: gate RED — log file was replaced during the run; refusing to judge it"
-  exit 1
+  emit_result 1 "RESULT: gate RED — log file was replaced during the run; refusing to judge it"
 fi
 
 # An unparsed log must never be judged: an empty parse view would hide a
 # failed summary behind a masked exit code, so normalization failure is red.
 if ! strip_ansi /dev/fd/8 "$PARSE_LOG"; then
-  echo "RESULT: gate RED — log normalization failed; refusing to judge unparsed output"
-  exit 1
+  emit_result 1 "RESULT: gate RED — log normalization failed; refusing to judge unparsed output"
 fi
 
 # Surface the shapes most runners use for their summary line.
@@ -403,8 +564,7 @@ fi
 
 # A runner summary and its exit status must agree in every mode.
 if [[ $STATUS -eq 0 && $FAILED_SUMMARY -eq 1 ]]; then
-  echo "RESULT: gate RED — runner summary reports failures but exit code is 0"
-  exit 1
+  emit_result 1 "RESULT: gate RED — runner summary reports failures but exit code is 0"
 fi
 
 # --strict: zero tolerance on a recognized runner. Everything baseline mode
@@ -412,83 +572,68 @@ fi
 # at all, even when the final summary is clean.
 if [[ $STRICT -eq 1 ]]; then
   if [[ $STATUS -ne 0 ]]; then
-    echo "RESULT: gate RED — do not publish until resolved or explained"
-    exit "$STATUS"
+    emit_result "$STATUS" "RESULT: gate RED — do not publish until resolved or explained"
   fi
   if ! supported_runner_summary "$PARSE_LOG"; then
-    echo "RESULT: gate RED — strict needs a recognized unittest/pytest verdict; use pass-through for other runners"
-    exit 1
+    emit_result 1 "RESULT: gate RED — strict needs a recognized unittest/pytest verdict; use pass-through for other runners"
   fi
   if zero_tests_reported "$PARSE_LOG" || ! tests_ran "$PARSE_LOG"; then
-    echo "RESULT: gate RED — no executed tests — skipped-only or zero-test run"
-    exit 1
+    emit_result 1 "RESULT: gate RED — no executed tests — skipped-only or zero-test run"
   fi
   if [[ $FAILURES -gt 0 ]]; then
-    echo "RESULT: gate RED — failure lines present despite exit 0"
-    exit 1
+    emit_result 1 "RESULT: gate RED — failure lines present despite exit 0"
   fi
-  echo "RESULT: gate green"
-  exit 0
+  emit_result 0 "RESULT: gate green"
 fi
 
 # With no policy flag, retain the suite's pass-through status.
 if [[ -z "$BASELINE" ]]; then
   if [[ $STATUS -eq 0 ]]; then
-    echo "RESULT: gate green (pass-through: exit code only)"
+    emit_result "$STATUS" "RESULT: gate green (pass-through: exit code only)"
   else
-    echo "RESULT: gate RED — do not publish until resolved or explained"
+    emit_result "$STATUS" "RESULT: gate RED — do not publish until resolved or explained"
   fi
-  exit "$STATUS"
 fi
 
 # Baseline mode additionally distrusts any parsed failure line paired with a
 # successful process status, even when the runner emitted no failed summary.
 if [[ $STATUS -eq 0 && $FAILURES -gt 0 ]]; then
-  echo "RESULT: gate RED — exit 0 but failure lines present (is the runner masking its exit code?)"
-  exit 1
+  emit_result 1 "RESULT: gate RED — exit 0 but failure lines present (is the runner masking its exit code?)"
 fi
 
 # A nonzero run with no recognizable failures is never baseline-clean. Check
 # this before the explicit zero-test case so pytest's exit-5/no-tests result
 # also gets the more diagnostic crash/collection-error message.
 if [[ $STATUS -ne 0 && $FAILURES -eq 0 ]]; then
-  echo "RESULT: gate RED — nonzero exit with no parseable failures (crash/collection error?)"
-  exit "$STATUS"
+  emit_result "$STATUS" "RESULT: gate RED — nonzero exit with no parseable failures (crash/collection error?)"
 fi
 
 if [[ $STATUS -eq 0 ]]; then
   if ! supported_runner_summary "$PARSE_LOG"; then
-    echo "RESULT: gate RED — unrecognized runner output; --baseline supports unittest/pytest only"
-    exit 1
+    emit_result 1 "RESULT: gate RED — unrecognized runner output; --baseline supports unittest/pytest only"
   fi
   if zero_tests_reported "$PARSE_LOG" || ! tests_ran "$PARSE_LOG"; then
-    echo "RESULT: gate RED — no executed tests — skipped-only or unrecognized runner output"
-    exit 1
+    emit_result 1 "RESULT: gate RED — no executed tests — skipped-only or unrecognized runner output"
   fi
-  echo "RESULT: gate green"
-  exit 0
+  emit_result 0 "RESULT: gate green"
 fi
 
 # Keep the explicit diagnostic for nonzero zero-test runs. A zero-exit run was
 # already checked above with the stricter executed-test requirement.
 if zero_tests_reported "$PARSE_LOG"; then
-  echo "RESULT: gate RED — no tests ran"
-  exit 1
+  emit_result 1 "RESULT: gate RED — no tests ran"
 fi
 
 if ! tests_ran "$PARSE_LOG"; then
-  echo "RESULT: gate RED — failures parsed but no completed tests were reported"
+  emit_result "$STATUS" "RESULT: gate RED — failures parsed but no completed tests were reported"
 elif [[ $BASELINE_EXISTS_AT_START -eq 0 || -n "$NEW_FAILURES" ]]; then
-  echo "RESULT: gate RED — do not publish until resolved or explained"
+  emit_result "$STATUS" "RESULT: gate RED — do not publish until resolved or explained"
 elif [[ $STATUS -ne 1 ]]; then
   # Only the runner's own "tests failed" status (1 for pytest and unittest)
   # may be offset by a baseline. Signals (137), not-executable (126/127),
   # and pytest's interrupt/usage/no-tests codes (2-5) mean the run itself
   # broke — a matching failure list proves nothing about it.
-  echo "RESULT: gate RED — abnormal runner exit ($STATUS); signals, crashes, and interrupts never baseline away"
+  emit_result "$STATUS" "RESULT: gate RED — abnormal runner exit ($STATUS); signals, crashes, and interrupts never baseline away"
 else
-  echo "RESULT: gate green (failures match baseline — no new failures)"
-  exit 0
+  emit_result 0 "RESULT: gate green (failures match baseline — no new failures)"
 fi
-
-exit "$STATUS"

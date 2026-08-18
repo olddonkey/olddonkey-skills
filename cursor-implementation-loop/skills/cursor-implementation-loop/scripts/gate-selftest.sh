@@ -15,6 +15,23 @@ else
 fi
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/codex-loop-selftest.XXXXXX")" || exit 1
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+export HOME="$TMP_ROOT/home"
+mkdir -p "$HOME"
+
+if [[ -x "$SCRIPT_DIR/../../engineering-mode/scripts/tree-oid.sh" ]]; then
+  TREE_OID="$SCRIPT_DIR/../../engineering-mode/scripts/tree-oid.sh"
+elif [[ -x "$SCRIPT_DIR/../../cursor-engineering-mode/scripts/tree-oid.sh" ]]; then
+  TREE_OID="$SCRIPT_DIR/../../cursor-engineering-mode/scripts/tree-oid.sh"
+else
+  TREE_OID=""
+fi
+if [[ -x "$SCRIPT_DIR/../scripts/loop-journal" ]]; then
+  JOURNAL="$SCRIPT_DIR/../scripts/loop-journal"
+elif [[ -x "$SCRIPT_DIR/../../../../skills/implementation-loop/scripts/loop-journal" ]]; then
+  JOURNAL="$SCRIPT_DIR/../../../../skills/implementation-loop/scripts/loop-journal"
+else
+  JOURNAL=""
+fi
 
 CHECKS=0
 FAILED_CHECKS=0
@@ -130,6 +147,58 @@ write_lines() { # $1=path, remaining args=lines
   local path="$1"
   shift
   printf '%s\n' "$@" > "$path"
+}
+
+init_git_repo() { # $1=dir
+  mkdir -p "$1"
+  rm -rf "$1.gitadmin"
+  git init -q --template= --separate-git-dir="$1.gitadmin" "$1"
+  git -C "$1" config user.email gate-selftest@example.invalid
+  git -C "$1" config user.name gate-selftest
+  printf 'base\n' > "$1/file.txt"
+  git -C "$1" add file.txt
+  git -C "$1" commit -qm base
+}
+
+journal_store() { # $1=workspace
+  python3 - "$HOME" "$1" <<'PY'
+import hashlib, os, sys
+home, workspace = sys.argv[1], sys.argv[2]
+key = hashlib.sha256(os.path.realpath(workspace).encode("utf-8")).hexdigest()
+print(os.path.join(home, ".config", "olddonkey-loop", "journal", key))
+PY
+}
+
+expect_gate_result() { # $1=workspace $2=policy $3=purpose $4=binding $5=description
+  local store
+  store="$(journal_store "$1")"
+  if python3 - "$store" "$2" "$3" "$4" <<'PY'
+import json, os, sys
+
+store, policy, purpose, binding = sys.argv[1:]
+events = []
+runs = os.path.join(store, "runs")
+if os.path.isdir(runs):
+    for name in sorted(os.listdir(runs)):
+        if name.endswith(".jsonl"):
+            for line in open(os.path.join(runs, name), encoding="utf-8"):
+                line = line.strip()
+                if line:
+                    events.append(json.loads(line))
+results = [event for event in events if event.get("event") == "gate.result"]
+if not results:
+    raise SystemExit(1)
+event = results[-1]
+if event.get("policy") != policy or event.get("purpose") != purpose:
+    raise SystemExit(1)
+if event.get("binding") != binding:
+    raise SystemExit(1)
+PY
+  then
+    pass "$5"
+  else
+    fail "$5"
+  fi
 }
 
 # Without a baseline, run-gate keeps the suite's pass-through behavior.
@@ -666,6 +735,182 @@ run_case gate-baseline-empty bash "$GATE" \
 expect_nonzero "baseline gate rejects exit-zero empty output"
 expect_output "RESULT: gate RED — unrecognized runner output; --baseline supports unittest/pytest only" \
   "gate fails closed on an unrecognized baseline runner"
+
+run_case purpose-default bash "$GATE" \
+  --log "$TMP_ROOT/purpose-default.log" -- \
+  bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+expect_status 0 "default --purpose is accepted"
+expect_output "purpose: unspecified" "default purpose is unspecified"
+
+run_case purpose-unit-final bash "$GATE" --purpose unit-final \
+  --log "$TMP_ROOT/purpose-unit-final.log" -- \
+  bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+expect_status 0 "--purpose unit-final is accepted"
+expect_output "purpose: unit-final" "unit-final purpose is printed in the banner"
+
+run_case purpose-baseline-generation bash "$GATE" --purpose baseline-generation \
+  --log "$TMP_ROOT/purpose-baseline-generation.log" -- \
+  bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+expect_status 0 "--purpose baseline-generation is accepted"
+expect_output "purpose: baseline-generation" "baseline-generation purpose is printed in the banner"
+
+run_case purpose-focused bash "$GATE" --purpose focused \
+  --log "$TMP_ROOT/purpose-focused.log" -- \
+  bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+expect_status 0 "--purpose focused is accepted"
+expect_output "purpose: focused" "focused purpose is printed in the banner"
+
+run_case purpose-unspecified bash "$GATE" --purpose unspecified \
+  --log "$TMP_ROOT/purpose-unspecified.log" -- \
+  bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+expect_status 0 "--purpose unspecified is accepted"
+expect_output "purpose: unspecified" "explicit unspecified purpose is printed in the banner"
+
+run_case purpose-invalid bash "$GATE" --purpose nope \
+  --log "$TMP_ROOT/purpose-invalid.log" -- bash -c ':'
+expect_status 2 "invalid --purpose is a usage error"
+expect_output "--purpose must be" "invalid --purpose explains the enum"
+
+BIND_CLEAN="$TMP_ROOT/bind-clean"
+init_git_repo "$BIND_CLEAN"
+run_case_in_dir bind-clean "$BIND_CLEAN" env LOOP_TREE_OID="$TREE_OID" bash "$GATE" \
+  --log "$TMP_ROOT/bind-clean.log" -- \
+  bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+expect_status 0 "clean binding keeps a green pass-through verdict"
+expect_output "binding: clean" "committed unchanged tree is binding=clean"
+
+BIND_DIRTY="$TMP_ROOT/bind-dirty"
+init_git_repo "$BIND_DIRTY"
+printf 'dirty\n' > "$BIND_DIRTY/file.txt"
+run_case_in_dir bind-dirty "$BIND_DIRTY" env LOOP_TREE_OID="$TREE_OID" bash "$GATE" \
+  --log "$TMP_ROOT/bind-dirty.log" -- \
+  bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+expect_status 0 "dirty binding does not change the verdict"
+expect_output "binding: dirty" "uncommitted tracked change is binding=dirty"
+
+BIND_CHANGED="$TMP_ROOT/bind-changed"
+init_git_repo "$BIND_CHANGED"
+run_case_in_dir bind-changed "$BIND_CHANGED" env LOOP_TREE_OID="$TREE_OID" bash "$GATE" \
+  --log "$TMP_ROOT/bind-changed.log" -- \
+  bash -c 'printf '\''changed\n'\'' > file.txt; printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+expect_status 0 "changed binding does not change the verdict"
+expect_output "binding: changed" "a suite that mutates the tree is binding=changed"
+
+BIND_NONGIT="$TMP_ROOT/bind-nongit"
+mkdir -p "$BIND_NONGIT"
+run_case_in_dir bind-nongit "$BIND_NONGIT" env LOOP_TREE_OID="$TREE_OID" bash "$GATE" \
+  --log "$TMP_ROOT/bind-nongit.log" -- \
+  bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+expect_status 0 "unavailable binding does not change the verdict"
+expect_output "binding: unavailable" "a non-git cwd is binding=unavailable"
+expect_output "binding reason:" "unavailable binding records a reason"
+
+TREE_OID_STUB="$TMP_ROOT/tree-oid-exit3"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "tree-oid: binding unavailable" >&2' 'exit 3' \
+  > "$TREE_OID_STUB"
+chmod 755 "$TREE_OID_STUB"
+BIND_TREE3="$TMP_ROOT/bind-tree3"
+init_git_repo "$BIND_TREE3"
+run_case_in_dir bind-tree3 "$BIND_TREE3" env LOOP_TREE_OID="$TREE_OID_STUB" bash "$GATE" \
+  --log "$TMP_ROOT/bind-tree3.log" -- \
+  bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+expect_status 0 "tree-oid exit 3 does not change the verdict"
+expect_output "binding: unavailable" "tree-oid exit 3 is binding=unavailable"
+expect_output "binding reason: tree-oid: binding unavailable" \
+  "tree-oid exit 3 records the designed unavailable reason"
+
+if [[ -n "$JOURNAL" ]]; then
+  JOURNAL_WS="$TMP_ROOT/journal-ws"
+  init_git_repo "$JOURNAL_WS"
+  env HOME="$HOME" "$JOURNAL" begin-run --workspace "$JOURNAL_WS" \
+    > "$TMP_ROOT/journal-ws.begin-run"
+
+  run_case_in_dir journal-strict-green "$JOURNAL_WS" \
+    env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
+    bash "$GATE" --strict --purpose unit-final \
+    --log "$TMP_ROOT/journal-strict-green.log" -- \
+    bash -c 'printf '\''Ran 2 tests in 0.001s\nOK\n'\'''
+  expect_status 0 "strict green journal case stays green"
+  expect_output "RESULT: gate green" "strict green RESULT line is unchanged"
+  expect_gate_result "$JOURNAL_WS" strict unit-final clean \
+    "strict green emits gate.result policy=strict purpose=unit-final binding=clean"
+
+  run_case_in_dir journal-strict-red "$JOURNAL_WS" \
+    env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
+    bash "$GATE" --strict --purpose focused \
+    --log "$TMP_ROOT/journal-strict-red.log" -- \
+    bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
+  expect_status 1 "strict red journal case stays red"
+  expect_output "RESULT: gate RED — do not publish until resolved or explained" \
+    "strict red RESULT line is unchanged"
+  expect_gate_result "$JOURNAL_WS" strict focused clean \
+    "strict red emits gate.result policy=strict purpose=focused binding=clean"
+
+  run_case_in_dir journal-baseline-green "$JOURNAL_WS" \
+    env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
+    bash "$GATE" --baseline "$EMPTY_BASELINE" --purpose baseline-generation \
+    --log "$TMP_ROOT/journal-baseline-green.log" -- \
+    bash -c 'printf '\''=========================== 2 passed in 0.10s ===========================\n'\'''
+  expect_status 0 "baseline green journal case stays green"
+  expect_output "RESULT: gate green" "baseline green RESULT line is unchanged"
+  expect_gate_result "$JOURNAL_WS" baseline baseline-generation clean \
+    "baseline green emits gate.result policy=baseline purpose=baseline-generation binding=clean"
+
+  run_case_in_dir journal-plain-green "$JOURNAL_WS" \
+    env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
+    bash "$GATE" --purpose unspecified \
+    --log "$TMP_ROOT/journal-plain-green.log" -- \
+    bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+  expect_status 0 "pass-through green journal case stays green"
+  expect_output "RESULT: gate green (pass-through: exit code only)" \
+    "pass-through green RESULT line is unchanged"
+  expect_gate_result "$JOURNAL_WS" passthrough unspecified clean \
+    "pass-through green emits gate.result policy=passthrough binding=clean"
+
+  run_case_in_dir journal-plain-red "$JOURNAL_WS" \
+    env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
+    bash "$GATE" --purpose unspecified \
+    --log "$TMP_ROOT/journal-plain-red.log" -- \
+    bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
+  expect_status 1 "pass-through red journal case stays red"
+  expect_output "RESULT: gate RED — do not publish until resolved or explained" \
+    "pass-through red RESULT line is unchanged"
+  expect_gate_result "$JOURNAL_WS" passthrough unspecified clean \
+    "pass-through red emits gate.result policy=passthrough binding=clean"
+
+  FAIL_JOURNAL="$TMP_ROOT/fail-journal"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo journal-stub-failed >&2' 'exit 6' \
+    > "$FAIL_JOURNAL"
+  chmod 755 "$FAIL_JOURNAL"
+  run_case_in_dir journal-failing-helper "$JOURNAL_WS" \
+    env HOME="$HOME" LOOP_JOURNAL="$FAIL_JOURNAL" LOOP_TREE_OID="$TREE_OID" \
+    bash "$GATE" --strict \
+    --log "$TMP_ROOT/journal-failing-helper.log" -- \
+    bash -c 'printf '\''Ran 2 tests in 0.001s\nOK\n'\'''
+  expect_status 0 "a failing journal helper does not change a green verdict"
+  expect_output "RESULT: gate green" "failing helper keeps the RESULT line"
+  expect_output "warning: loop-journal gate.result failed" \
+    "a failing journal helper prints one warning"
+else
+  skip_checks \
+    "strict green emits gate.result policy=strict purpose=unit-final binding=clean" \
+    "strict red emits gate.result policy=strict purpose=focused binding=clean" \
+    "baseline green emits gate.result policy=baseline purpose=baseline-generation binding=clean" \
+    "pass-through green emits gate.result policy=passthrough binding=clean" \
+    "pass-through red emits gate.result policy=passthrough binding=clean" \
+    "a failing journal helper prints one warning"
+fi
+
+SCRATCH_GATE_DIR="$TMP_ROOT/scratch-gate"
+mkdir -p "$SCRATCH_GATE_DIR"
+cp "$GATE" "$SCRATCH_GATE_DIR/run-gate.sh"
+chmod 755 "$SCRATCH_GATE_DIR/run-gate.sh"
+run_case helper-missing env -u LOOP_JOURNAL bash "$SCRATCH_GATE_DIR/run-gate.sh" \
+  --strict --log "$TMP_ROOT/helper-missing.log" -- \
+  bash -c 'printf '\''Ran 2 tests in 0.001s\nOK\n'\'''
+expect_status 0 "helper-missing copy behaves like today"
+expect_output "RESULT: gate green" "helper-missing copy keeps the green RESULT line"
+expect_no_output "warning: loop-journal" "helper-missing copy is a silent journal no-op"
 
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' "$FAILED_CHECKS" "$CHECKS" >&2

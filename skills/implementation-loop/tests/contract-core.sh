@@ -136,7 +136,7 @@ if [[ -n "$SELECTED_BACKEND" ]] && ! LC_ALL=C awk -F '\t' -v name="$SELECTED_BAC
   exit 2
 fi
 
-VALID_RULES="help,prompt-file,prompt-inline,prompt-precedence,prompt-required,dash-prompt,missing-values,repeated-flags,unknown-flags,readonly-alias,background,exit-status,signal-status,env-namespace,summary-fields"
+VALID_RULES="help,prompt-file,prompt-inline,prompt-precedence,prompt-required,dash-prompt,missing-values,repeated-flags,unknown-flags,readonly-alias,background,exit-status,signal-status,env-namespace,summary-fields,journal-missing,journal-start-refusal,journal-events,journal-unattributed,journal-readonly-mode"
 if [[ -n "$ONLY_RULES" ]]; then
   OLD_IFS="$IFS"
   IFS=,
@@ -215,6 +215,134 @@ expect_observed_not() { # $1=case $2=field $3=forbidden $4=description
   local actual=""
   [[ ! -f "$path" ]] || actual="$(cat "$path")"
   if [[ -f "$path" && "$actual" != "$3" ]]; then pass "$4"; else fail "$4 (observed forbidden '$actual')"; fi
+}
+
+expect_missing_path() { # $1=path $2=description
+  if [[ -e "$1" ]]; then fail "$2 (unexpected path: $1)"; else pass "$2"; fi
+}
+
+case_home() { # $1=case
+  cat "$TMP_ROOT/$BACKEND/$1.home"
+}
+
+case_workspace() { # $1=case
+  cat "$TMP_ROOT/$BACKEND/$1.workspace"
+}
+
+journal_store() { # $1=home $2=workspace
+  python3 - "$1" "$2" <<'PY'
+import hashlib, os, sys
+home, workspace = sys.argv[1], sys.argv[2]
+key = hashlib.sha256(os.path.realpath(workspace).encode("utf-8")).hexdigest()
+print(os.path.join(home, ".config", "olddonkey-loop", "journal", key))
+PY
+}
+
+expect_dispatch_pair() { # $1=case $2=backend $3=mode $4=end_exit $5=description
+  local case_name="$1" backend_name="$2" mode="$3" end_exit="$4" description="$5"
+  local home workspace store
+  home="$(case_home "$case_name")"
+  workspace="$(case_workspace "$case_name")"
+  store="$(journal_store "$home" "$workspace")"
+  if python3 - "$store" "$backend_name" "$mode" "$end_exit" <<'PY'
+import json, os, sys
+
+store, backend, mode, end_exit = sys.argv[1:]
+end_exit = int(end_exit)
+runs = os.path.join(store, "runs")
+events = []
+if os.path.isdir(runs):
+    for name in sorted(os.listdir(runs)):
+        if name.endswith(".jsonl"):
+            for line in open(os.path.join(runs, name), encoding="utf-8"):
+                line = line.strip()
+                if line:
+                    events.append(json.loads(line))
+starts = [event for event in events if event.get("event") == "dispatch.start"]
+ends = [event for event in events if event.get("event") == "dispatch.end"]
+if len(starts) != 1 or len(ends) != 1:
+    raise SystemExit(1)
+start, end = starts[0], ends[0]
+if start.get("backend") != backend or start.get("mode") != mode:
+    raise SystemExit(1)
+if start.get("dispatch_id") != end.get("dispatch_id"):
+    raise SystemExit(1)
+if end.get("exit") != end_exit:
+    raise SystemExit(1)
+if not start.get("dispatch_id"):
+    raise SystemExit(1)
+PY
+  then
+    pass "$description"
+  else
+    fail "$description"
+  fi
+}
+
+expect_unattributed() { # $1=case $2=reason $3=description
+  local case_name="$1" reason="$2" description="$3"
+  local home workspace store
+  home="$(case_home "$case_name")"
+  workspace="$(case_workspace "$case_name")"
+  store="$(journal_store "$home" "$workspace")"
+  if python3 - "$store" "$reason" <<'PY'
+import json, os, sys
+
+store, reason = sys.argv[1:]
+path = os.path.join(store, "unattributed.jsonl")
+if not os.path.isfile(path):
+    raise SystemExit(1)
+events = []
+for line in open(path, encoding="utf-8"):
+    line = line.strip()
+    if line:
+        events.append(json.loads(line))
+starts = [event for event in events if event.get("event") == "dispatch.start"]
+if not starts:
+    raise SystemExit(1)
+if any(event.get("attribution_failure") != reason for event in starts):
+    raise SystemExit(1)
+PY
+  then
+    pass "$description"
+  else
+    fail "$description"
+  fi
+}
+
+expect_signal_journal() { # $1=case $2=description
+  local case_name="$1" description="$2"
+  local home workspace store
+  home="$(case_home "$case_name")"
+  workspace="$(case_workspace "$case_name")"
+  store="$(journal_store "$home" "$workspace")"
+  if python3 - "$store" <<'PY'
+import json, os, sys
+
+store = sys.argv[1]
+runs = os.path.join(store, "runs")
+events = []
+if os.path.isdir(runs):
+    for name in sorted(os.listdir(runs)):
+        if name.endswith(".jsonl"):
+            for line in open(os.path.join(runs, name), encoding="utf-8"):
+                line = line.strip()
+                if line:
+                    events.append(json.loads(line))
+starts = [event for event in events if event.get("event") == "dispatch.start"]
+ends = [event for event in events if event.get("event") == "dispatch.end"]
+if len(starts) != 1:
+    raise SystemExit(1)
+if ends and ends[0].get("exit") != 143:
+    raise SystemExit(1)
+if ends and ends[0].get("dispatch_id") != starts[0].get("dispatch_id"):
+    raise SystemExit(1)
+PY
+  then
+    pass "$description"
+  else
+    fail "$description"
+  fi
 }
 
 run_backend() {
@@ -327,6 +455,8 @@ run_backend() {
     CURRENT_RULE="signal-status"
     run_case signal-status --prompt signal
     expect_status 143 "signal termination propagates as 128+signal"
+    expect_signal_journal signal-status \
+      "TERM'd dispatch leaves dispatch.start and, where the trap runs, dispatch.end exit=143"
   fi
 
   if rule_enabled env-namespace; then
@@ -360,6 +490,69 @@ run_backend() {
       expect_pattern '^sandbox \(requested\): .+' "Codex summary contains requested sandbox"
       expect_pattern '^sandbox \(CLI reported\): .+' "Codex summary contains CLI-reported sandbox"
     fi
+  fi
+
+  if rule_enabled journal-missing; then
+    CURRENT_RULE="journal-missing"
+    run_case journal-missing --prompt journal
+    expect_status 0 "missing journal helper does not change a successful dispatch"
+    local missing_home
+    missing_home="$(case_home journal-missing)"
+    expect_missing_path "$missing_home/.config/olddonkey-loop/journal" \
+      "missing helper creates no journal store"
+  fi
+
+  if rule_enabled journal-start-refusal; then
+    CURRENT_RULE="journal-start-refusal"
+    run_case journal-start-refusal --prompt journal
+    expect_nonzero "a failing dispatch.start append refuses the dispatch"
+    expect_contains "loop-journal dispatch.start failed" "start-refusal names the journal failure"
+    expect_missing_path "$TMP_ROOT/$BACKEND/journal-start-refusal.observed-prompt" \
+      "start-refusal never launches the fixture child"
+  fi
+
+  if rule_enabled journal-events; then
+    CURRENT_RULE="journal-events"
+    run_case journal-events --prompt journal
+    expect_status 0 "attributed journal dispatch succeeds"
+    expect_dispatch_pair journal-events "$BACKEND" implement 0 \
+      "run segment records matching dispatch.start then dispatch.end exit=0"
+  fi
+
+  if rule_enabled journal-unattributed; then
+    CURRENT_RULE="journal-unattributed"
+    run_case journal-unattributed --prompt journal
+    expect_status 0 "missing context does not change dispatch exit"
+    expect_unattributed journal-unattributed "context missing" \
+      "unattributed events record attribution_failure=context missing"
+    if [[ "$BACKEND" == "cursor" ]]; then
+      run_case journal-stale --prompt journal
+      expect_status 0 "stale context does not change dispatch exit"
+      expect_unattributed journal-stale "context stale" \
+        "stale context records attribution_failure=context stale"
+      run_case journal-malformed --prompt journal
+      expect_status 0 "malformed context does not change dispatch exit"
+      expect_unattributed journal-malformed "context malformed" \
+        "malformed context records attribution_failure=context malformed"
+      run_case journal-wrong-workspace --prompt journal
+      expect_status 0 "wrong-workspace context does not change dispatch exit"
+      expect_unattributed journal-wrong-workspace "wrong-workspace" \
+        "wrong-workspace context records attribution_failure=wrong-workspace"
+    fi
+    if [[ "$BACKEND" == "grok" ]]; then
+      run_case journal-post-disarm-abort --prompt journal
+      expect_status 86 "post-disarm journal abort still exits 86"
+      expect_dispatch_pair journal-post-disarm-abort grok implement 86 \
+        "post-disarm abort records dispatch.end exit=86"
+    fi
+  fi
+
+  if rule_enabled journal-readonly-mode; then
+    CURRENT_RULE="journal-readonly-mode"
+    run_case journal-readonly-mode --prompt journal --read-only
+    expect_status 0 "read-only journal dispatch succeeds"
+    expect_dispatch_pair journal-readonly-mode "$BACKEND" read-only 0 \
+      "read-only dispatch.start records mode=read-only"
   fi
 }
 
