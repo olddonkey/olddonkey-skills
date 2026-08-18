@@ -118,11 +118,13 @@ expect_missing_file() { # $1=file $2=description
   fi
 }
 
-skip_checks() { # $@=descriptions; marked skipped so counts stay stable
+skip_checks() { # $1=reason, remaining=descriptions; marked skipped so counts stay stable
+  local reason="$1"
+  shift
   local description
   for description in "$@"; do
     CHECKS=$((CHECKS + 1))
-    printf 'ok %d - %s # SKIP no tomllib python3 available\n' "$CHECKS" "$description"
+    printf 'ok %d - %s # SKIP %s\n' "$CHECKS" "$description" "$reason"
   done
 }
 
@@ -771,30 +773,40 @@ run_case purpose-invalid bash "$GATE" --purpose nope \
 expect_status 2 "invalid --purpose is a usage error"
 expect_output "--purpose must be" "invalid --purpose explains the enum"
 
-BIND_CLEAN="$TMP_ROOT/bind-clean"
-init_git_repo "$BIND_CLEAN"
-run_case_in_dir bind-clean "$BIND_CLEAN" env LOOP_TREE_OID="$TREE_OID" bash "$GATE" \
-  --log "$TMP_ROOT/bind-clean.log" -- \
-  bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
-expect_status 0 "clean binding keeps a green pass-through verdict"
-expect_output "binding: clean" "committed unchanged tree is binding=clean"
+if [[ -n "$TREE_OID" ]]; then
+  BIND_CLEAN="$TMP_ROOT/bind-clean"
+  init_git_repo "$BIND_CLEAN"
+  run_case_in_dir bind-clean "$BIND_CLEAN" env LOOP_TREE_OID="$TREE_OID" bash "$GATE" \
+    --log "$TMP_ROOT/bind-clean.log" -- \
+    bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+  expect_status 0 "clean binding keeps a green pass-through verdict"
+  expect_output "binding: clean" "committed unchanged tree is binding=clean"
 
-BIND_DIRTY="$TMP_ROOT/bind-dirty"
-init_git_repo "$BIND_DIRTY"
-printf 'dirty\n' > "$BIND_DIRTY/file.txt"
-run_case_in_dir bind-dirty "$BIND_DIRTY" env LOOP_TREE_OID="$TREE_OID" bash "$GATE" \
-  --log "$TMP_ROOT/bind-dirty.log" -- \
-  bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
-expect_status 0 "dirty binding does not change the verdict"
-expect_output "binding: dirty" "uncommitted tracked change is binding=dirty"
+  BIND_DIRTY="$TMP_ROOT/bind-dirty"
+  init_git_repo "$BIND_DIRTY"
+  printf 'dirty\n' > "$BIND_DIRTY/file.txt"
+  run_case_in_dir bind-dirty "$BIND_DIRTY" env LOOP_TREE_OID="$TREE_OID" bash "$GATE" \
+    --log "$TMP_ROOT/bind-dirty.log" -- \
+    bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+  expect_status 0 "dirty binding does not change the verdict"
+  expect_output "binding: dirty" "uncommitted tracked change is binding=dirty"
 
-BIND_CHANGED="$TMP_ROOT/bind-changed"
-init_git_repo "$BIND_CHANGED"
-run_case_in_dir bind-changed "$BIND_CHANGED" env LOOP_TREE_OID="$TREE_OID" bash "$GATE" \
-  --log "$TMP_ROOT/bind-changed.log" -- \
-  bash -c 'printf '\''changed\n'\'' > file.txt; printf '\''Ran 1 test in 0.001s\nOK\n'\'''
-expect_status 0 "changed binding does not change the verdict"
-expect_output "binding: changed" "a suite that mutates the tree is binding=changed"
+  BIND_CHANGED="$TMP_ROOT/bind-changed"
+  init_git_repo "$BIND_CHANGED"
+  run_case_in_dir bind-changed "$BIND_CHANGED" env LOOP_TREE_OID="$TREE_OID" bash "$GATE" \
+    --log "$TMP_ROOT/bind-changed.log" -- \
+    bash -c 'printf '\''changed\n'\'' > file.txt; printf '\''Ran 1 test in 0.001s\nOK\n'\'''
+  expect_status 0 "changed binding does not change the verdict"
+  expect_output "binding: changed" "a suite that mutates the tree is binding=changed"
+else
+  skip_checks "no tree-oid helper available" \
+    "clean binding keeps a green pass-through verdict" \
+    "committed unchanged tree is binding=clean" \
+    "dirty binding does not change the verdict" \
+    "uncommitted tracked change is binding=dirty" \
+    "changed binding does not change the verdict" \
+    "a suite that mutates the tree is binding=changed"
+fi
 
 BIND_NONGIT="$TMP_ROOT/bind-nongit"
 mkdir -p "$BIND_NONGIT"
@@ -892,7 +904,7 @@ if [[ -n "$JOURNAL" ]]; then
   expect_output "warning: loop-journal gate.result failed" \
     "a failing journal helper prints one warning"
 else
-  skip_checks \
+  skip_checks "no tomllib python3 available" \
     "strict green emits gate.result policy=strict purpose=unit-final binding=clean" \
     "strict red emits gate.result policy=strict purpose=focused binding=clean" \
     "baseline green emits gate.result policy=baseline purpose=baseline-generation binding=clean" \
