@@ -35,14 +35,120 @@
   }
 
   function txt(node, value) {
-    node.textContent = value == null ? "" : String(value);
+    var next = value == null ? "" : String(value);
+    var child = node.firstChild;
+    if (child && child.nodeType === 3 && !child.nextSibling) {
+      if (child.nodeValue !== next) {
+        child.nodeValue = next;
+      }
+      return node;
+    }
+    if (node.textContent !== next) {
+      node.textContent = next;
+    }
     return node;
   }
 
-  function clear(node) {
+  function setClass(node, value) {
+    if (node.className !== value) {
+      node.className = value;
+    }
+  }
+
+  function setAttr(node, name, value) {
+    var next = String(value);
+    if (node.getAttribute(name) !== next) {
+      node.setAttribute(name, next);
+    }
+  }
+
+  function wipe(node) {
     while (node.firstChild) {
       node.removeChild(node.firstChild);
     }
+    node._byId = null;
+    node._mode = null;
+    node._parts = null;
+    node._tbody = null;
+    node._grid = null;
+  }
+
+  function keyedMap(parent) {
+    if (!parent._byId) {
+      parent._byId = {};
+    }
+    return parent._byId;
+  }
+
+  function itemById(parent, id) {
+    var map = parent._byId;
+    if (!map) {
+      return null;
+    }
+    return Object.prototype.hasOwnProperty.call(map, id) ? map[id] : null;
+  }
+
+  function syncKeyed(parent, items, idOf, create, update) {
+    var map = keyedMap(parent);
+    var seen = {};
+    var i;
+    var id;
+    var node;
+    var want;
+    for (i = 0; i < items.length; i += 1) {
+      id = idOf(items[i], i);
+      seen[id] = true;
+      node = itemById(parent, id);
+      if (!node) {
+        node = create(items[i], i);
+        map[id] = node;
+      } else {
+        update(node, items[i], i);
+      }
+      want = i < parent.children.length ? parent.children[i] : null;
+      if (want !== node) {
+        parent.insertBefore(node, want);
+      }
+    }
+    var keys = Object.keys(map);
+    for (i = 0; i < keys.length; i += 1) {
+      id = keys[i];
+      if (!seen[id]) {
+        node = map[id];
+        if (node.parentNode === parent) {
+          parent.removeChild(node);
+        }
+        delete map[id];
+      }
+    }
+  }
+
+  function pathBasename(path) {
+    var text = String(path || "");
+    var idx = text.lastIndexOf("/");
+    if (idx === -1) {
+      return text;
+    }
+    return text.slice(idx + 1);
+  }
+
+  function transcriptHeadingText(path) {
+    var base = pathBasename(path);
+    if (!base) {
+      return "Transcript";
+    }
+    return "Transcript · " + base;
+  }
+
+  function setChip(node, label, variant, filled, extra) {
+    var next =
+      "chip is-" +
+      (variant || "neutral") +
+      (filled ? " is-filled" : "") +
+      (extra ? " " + extra : "");
+    setClass(node, next);
+    txt(node, label);
+    return node;
   }
 
   function wordVariant(word) {
@@ -137,11 +243,15 @@
   function bindLiveRegions() {
     var status = document.getElementById("shell-status");
     if (status) {
-      status.setAttribute("role", "status");
+      if (status.getAttribute("role") !== "status") {
+        status.setAttribute("role", "status");
+      }
     }
     var err = document.getElementById("dials-error");
     if (err) {
-      err.setAttribute("role", "status");
+      if (err.getAttribute("role") !== "status") {
+        err.setAttribute("role", "status");
+      }
     }
   }
 
@@ -157,8 +267,10 @@
     } else if (value === "State unavailable." || value === "Authentication failed.") {
       variant = "danger";
     }
-    node.className = "chip is-" + variant;
-    node.setAttribute("role", "status");
+    setClass(node, "chip is-" + variant);
+    if (node.getAttribute("role") !== "status") {
+      node.setAttribute("role", "status");
+    }
   }
 
   function parseHttpUrl(value) {
@@ -268,6 +380,42 @@
     root.appendChild(box);
   }
 
+  function showEmpty(root) {
+    if (root._mode === "empty") {
+      return;
+    }
+    wipe(root);
+    root._mode = "empty";
+    renderEmpty(root);
+  }
+
+  function showHint(body, message) {
+    if (body._mode === "hint" && body.firstChild) {
+      txt(body.firstChild, message);
+      return;
+    }
+    wipe(body);
+    body._mode = "hint";
+    setClass(body, "");
+    var none = el("p");
+    none.className = "empty-hint";
+    txt(none, message);
+    body.appendChild(none);
+  }
+
+  function ensureHost(body, mode, className) {
+    if (body._mode === mode && body.parentNode) {
+      if (body.className !== className) {
+        setClass(body, className);
+      }
+      return body;
+    }
+    wipe(body);
+    body._mode = mode;
+    setClass(body, className);
+    return body;
+  }
+
   function tile(label, value, qualifier, variant) {
     var card = el("div");
     card.className = "card tile";
@@ -279,14 +427,51 @@
     txt(val, value);
     card.appendChild(eye);
     card.appendChild(val);
+    card._value = val;
+    card._qualifier = null;
     if (qualifier) {
       var q = el("p");
       q.className = "tile-qualifier";
       q.setAttribute("title", qualifier);
       txt(q, qualifier);
       card.appendChild(q);
+      card._qualifier = q;
     }
     return card;
+  }
+
+  function ensureTile(grid, id, label) {
+    var map = keyedMap(grid);
+    var card = itemById(grid, id);
+    if (card) {
+      return card;
+    }
+    card = tile(label, "", "", "neutral");
+    map[id] = card;
+    grid.appendChild(card);
+    return card;
+  }
+
+  function updateTile(card, value, qualifier, variant) {
+    var val = card._value;
+    setClass(val, "tile-value tabular is-" + (variant || "neutral"));
+    txt(val, value);
+    var q = card._qualifier;
+    if (qualifier) {
+      if (!q) {
+        q = el("p");
+        q.className = "tile-qualifier";
+        card.appendChild(q);
+        card._qualifier = q;
+      }
+      if (q.getAttribute("title") !== qualifier) {
+        q.setAttribute("title", qualifier);
+      }
+      txt(q, qualifier);
+    } else if (q) {
+      card.removeChild(q);
+      card._qualifier = null;
+    }
   }
 
   function renderVitals(state) {
@@ -294,16 +479,33 @@
     if (!root) {
       return;
     }
-    clear(root);
-    var grid = el("div");
-    grid.className = "vitals";
+    var grid;
+    if (root._mode !== "vitals") {
+      wipe(root);
+      root._mode = "vitals";
+      grid = el("div");
+      grid.className = "vitals";
+      root.appendChild(grid);
+      root._grid = grid;
+      ensureTile(grid, "journal", "Journal");
+      ensureTile(grid, "context", "Context");
+      ensureTile(grid, "checkpoint", "Checkpoint");
+      ensureTile(grid, "open", "Open dispatches");
+    } else {
+      grid = root._grid;
+    }
     var journal = state.journal || {};
     var jstatus = journal.status || "unknown";
-    grid.appendChild(tile("Journal", jstatus, "", wordVariant(jstatus)));
+    updateTile(
+      itemById(grid, "journal"),
+      jstatus,
+      "",
+      wordVariant(jstatus)
+    );
     var context = state.context || {};
     var cstate = context.state || "unknown";
     var cqual = context.run ? String(context.run) : "No active run";
-    grid.appendChild(tile("Context", cstate, cqual, wordVariant(cstate)));
+    updateTile(itemById(grid, "context"), cstate, cqual, wordVariant(cstate));
     var run = pickRun(state);
     var checkpoint = run && run.checkpoint ? run.checkpoint : { state: "unknown" };
     var axis = checkpoint.state || "unknown";
@@ -314,17 +516,111 @@
     if (checkpoint.note) {
       quals.push(String(checkpoint.note));
     }
-    grid.appendChild(tile("Checkpoint", axis, quals.join(" · "), wordVariant(axis)));
-    var openCount = run ? openItems(run).length : 0;
-    grid.appendChild(
-      tile(
-        "Open dispatches",
-        String(openCount),
-        run ? "In this run" : "No run selected",
-        openCount ? "ok" : "neutral"
-      )
+    updateTile(
+      itemById(grid, "checkpoint"),
+      axis,
+      quals.join(" · "),
+      wordVariant(axis)
     );
-    root.appendChild(grid);
+    var openCount = run ? openItems(run).length : 0;
+    updateTile(
+      itemById(grid, "open"),
+      String(openCount),
+      run ? "In this run" : "No run selected",
+      openCount ? "ok" : "neutral"
+    );
+  }
+
+  function ensureNowSkeleton(root) {
+    if (root._mode === "now") {
+      return root._parts;
+    }
+    wipe(root);
+    root._mode = "now";
+    var parts = {};
+    parts.grid = el("div");
+    parts.grid.className = "card-grid";
+    root.appendChild(parts.grid);
+    parts.panel = el("section");
+    parts.panel.className = "card transcript-panel";
+    parts.head = el("div");
+    parts.head.className = "transcript-head";
+    parts.heading = el("h3");
+    parts.heading.id = "transcript-heading";
+    txt(parts.heading, "Transcript");
+    parts.ident = el("p");
+    parts.ident.className = "mono";
+    parts.head.appendChild(parts.heading);
+    parts.head.appendChild(parts.ident);
+    parts.pre = el("pre");
+    parts.pre.id = "transcript-tail";
+    txt(parts.pre, "");
+    parts.panel.appendChild(parts.head);
+    parts.panel.appendChild(parts.pre);
+    root.appendChild(parts.panel);
+    root._parts = parts;
+    return parts;
+  }
+
+  function createOpenDispatch(item) {
+    var pick = el("button");
+    pick.setAttribute("type", "button");
+    pick.setAttribute("data-dispatch-id", item.dispatch_id);
+    pick.addEventListener("click", function () {
+      selectedDispatch = pick.getAttribute("data-dispatch-id");
+      if (lastState) {
+        renderAll(lastState);
+      }
+    });
+    var title = el("h3");
+    title.className = "mono dispatch-id";
+    pick.appendChild(title);
+    var liveChip = chip("unknown", "neutral");
+    pick.appendChild(liveChip);
+    var meta = el("p");
+    meta.className = "meta";
+    pick.appendChild(meta);
+    var path = el("p");
+    path.className = "path";
+    pick.appendChild(path);
+    pick._title = title;
+    pick._chip = liveChip;
+    pick._meta = meta;
+    pick._idle = null;
+    pick._path = path;
+    updateOpenDispatch(pick, item);
+    return pick;
+  }
+
+  function updateOpenDispatch(pick, item) {
+    var live = item.liveness || {};
+    var word = live.state || "unknown";
+    var selected = item.dispatch_id === selectedDispatch;
+    setClass(
+      pick,
+      "card dispatch-card pick" + (selected ? " is-selected" : "")
+    );
+    setAttr(pick, "aria-pressed", selected ? "true" : "false");
+    txt(pick._title, item.dispatch_id);
+    setChip(pick._chip, word, livenessVariant(word));
+    txt(
+      pick._meta,
+      (item.backend || "unknown") + " · " + (item.mode || "unknown")
+    );
+    if (live.idle_minutes != null) {
+      if (!pick._idle) {
+        pick._idle = el("p");
+        pick._idle.className = "meta tabular";
+        pick.insertBefore(pick._idle, pick._path);
+      }
+      txt(pick._idle, String(live.idle_minutes) + " min idle");
+    } else if (pick._idle) {
+      pick.removeChild(pick._idle);
+      pick._idle = null;
+    }
+    var source = live.source || "no source path";
+    setAttr(pick._path, "title", source);
+    txt(pick._path, source);
   }
 
   function renderNow(state) {
@@ -332,23 +628,19 @@
     if (!root) {
       return;
     }
-    clear(root);
     var runs = state.runs || [];
     if (!runs.length) {
-      renderEmpty(root);
+      showEmpty(root);
       return;
     }
     var run = pickRun(state);
     if (!run) {
-      renderEmpty(root);
+      showEmpty(root);
       return;
     }
     var open = openItems(run);
     if (!open.length) {
-      var none = el("p");
-      none.className = "empty-hint";
-      txt(none, "No open dispatches.");
-      root.appendChild(none);
+      showHint(root, "No open dispatches.");
       return;
     }
     var stillOpen = false;
@@ -360,84 +652,46 @@
     if (!stillOpen) {
       selectedDispatch = open[0].dispatch_id;
     }
-    var grid = el("div");
-    grid.className = "card-grid";
-    for (var n = 0; n < open.length; n += 1) {
-      renderOpenDispatch(grid, open[n]);
-    }
-    root.appendChild(grid);
-    var panel = el("section");
-    panel.className = "card transcript-panel";
-    var head = el("div");
-    head.className = "transcript-head";
-    var heading = el("h3");
-    txt(heading, "Transcript");
-    var ident = el("p");
-    ident.className = "mono";
-    txt(ident, selectedDispatch || "");
-    head.appendChild(heading);
-    head.appendChild(ident);
-    var pre = el("pre");
-    pre.id = "transcript-tail";
-    txt(pre, "");
-    panel.appendChild(head);
-    panel.appendChild(pre);
-    root.appendChild(panel);
+    var parts = ensureNowSkeleton(root);
+    syncKeyed(
+      parts.grid,
+      open,
+      function (item) {
+        return item.dispatch_id;
+      },
+      createOpenDispatch,
+      updateOpenDispatch
+    );
+    txt(parts.ident, selectedDispatch || "");
     pullTranscript(selectedDispatch);
   }
 
-  function renderOpenDispatch(root, item) {
-    var live = item.liveness || {};
-    var word = live.state || "unknown";
-    var pick = el("button");
-    pick.setAttribute("type", "button");
-    var selected = item.dispatch_id === selectedDispatch;
-    pick.className =
-      "card dispatch-card pick" + (selected ? " is-selected" : "");
-    pick.setAttribute("aria-pressed", selected ? "true" : "false");
-    pick.addEventListener("click", function () {
-      selectedDispatch = item.dispatch_id;
-      if (lastState) {
-        renderAll(lastState);
-      }
-    });
-    var title = el("h3");
-    title.className = "mono dispatch-id";
-    txt(title, item.dispatch_id);
-    pick.appendChild(title);
-    pick.appendChild(chip(word, livenessVariant(word)));
-    var meta = el("p");
-    meta.className = "meta";
-    txt(meta, (item.backend || "unknown") + " · " + (item.mode || "unknown"));
-    pick.appendChild(meta);
-    if (live.idle_minutes != null) {
-      var idle = el("p");
-      idle.className = "meta tabular";
-      txt(idle, String(live.idle_minutes) + " min idle");
-      pick.appendChild(idle);
+  function publishSignature(publish) {
+    if (!publish || publish === "not recorded") {
+      return "none";
     }
-    var path = el("p");
-    path.className = "path";
-    var source = live.source || "no source path";
-    path.setAttribute("title", source);
-    txt(path, source);
-    pick.appendChild(path);
-    root.appendChild(pick);
+    return [
+      publish.branch || "",
+      publish.sha || "",
+      publish.note || "",
+      publish.pr || "",
+    ].join("\0");
   }
 
-  function renderPublish(parent, publish) {
-    var row = el("div");
-    row.className = "publish";
-    var key = el("span");
-    key.className = "muted-label";
-    txt(key, "Publish");
-    row.appendChild(key);
+  function fillPublishFacts(row, publish) {
+    var sig = publishSignature(publish);
+    if (row._sig === sig) {
+      return;
+    }
+    row._sig = sig;
+    while (row.childNodes.length > 1) {
+      row.removeChild(row.lastChild);
+    }
     if (!publish || publish === "not recorded") {
       var none = el("p");
       none.className = "meta";
       txt(none, "not recorded");
       row.appendChild(none);
-      parent.appendChild(row);
       return;
     }
     var facts = el("p");
@@ -469,29 +723,47 @@
       facts.appendChild(empty);
     }
     row.appendChild(facts);
-    parent.appendChild(row);
   }
 
-  function renderGate(parent, gate) {
+  function renderPublish(parent, publish) {
+    var row = el("div");
+    row.className = "publish";
+    var key = el("span");
+    key.className = "muted-label";
+    txt(key, "Publish");
+    row.appendChild(key);
+    fillPublishFacts(row, publish);
+    parent.appendChild(row);
+    return row;
+  }
+
+  function createGate(gate) {
     var box = el("div");
     box.className = "gate";
-    var binding = gate.binding || "unknown";
-    var clean = binding === "clean";
-    var badge = chip(binding, bindingVariant(binding), clean);
-    badge.className += " gate-binding";
+    var badge = chip("unknown", "neutral");
     box.appendChild(badge);
     var meta = el("p");
     meta.className = "meta";
-    txt(
-      meta,
-      (gate.policy || "unknown") + " · " + (gate.purpose || "unknown")
-    );
     box.appendChild(meta);
     var note = el("span");
     note.className = "binding-note";
-    txt(note, clean ? "Publication evidence" : "Not publication evidence");
     box.appendChild(note);
-    parent.appendChild(box);
+    box._badge = badge;
+    box._meta = meta;
+    box._note = note;
+    updateGate(box, gate);
+    return box;
+  }
+
+  function updateGate(box, gate) {
+    var binding = gate.binding || "unknown";
+    var clean = binding === "clean";
+    setChip(box._badge, binding, bindingVariant(binding), clean, "gate-binding");
+    txt(
+      box._meta,
+      (gate.policy || "unknown") + " · " + (gate.purpose || "unknown")
+    );
+    txt(box._note, clean ? "Publication evidence" : "Not publication evidence");
   }
 
   function appendCell(row, value, className) {
@@ -503,129 +775,186 @@
     row.appendChild(cell);
   }
 
+  function createUnit(unit) {
+    var box = el("div");
+    box.className = "card unit";
+    var name = el("h3");
+    box.appendChild(name);
+    var status = chip("unknown", "neutral");
+    box.appendChild(status);
+    var rounds = el("p");
+    rounds.className = "meta";
+    var rlabel = el("span");
+    txt(rlabel, "Rounds ");
+    var rval = el("span");
+    rval.className = "tabular";
+    rounds.appendChild(rlabel);
+    rounds.appendChild(rval);
+    box.appendChild(rounds);
+    var review = el("p");
+    review.className = "meta";
+    box.appendChild(review);
+    var pub = renderPublish(box, unit.publish);
+    box._name = name;
+    box._chip = status;
+    box._rounds = rval;
+    box._review = review;
+    box._publish = pub;
+    updateUnit(box, unit);
+    return box;
+  }
+
+  function updateUnit(box, unit) {
+    txt(box._name, unit.unit || "unknown");
+    setChip(box._chip, unit.status || "unknown", wordVariant(unit.status));
+    txt(box._rounds, unit.rounds == null ? "0" : String(unit.rounds));
+    txt(box._review, "Review " + reviewLabel(unit.review));
+    fillPublishFacts(box._publish, unit.publish);
+  }
+
+  function createDispatchRow(item) {
+    var tr = el("tr");
+    appendCell(tr, "", "mono");
+    appendCell(tr, "", "");
+    appendCell(tr, "", "");
+    appendCell(tr, "", "");
+    appendCell(tr, "", "tabular");
+    updateDispatchRow(tr, item);
+    return tr;
+  }
+
+  function updateDispatchRow(tr, item) {
+    var cells = tr.children;
+    txt(cells[0], item.dispatch_id || "unknown");
+    txt(cells[1], item.backend || "unknown");
+    txt(cells[2], item.mode || "unknown");
+    txt(cells[3], item.state || "unknown");
+    txt(cells[4], item.exit == null ? "" : String(item.exit));
+  }
+
+  function ensureRunSkeleton(root) {
+    if (root._mode === "run") {
+      return root._parts;
+    }
+    wipe(root);
+    root._mode = "run";
+    var parts = {};
+    parts.head = el("div");
+    parts.head.className = "run-head";
+    parts.runId = el("p");
+    parts.runId.className = "mono run-id";
+    parts.status = chip("unknown", "neutral");
+    parts.head.appendChild(parts.runId);
+    parts.head.appendChild(parts.status);
+    root.appendChild(parts.head);
+    parts.unitHead = el("h3");
+    txt(parts.unitHead, "Units");
+    root.appendChild(parts.unitHead);
+    parts.unitBody = el("div");
+    root.appendChild(parts.unitBody);
+    parts.dispHead = el("h3");
+    txt(parts.dispHead, "Dispatches");
+    root.appendChild(parts.dispHead);
+    parts.dispBody = el("div");
+    root.appendChild(parts.dispBody);
+    parts.gateHead = el("h3");
+    txt(parts.gateHead, "Gates");
+    root.appendChild(parts.gateHead);
+    parts.gateBody = el("div");
+    root.appendChild(parts.gateBody);
+    root._parts = parts;
+    return parts;
+  }
+
+  function ensureDispatchTable(body) {
+    if (body._mode === "table" && body._tbody) {
+      return body._tbody;
+    }
+    wipe(body);
+    body._mode = "table";
+    setClass(body, "table-wrap");
+    var table = el("table");
+    table.className = "records";
+    var thead = el("thead");
+    var headerRow = el("tr");
+    var cols = ["Id", "Backend", "Mode", "State", "Exit"];
+    for (var c = 0; c < cols.length; c += 1) {
+      var th = el("th");
+      th.setAttribute("scope", "col");
+      txt(th, cols[c]);
+      headerRow.appendChild(th);
+    }
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+    var tbody = el("tbody");
+    table.appendChild(tbody);
+    body.appendChild(table);
+    body._tbody = tbody;
+    return tbody;
+  }
+
   function renderThisRun(state) {
     var root = document.getElementById("run-root");
     if (!root) {
       return;
     }
-    clear(root);
     var runs = state.runs || [];
     if (!runs.length) {
-      renderEmpty(root);
+      showEmpty(root);
       return;
     }
     var run = pickRun(state);
     if (!run) {
-      renderEmpty(root);
+      showEmpty(root);
       return;
     }
-    var head = el("div");
-    head.className = "run-head";
-    var rid = el("p");
-    rid.className = "mono run-id";
-    txt(rid, run.run_id || "unknown");
-    head.appendChild(rid);
-    head.appendChild(chip(run.status || "unknown", wordVariant(run.status)));
-    root.appendChild(head);
+    var parts = ensureRunSkeleton(root);
+    txt(parts.runId, run.run_id || "unknown");
+    setChip(parts.status, run.status || "unknown", wordVariant(run.status));
     var units = run.units || [];
-    var unitHead = el("h3");
-    txt(unitHead, "Units");
-    root.appendChild(unitHead);
     if (!units.length) {
-      var noUnits = el("p");
-      noUnits.className = "empty-hint";
-      txt(noUnits, "No units recorded.");
-      root.appendChild(noUnits);
+      showHint(parts.unitBody, "No units recorded.");
     } else {
-      var unitGrid = el("div");
-      unitGrid.className = "card-grid";
-      for (var i = 0; i < units.length; i += 1) {
-        var unit = units[i];
-        var box = el("div");
-        box.className = "card unit";
-        var name = el("h3");
-        txt(name, unit.unit || "unknown");
-        box.appendChild(name);
-        box.appendChild(chip(unit.status || "unknown", wordVariant(unit.status)));
-        var rounds = el("p");
-        rounds.className = "meta";
-        var rlabel = el("span");
-        txt(rlabel, "Rounds ");
-        var rval = el("span");
-        rval.className = "tabular";
-        txt(rval, unit.rounds == null ? "0" : String(unit.rounds));
-        rounds.appendChild(rlabel);
-        rounds.appendChild(rval);
-        box.appendChild(rounds);
-        var review = el("p");
-        review.className = "meta";
-        txt(review, "Review " + reviewLabel(unit.review));
-        box.appendChild(review);
-        renderPublish(box, unit.publish);
-        unitGrid.appendChild(box);
-      }
-      root.appendChild(unitGrid);
+      var unitGrid = ensureHost(parts.unitBody, "grid", "card-grid");
+      syncKeyed(
+        unitGrid,
+        units,
+        function (unit) {
+          return unit.unit || "unknown";
+        },
+        createUnit,
+        updateUnit
+      );
     }
     var items = run.dispatches || [];
-    var dispHead = el("h3");
-    txt(dispHead, "Dispatches");
-    root.appendChild(dispHead);
     if (!items.length) {
-      var noDisp = el("p");
-      noDisp.className = "empty-hint";
-      txt(noDisp, "No dispatches recorded.");
-      root.appendChild(noDisp);
+      showHint(parts.dispBody, "No dispatches recorded.");
     } else {
-      var wrap = el("div");
-      wrap.className = "table-wrap";
-      var table = el("table");
-      table.className = "records";
-      var thead = el("thead");
-      var headerRow = el("tr");
-      var cols = ["Id", "Backend", "Mode", "State", "Exit"];
-      for (var c = 0; c < cols.length; c += 1) {
-        var th = el("th");
-        th.setAttribute("scope", "col");
-        txt(th, cols[c]);
-        headerRow.appendChild(th);
-      }
-      thead.appendChild(headerRow);
-      table.appendChild(thead);
-      var tbody = el("tbody");
-      for (var d = 0; d < items.length; d += 1) {
-        var item = items[d];
-        var tr = el("tr");
-        appendCell(tr, item.dispatch_id || "unknown", "mono");
-        appendCell(tr, item.backend || "unknown", "");
-        appendCell(tr, item.mode || "unknown", "");
-        appendCell(tr, item.state || "unknown", "");
-        appendCell(
-          tr,
-          item.exit == null ? "" : String(item.exit),
-          "tabular"
-        );
-        tbody.appendChild(tr);
-      }
-      table.appendChild(tbody);
-      wrap.appendChild(table);
-      root.appendChild(wrap);
+      var tbody = ensureDispatchTable(parts.dispBody);
+      syncKeyed(
+        tbody,
+        items,
+        function (item) {
+          return item.dispatch_id;
+        },
+        createDispatchRow,
+        updateDispatchRow
+      );
     }
     var gates = run.gates || [];
-    var gateHead = el("h3");
-    txt(gateHead, "Gates");
-    root.appendChild(gateHead);
     if (!gates.length) {
-      var noGates = el("p");
-      noGates.className = "empty-hint";
-      txt(noGates, "No gates recorded.");
-      root.appendChild(noGates);
+      showHint(parts.gateBody, "No gates recorded.");
     } else {
-      var gateRow = el("div");
-      gateRow.className = "gate-row";
-      for (var g = 0; g < gates.length; g += 1) {
-        renderGate(gateRow, gates[g]);
-      }
-      root.appendChild(gateRow);
+      var gateRow = ensureHost(parts.gateBody, "gates", "gate-row");
+      syncKeyed(
+        gateRow,
+        gates,
+        function (_gate, index) {
+          return String(index);
+        },
+        createGate,
+        updateGate
+      );
     }
   }
 
@@ -633,38 +962,16 @@
     return PERMISSION_KEYS.indexOf(key) !== -1;
   }
 
-  function setControlsDisabled(root, disabled) {
-    var nodes = root.querySelectorAll("button, select");
-    for (var i = 0; i < nodes.length; i += 1) {
-      if (disabled) {
-        nodes[i].setAttribute("disabled", "disabled");
-      } else {
-        nodes[i].removeAttribute("disabled");
-      }
+  function setDisabled(node, disabled) {
+    var isDisabled = node.getAttribute("disabled") === "disabled";
+    if (disabled && !isDisabled) {
+      node.setAttribute("disabled", "disabled");
+    } else if (!disabled && isDisabled) {
+      node.removeAttribute("disabled");
     }
   }
 
-  function renderDialRow(parent, key, record, locked) {
-    var box = el("div");
-    box.className = "card dial";
-    var selectId = "dial-select-" + key;
-    var head = el("div");
-    head.className = "dial-head";
-    var label = el("label");
-    label.setAttribute("for", selectId);
-    label.className = "dial-name";
-    txt(label, key);
-    head.appendChild(label);
-    if (record && record.scope === "permission") {
-      head.appendChild(chip("grants authority", "caution"));
-    }
-    box.appendChild(head);
-    var value = el("p");
-    value.className = "dial-value mono";
-    txt(value, record && record.value ? record.value : "");
-    box.appendChild(value);
-    var meta = el("p");
-    meta.className = "meta dial-meta";
+  function dialMetaText(record) {
     var bits = [];
     if (record && record.scope) {
       bits.push(record.scope);
@@ -681,7 +988,37 @@
     if (record && record.provenance) {
       bits.push(record.provenance);
     }
-    txt(meta, bits.join(" · "));
+    return bits.join(" · ");
+  }
+
+  function applySelectValue(select, value) {
+    if (document.activeElement === select) {
+      return;
+    }
+    var next = value == null ? "" : String(value);
+    if (select.value !== next) {
+      select.value = next;
+    }
+  }
+
+  function createDial(item) {
+    var key = item.key;
+    var box = el("div");
+    box.className = "card dial";
+    var selectId = "dial-select-" + key;
+    var head = el("div");
+    head.className = "dial-head";
+    var label = el("label");
+    label.setAttribute("for", selectId);
+    label.className = "dial-name";
+    txt(label, key);
+    head.appendChild(label);
+    box.appendChild(head);
+    var value = el("p");
+    value.className = "dial-value mono";
+    box.appendChild(value);
+    var meta = el("p");
+    meta.className = "meta dial-meta";
     box.appendChild(meta);
     var controls = el("div");
     controls.className = "dial-controls";
@@ -689,16 +1026,16 @@
     select.setAttribute("id", selectId);
     select.setAttribute("data-dial", key);
     var options = DIAL_OPTIONS[key] || [];
-    var current = record && record.value ? String(record.value) : options[0];
-    for (var i = 0; i < options.length; i += 1) {
+    var i;
+    for (i = 0; i < options.length; i += 1) {
       var option = el("option");
       option.setAttribute("value", options[i]);
       txt(option, options[i]);
-      if (options[i] === current) {
-        option.setAttribute("selected", "selected");
-      }
       select.appendChild(option);
     }
+    select.addEventListener("focusout", function () {
+      applySelectValue(select, select._want);
+    });
     var apply = el("button");
     apply.setAttribute("type", "button");
     apply.className = "dial-apply";
@@ -717,12 +1054,165 @@
     controls.appendChild(apply);
     controls.appendChild(reset);
     box.appendChild(controls);
-    if (locked) {
-      select.setAttribute("disabled", "disabled");
-      apply.setAttribute("disabled", "disabled");
-      reset.setAttribute("disabled", "disabled");
+    box._key = key;
+    box._head = head;
+    box._grant = null;
+    box._value = value;
+    box._meta = meta;
+    box._select = select;
+    box._apply = apply;
+    box._reset = reset;
+    updateDial(box, item);
+    return box;
+  }
+
+  function updateDial(box, item) {
+    var record = item.record;
+    var locked = item.locked;
+    var options = DIAL_OPTIONS[item.key] || [];
+    var current = record && record.value ? String(record.value) : options[0] || "";
+    var grant = record && record.scope === "permission";
+    txt(box._value, record && record.value ? record.value : "");
+    txt(box._meta, dialMetaText(record));
+    if (grant) {
+      if (!box._grant) {
+        box._grant = chip("grants authority", "caution");
+        box._head.appendChild(box._grant);
+      }
+    } else if (box._grant) {
+      box._head.removeChild(box._grant);
+      box._grant = null;
     }
+    box._select._want = current;
+    applySelectValue(box._select, current);
+    setDisabled(box._select, locked);
+    setDisabled(box._apply, locked);
+    setDisabled(box._reset, locked);
+  }
+
+  function renderDialRow(parent, key, record, locked) {
+    var box = createDial({ key: key, record: record, locked: locked });
     parent.appendChild(box);
+    return box;
+  }
+
+  function dialItems(keys, dials, locked) {
+    var items = [];
+    var i;
+    for (i = 0; i < keys.length; i += 1) {
+      items.push({
+        key: keys[i],
+        record: dials[keys[i]],
+        locked: locked,
+      });
+    }
+    return items;
+  }
+
+  function policyKeys() {
+    var keys = [];
+    var i;
+    for (i = 0; i < DIAL_ORDER.length; i += 1) {
+      if (!isPermissionKey(DIAL_ORDER[i])) {
+        keys.push(DIAL_ORDER[i]);
+      }
+    }
+    return keys;
+  }
+
+  function noticeText(doc) {
+    if (doc.store === "rejected") {
+      return (
+        "The calibration store was rejected: " +
+        (doc.reason ? String(doc.reason) : "unknown reason") +
+        ". Repair or remove the store file. Controls are disabled."
+      );
+    }
+    if (doc.store === "absent") {
+      return "The calibration store is absent. Safe defaults are in effect; nothing was imported from memory. Confirming a value here records it. Permission dials recorded here are granted via this console.";
+    }
+    return "";
+  }
+
+  function noticeClass(doc) {
+    if (doc.store === "rejected") {
+      return "dials-notice is-rejected";
+    }
+    if (doc.store === "absent") {
+      return "dials-notice is-absent";
+    }
+    return "dials-notice";
+  }
+
+  function placeBefore(parent, node, before) {
+    if (node.parentNode === parent && (!before || node.nextSibling === before)) {
+      return;
+    }
+    parent.insertBefore(node, before || null);
+  }
+
+  function updateOptional(parent, slot, className, text, before) {
+    if (!text) {
+      if (slot && slot.parentNode === parent) {
+        parent.removeChild(slot);
+      }
+      return null;
+    }
+    if (!slot) {
+      slot = el("p");
+    }
+    setClass(slot, className);
+    txt(slot, text);
+    placeBefore(parent, slot, before);
+    return slot;
+  }
+
+  function ensureDialsSkeleton(root) {
+    if (root._mode === "dials" && root._parts) {
+      return root._parts;
+    }
+    wipe(root);
+    root._mode = "dials";
+    var parts = {};
+    parts.permBox = el("div");
+    parts.permBox.className = "dials-permission";
+    parts.permHead = el("h3");
+    txt(parts.permHead, "Permission dials");
+    parts.permBox.appendChild(parts.permHead);
+    parts.permNote = el("p");
+    parts.permNote.className = "dials-section-note";
+    txt(
+      parts.permNote,
+      "These dials grant standing authorization when set beyond their default. At their default value they carry no authority."
+    );
+    parts.permBox.appendChild(parts.permNote);
+    parts.permList = el("div");
+    parts.permList.className = "dial-list";
+    parts.permBox.appendChild(parts.permList);
+    root.appendChild(parts.permBox);
+    parts.polHead = el("h3");
+    txt(parts.polHead, "Policy");
+    root.appendChild(parts.polHead);
+    parts.polBox = el("div");
+    parts.polBox.className = "dials-policy";
+    root.appendChild(parts.polBox);
+    parts.notice = null;
+    parts.store = null;
+    root._parts = parts;
+    return parts;
+  }
+
+  function showDialsInert(root) {
+    if (root._mode === "inert" && root.firstChild) {
+      txt(root.firstChild, "Authenticate to read and set the workspace dials.");
+      return;
+    }
+    wipe(root);
+    root._mode = "inert";
+    var inert = el("p");
+    inert.className = "empty-hint";
+    txt(inert, "Authenticate to read and set the workspace dials.");
+    root.appendChild(inert);
   }
 
   function renderDials(doc) {
@@ -730,86 +1220,56 @@
     if (!root) {
       return;
     }
-    clear(root);
     bindLiveRegions();
     if (!doc) {
-      var inert = el("p");
-      inert.className = "empty-hint";
-      txt(inert, "Authenticate to read and set the workspace dials.");
-      root.appendChild(inert);
+      showDialsInert(root);
       return;
     }
     lastDials = doc;
+    var parts = ensureDialsSkeleton(root);
     var rejected = doc.store === "rejected";
-    var absent = doc.store === "absent";
-    if (rejected) {
-      var ban = el("p");
-      ban.className = "dials-notice is-rejected";
-      txt(
-        ban,
-        "The calibration store was rejected: " +
-          (doc.reason ? String(doc.reason) : "unknown reason") +
-          ". Repair or remove the store file. Controls are disabled."
-      );
-      root.appendChild(ban);
-    } else if (absent) {
-      var notice = el("p");
-      notice.className = "dials-notice is-absent";
-      txt(
-        notice,
-        "The calibration store is absent. Safe defaults are in effect; nothing was imported from memory. Confirming a value here records it. Permission dials recorded here are granted via this console."
-      );
-      root.appendChild(notice);
-    }
-    if (doc.store) {
-      var store = el("p");
-      store.className = "meta";
-      txt(store, "Store " + String(doc.store));
-      root.appendChild(store);
-    }
     var locked = rejected || dialsBusy;
-    var permBox = el("div");
-    permBox.className = "dials-permission";
-    var permHead = el("h3");
-    txt(permHead, "Permission dials");
-    permBox.appendChild(permHead);
-    var permNote = el("p");
-    permNote.className = "dials-section-note";
-    txt(
-      permNote,
-      "These dials grant standing authorization when set beyond their default. At their default value they carry no authority."
-    );
-    permBox.appendChild(permNote);
-    var permList = el("div");
-    permList.className = "dial-list";
     var dials = doc.dials || {};
-    for (var p = 0; p < PERMISSION_KEYS.length; p += 1) {
-      renderDialRow(permList, PERMISSION_KEYS[p], dials[PERMISSION_KEYS[p]], locked);
-    }
-    permBox.appendChild(permList);
-    root.appendChild(permBox);
-    var polHead = el("h3");
-    txt(polHead, "Policy");
-    root.appendChild(polHead);
-    var polBox = el("div");
-    polBox.className = "dials-policy";
-    for (var i = 0; i < DIAL_ORDER.length; i += 1) {
-      var key = DIAL_ORDER[i];
-      if (isPermissionKey(key)) {
-        continue;
-      }
-      renderDialRow(polBox, key, dials[key], locked);
-    }
-    root.appendChild(polBox);
-    if (dialsBusy) {
-      setControlsDisabled(root, true);
-    }
+    parts.notice = updateOptional(
+      root,
+      parts.notice,
+      noticeClass(doc),
+      noticeText(doc),
+      parts.store && parts.store.parentNode === root ? parts.store : parts.permBox
+    );
+    parts.store = updateOptional(
+      root,
+      parts.store,
+      "meta",
+      doc.store ? "Store " + String(doc.store) : "",
+      parts.permBox
+    );
+    syncKeyed(
+      parts.permList,
+      dialItems(PERMISSION_KEYS, dials, locked),
+      function (item) {
+        return item.key;
+      },
+      createDial,
+      updateDial
+    );
+    syncKeyed(
+      parts.polBox,
+      dialItems(policyKeys(), dials, locked),
+      function (item) {
+        return item.key;
+      },
+      createDial,
+      updateDial
+    );
   }
 
   function setDialError(message) {
     var node = document.getElementById("dials-error");
     if (node) {
-      node.setAttribute("role", "status");
+      if (node.getAttribute("role") !== "status") {
+        node.setAttribute("role", "status");
+      }
       txt(node, message);
     }
   }
@@ -927,10 +1387,10 @@
 
   function renderAll(state) {
     lastState = state;
+    stampUpdated();
     renderVitals(state);
     renderNow(state);
     renderThisRun(state);
-    stampUpdated();
   }
 
   function apiHeaders() {
@@ -943,8 +1403,16 @@
 
   function pullTranscript(dispatchId) {
     var pre = document.getElementById("transcript-tail");
+    var heading = document.getElementById("transcript-heading");
     if (!pre || !dispatchId) {
       return;
+    }
+    if (pre.getAttribute("data-dispatch") !== dispatchId) {
+      setAttr(pre, "data-dispatch", dispatchId);
+      txt(pre, "");
+      if (heading) {
+        txt(heading, "Transcript");
+      }
     }
     fetch("/api/transcript?dispatch=" + encodeURIComponent(dispatchId), {
       credentials: "same-origin",
@@ -953,6 +1421,9 @@
       .then(function (response) {
         if (!response.ok) {
           txt(pre, "Transcript unavailable.");
+          if (heading) {
+            txt(heading, "Transcript");
+          }
           return null;
         }
         return response.json();
@@ -961,10 +1432,16 @@
         if (!payload) {
           return;
         }
+        if (heading) {
+          txt(heading, transcriptHeadingText(payload.path));
+        }
         txt(pre, payload.tail == null ? "" : String(payload.tail));
       })
       .catch(function () {
         txt(pre, "Transcript unavailable.");
+        if (heading) {
+          txt(heading, "Transcript");
+        }
       });
   }
 
@@ -992,7 +1469,10 @@
   function afterAuth() {
     pullState();
     pullDials();
-    pollId = setInterval(pullState, POLL_MS);
+    pollId = setInterval(function () {
+      pullState();
+      pullDials();
+    }, POLL_MS);
   }
 
   function startSession() {

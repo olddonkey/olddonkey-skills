@@ -438,6 +438,141 @@ else
   fail "assets: permission group copy is conditional; grant chip uses record.scope"
 fi
 
+if python3 - "$ASSETS/console.js" <<'PY'
+import re, sys
+
+src = open(sys.argv[1], encoding="utf-8").read()
+
+
+def extract_function(name):
+    match = re.search(r"function " + re.escape(name) + r"\s*\(", src)
+    if match is None:
+        raise SystemExit("missing function %s" % name)
+    brace = src.find("{", match.start())
+    if brace < 0:
+        raise SystemExit("no body for %s" % name)
+    depth = 0
+    for index in range(brace, len(src)):
+        if src[index] == "{":
+            depth += 1
+        elif src[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[match.start() : index + 1]
+    raise SystemExit("unbalanced function %s" % name)
+
+
+for name in (
+    "renderVitals",
+    "renderNow",
+    "renderThisRun",
+    "renderAll",
+    "renderDials",
+    "pullState",
+    "pullDials",
+):
+    body = extract_function(name)
+    if re.search(r"\bclear\s*\(", body):
+        raise SystemExit("%s still calls clear(" % name)
+
+item = extract_function("itemById")
+if "parent._byId" not in item:
+    raise SystemExit("itemById does not look items up on parent._byId")
+keyed = extract_function("syncKeyed")
+if "itemById(" not in keyed:
+    raise SystemExit("syncKeyed does not look items up by id")
+if "insertBefore(" not in keyed:
+    raise SystemExit("syncKeyed does not reorder with insertBefore")
+PY
+then
+  pass "poll path: renderVitals/renderNow/renderThisRun do not call clear(); syncKeyed looks items up by id (source-level; no browser MutationObserver)"
+else
+  fail "poll path: renderVitals/renderNow/renderThisRun do not call clear(); syncKeyed looks items up by id (source-level; no browser MutationObserver)"
+fi
+
+if python3 - "$ASSETS/console.js" <<'PY'
+import re, sys
+
+src = open(sys.argv[1], encoding="utf-8").read()
+
+
+def extract_function(name):
+    match = re.search(r"function " + re.escape(name) + r"\s*\(", src)
+    if match is None:
+        raise SystemExit("missing function %s" % name)
+    brace = src.find("{", match.start())
+    if brace < 0:
+        raise SystemExit("no body for %s" % name)
+    depth = 0
+    for index in range(brace, len(src)):
+        if src[index] == "{":
+            depth += 1
+        elif src[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[match.start() : index + 1]
+    raise SystemExit("unbalanced function %s" % name)
+
+
+txt = extract_function("txt")
+if "node.textContent !== next" not in txt and "child.nodeValue !== next" not in txt:
+    raise SystemExit("txt is missing the compare-current-text step")
+if "node.textContent = next" not in txt and "child.nodeValue = next" not in txt:
+    raise SystemExit("txt is missing the assign-only-when-different step")
+if "textContent !==" not in txt and "nodeValue !==" not in txt:
+    raise SystemExit("txt does not compare before assigning")
+
+stamp = extract_function("stampUpdated")
+if 'getElementById("updated-at")' not in stamp:
+    raise SystemExit("stampUpdated does not target #updated-at")
+if "txt(" not in stamp:
+    raise SystemExit("header timestamp is not updated through txt")
+
+families = (
+    ("updateUnit", "unit"),
+    ("updateOpenDispatch", "dispatch card"),
+    ("updateDispatchRow", "dispatch table"),
+    ("updateGate", "gate"),
+    ("updateTile", "vitals"),
+    ("updateDial", "dial"),
+)
+for name, label in families:
+    body = extract_function(name)
+    if "txt(" not in body:
+        raise SystemExit("%s (%s) does not use txt(" % (name, label))
+
+creates = (
+    ("createUnit", "updateUnit"),
+    ("createOpenDispatch", "updateOpenDispatch"),
+    ("createDispatchRow", "updateDispatchRow"),
+    ("createGate", "updateGate"),
+    ("createDial", "updateDial"),
+)
+for creator, updater in creates:
+    body = extract_function(creator)
+    if updater + "(" not in body:
+        raise SystemExit("%s reaches fields only at create-time; missing %s(" % (creator, updater))
+
+dials = extract_function("renderDials")
+if "syncKeyed(" not in dials:
+    raise SystemExit("renderDials does not reuse dial cards via syncKeyed")
+if "updateDial" not in dials:
+    raise SystemExit("renderDials never routes existing dials through updateDial")
+if re.search(r"\bclear\s*\(", dials):
+    raise SystemExit("renderDials still rebuilds with clear(")
+if "createDial" not in dials:
+    raise SystemExit("renderDials lost the keyed createDial path")
+PY
+then
+  pass "update path: txt compares current text and assigns only when different; every render family uses it (source-level; no browser MutationObserver)"
+  pass "update path: header #updated-at is written through txt (source-level; frozen-timestamp field)"
+  pass "update path: unit/dispatch/gate/vitals/dial updates are not create-time-only (source-level)"
+else
+  fail "update path: txt compares current text and assigns only when different; every render family uses it (source-level; no browser MutationObserver)"
+  fail "update path: header #updated-at is written through txt (source-level; frozen-timestamp field)"
+  fail "update path: unit/dispatch/gate/vitals/dial updates are not create-time-only (source-level)"
+fi
+
 if node - "$ASSETS/console.js" >"$TMP_ROOT/render.tap" 2>"$TMP_ROOT/render.err" <<'JS'
 const fs = require("fs");
 const vm = require("vm");
@@ -496,24 +631,59 @@ function walk(node, visit) {
 
 const sandbox = {
   document: {
+    activeElement: null,
     createElement: function (name) {
       return makeNode(name);
+    },
+    getElementById: function () {
+      return null;
     },
   },
   URL: URL,
   postDial: function () {},
   resetDial: function () {},
+  selectedDispatch: null,
+  lastState: null,
+  renderAll: function () {},
 };
 vm.createContext(sandbox);
 vm.runInContext(extractBlock(/var DIAL_OPTIONS =/), sandbox);
 [
   "el",
   "txt",
+  "setClass",
+  "setAttr",
+  "setChip",
   "chip",
+  "wordVariant",
+  "livenessVariant",
+  "bindingVariant",
+  "reviewLabel",
+  "publishSignature",
+  "fillPublishFacts",
+  "renderPublish",
   "parseHttpUrl",
   "linkLabel",
   "appendLinkOrText",
+  "dialMetaText",
+  "applySelectValue",
+  "setDisabled",
+  "createDial",
+  "updateDial",
   "renderDialRow",
+  "createUnit",
+  "updateUnit",
+  "createOpenDispatch",
+  "updateOpenDispatch",
+  "appendCell",
+  "createDispatchRow",
+  "updateDispatchRow",
+  "createGate",
+  "updateGate",
+  "tile",
+  "updateTile",
+  "pad2",
+  "stampUpdated",
 ].forEach(function (name) {
   vm.runInContext(
     "this." + name + " = " + extractBlock(new RegExp("function " + name + "\\(")),
@@ -527,7 +697,6 @@ function check(name, fn) {
     console.log("ok - %s", name);
   } catch (error) {
     console.log("not ok - %s: %s", name, error && error.message ? error.message : error);
-    process.exitCode = 1;
   }
 }
 
@@ -613,6 +782,479 @@ check("render: publish link text is host-plus-path; href stays the parsed URL", 
     throw new Error("non-http text changed");
   }
 });
+
+function makeLiveText(value) {
+  return {
+    nodeType: 3,
+    nodeName: "#text",
+    parentNode: null,
+    nextSibling: null,
+    writes: { nodeValue: 0 },
+    _nodeValue: value == null ? "" : String(value),
+    get nodeValue() {
+      return this._nodeValue;
+    },
+    set nodeValue(next) {
+      this.writes.nodeValue += 1;
+      this._nodeValue = String(next);
+    },
+    get textContent() {
+      return this._nodeValue;
+    },
+    set textContent(next) {
+      this.nodeValue = next;
+    },
+  };
+}
+
+function relink(parent) {
+  parent._childList.forEach(function (child, index) {
+    child.nextSibling = parent._childList[index + 1] || null;
+    child.parentNode = parent;
+  });
+}
+
+function makeLiveNode(name) {
+  const node = {
+    nodeName: name,
+    nodeType: 1,
+    attrs: {},
+    listeners: {},
+    parentNode: null,
+    nextSibling: null,
+    _childList: [],
+    writes: { text: 0, className: 0, value: 0 },
+    _className: "",
+    _value: "",
+    setAttribute: function (key, value) {
+      this.attrs[key] = String(value);
+    },
+    getAttribute: function (key) {
+      return Object.prototype.hasOwnProperty.call(this.attrs, key) ? this.attrs[key] : null;
+    },
+    removeAttribute: function (key) {
+      delete this.attrs[key];
+    },
+    appendChild: function (child) {
+      if (child.parentNode && child.parentNode.removeChild) {
+        child.parentNode.removeChild(child);
+      }
+      this._childList.push(child);
+      relink(this);
+      return child;
+    },
+    removeChild: function (child) {
+      const index = this._childList.indexOf(child);
+      if (index < 0) {
+        throw new Error("removeChild: not a child");
+      }
+      this._childList.splice(index, 1);
+      child.parentNode = null;
+      relink(this);
+      return child;
+    },
+    insertBefore: function (child, want) {
+      if (child.parentNode && child.parentNode.removeChild) {
+        child.parentNode.removeChild(child);
+      }
+      if (!want) {
+        this._childList.push(child);
+      } else {
+        const index = this._childList.indexOf(want);
+        this._childList.splice(index < 0 ? this._childList.length : index, 0, child);
+      }
+      relink(this);
+      return child;
+    },
+    addEventListener: function (type, fn) {
+      if (!this.listeners[type]) {
+        this.listeners[type] = [];
+      }
+      this.listeners[type].push(fn);
+    },
+    blur: function () {
+      (this.listeners.focusout || []).forEach(function (fn) {
+        fn();
+      });
+    },
+    get firstChild() {
+      return this._childList[0] || null;
+    },
+    get lastChild() {
+      return this._childList[this._childList.length - 1] || null;
+    },
+    get childNodes() {
+      return this._childList.slice();
+    },
+    get children() {
+      return this._childList.filter(function (child) {
+        return child.nodeType === 1;
+      });
+    },
+    get textContent() {
+      return this._childList
+        .map(function (child) {
+          return child.textContent || "";
+        })
+        .join("");
+    },
+    set textContent(next) {
+      this.writes.text += 1;
+      const text = makeLiveText(next);
+      text.parentNode = this;
+      this._childList = [text];
+      relink(this);
+    },
+    get className() {
+      return this._className;
+    },
+    set className(next) {
+      this.writes.className += 1;
+      this._className = String(next);
+    },
+    get value() {
+      return this._value;
+    },
+    set value(next) {
+      this.writes.value += 1;
+      this._value = String(next);
+    },
+  };
+  return node;
+}
+
+function countWrites(node) {
+  const acc = {
+    text: node.writes ? node.writes.text || 0 : 0,
+    nodeValue: node.writes ? node.writes.nodeValue || 0 : 0,
+    className: node.writes ? node.writes.className || 0 : 0,
+    value: node.writes ? node.writes.value || 0 : 0,
+  };
+  (node._childList || node.children || []).forEach(function (child) {
+    const inner = countWrites(child);
+    acc.text += inner.text;
+    acc.nodeValue += inner.nodeValue;
+    acc.className += inner.className;
+    acc.value += inner.value;
+  });
+  acc.total = acc.text + acc.nodeValue;
+  return acc;
+}
+
+function deltaWrites(before, after) {
+  return {
+    text: after.text - before.text,
+    nodeValue: after.nodeValue - before.nodeValue,
+    className: after.className - before.className,
+    value: after.value - before.value,
+    total: after.total - before.total,
+  };
+}
+
+const liveSandbox = {
+  document: {
+    activeElement: null,
+    createElement: function (name) {
+      return makeLiveNode(name);
+    },
+    getElementById: function () {
+      return null;
+    },
+  },
+  URL: URL,
+  postDial: function () {},
+  resetDial: function () {},
+  selectedDispatch: "d-open",
+  lastState: null,
+  renderAll: function () {},
+};
+vm.createContext(liveSandbox);
+vm.runInContext(extractBlock(/var DIAL_OPTIONS =/), liveSandbox);
+[
+  "el",
+  "txt",
+  "setClass",
+  "setAttr",
+  "setChip",
+  "chip",
+  "wordVariant",
+  "livenessVariant",
+  "bindingVariant",
+  "reviewLabel",
+  "publishSignature",
+  "fillPublishFacts",
+  "renderPublish",
+  "parseHttpUrl",
+  "linkLabel",
+  "appendLinkOrText",
+  "dialMetaText",
+  "applySelectValue",
+  "setDisabled",
+  "createDial",
+  "updateDial",
+  "createUnit",
+  "updateUnit",
+  "createOpenDispatch",
+  "updateOpenDispatch",
+  "appendCell",
+  "createDispatchRow",
+  "updateDispatchRow",
+  "createGate",
+  "updateGate",
+  "tile",
+  "updateTile",
+  "pad2",
+  "stampUpdated",
+].forEach(function (name) {
+  vm.runInContext(
+    "this." + name + " = " + extractBlock(new RegExp("function " + name + "\\(")),
+    liveSandbox
+  );
+});
+
+check("update: txt assigns only when the shown text differs (headless; no browser DOM)", function () {
+  const node = makeLiveNode("p");
+  liveSandbox.txt(node, "hello");
+  const afterCreate = countWrites(node);
+  if (node.textContent !== "hello") {
+    throw new Error("initial text " + node.textContent);
+  }
+  liveSandbox.txt(node, "hello");
+  const quiet = deltaWrites(afterCreate, countWrites(node));
+  if (quiet.total !== 0) {
+    throw new Error("identical txt wrote " + JSON.stringify(quiet));
+  }
+  liveSandbox.txt(node, "world");
+  if (node.textContent !== "world") {
+    throw new Error("changed text " + node.textContent);
+  }
+  const changed = deltaWrites(afterCreate, countWrites(node));
+  if (changed.total < 1) {
+    throw new Error("changed txt did not write");
+  }
+});
+
+check("update: updateUnit applies a changed review and is quiet when unchanged (headless)", function () {
+  const unit = {
+    unit: "u-two",
+    status: "open",
+    rounds: 1,
+    review: "not recorded",
+    publish: "not recorded",
+  };
+  const box = liveSandbox.createUnit(unit);
+  if (box._review.textContent !== "Review not recorded") {
+    throw new Error("create review " + box._review.textContent);
+  }
+  const before = countWrites(box);
+  liveSandbox.updateUnit(box, unit);
+  const quiet = deltaWrites(before, countWrites(box));
+  if (quiet.total !== 0 || quiet.className !== 0) {
+    throw new Error("unchanged unit wrote " + JSON.stringify(quiet));
+  }
+  const nameBefore = countWrites(box._name);
+  const reviewBefore = countWrites(box._review);
+  liveSandbox.updateUnit(box, {
+    unit: "u-two",
+    status: "open",
+    rounds: 1,
+    review: { verdict: "iterate", round: 1 },
+    publish: "not recorded",
+  });
+  if (box._review.textContent !== "Review iterate") {
+    throw new Error("review stayed " + box._review.textContent);
+  }
+  if (deltaWrites(nameBefore, countWrites(box._name)).total !== 0) {
+    throw new Error("unrelated unit name mutated");
+  }
+  if (deltaWrites(reviewBefore, countWrites(box._review)).total < 1) {
+    throw new Error("review node did not mutate");
+  }
+});
+
+check("update: vitals/dispatch/gate/table apply changed fields only (headless)", function () {
+  const card = liveSandbox.tile("Journal", "ok", "same", "ok");
+  let snap = countWrites(card);
+  liveSandbox.updateTile(card, "ok", "same", "ok");
+  if (deltaWrites(snap, countWrites(card)).total !== 0) {
+    throw new Error("unchanged tile wrote");
+  }
+  liveSandbox.updateTile(card, "dirty", "note", "caution");
+  if (card._value.textContent !== "dirty" || card._qualifier.textContent !== "note") {
+    throw new Error("tile values " + card._value.textContent + "/" + card._qualifier.textContent);
+  }
+
+  const pick = liveSandbox.createOpenDispatch({
+    dispatch_id: "d-open",
+    backend: "codex",
+    mode: "implement",
+    liveness: { state: "idle", idle_minutes: 3, source: "/tmp/a" },
+  });
+  snap = countWrites(pick);
+  liveSandbox.updateOpenDispatch(pick, {
+    dispatch_id: "d-open",
+    backend: "codex",
+    mode: "implement",
+    liveness: { state: "idle", idle_minutes: 3, source: "/tmp/a" },
+  });
+  if (deltaWrites(snap, countWrites(pick)).total !== 0) {
+    throw new Error("unchanged dispatch card wrote");
+  }
+  liveSandbox.updateOpenDispatch(pick, {
+    dispatch_id: "d-open",
+    backend: "grok",
+    mode: "read-only",
+    liveness: { state: "recent activity", idle_minutes: 1, source: "/tmp/b" },
+  });
+  if (pick._chip.textContent !== "recent activity") {
+    throw new Error("liveness " + pick._chip.textContent);
+  }
+  if (pick._meta.textContent !== "grok · read-only") {
+    throw new Error("meta " + pick._meta.textContent);
+  }
+  if (pick._path.textContent !== "/tmp/b") {
+    throw new Error("path " + pick._path.textContent);
+  }
+
+  const row = liveSandbox.createDispatchRow({
+    dispatch_id: "d-1",
+    backend: "codex",
+    mode: "implement",
+    state: "open",
+    exit: null,
+  });
+  snap = countWrites(row);
+  liveSandbox.updateDispatchRow(row, {
+    dispatch_id: "d-1",
+    backend: "codex",
+    mode: "implement",
+    state: "open",
+    exit: null,
+  });
+  if (deltaWrites(snap, countWrites(row)).total !== 0) {
+    throw new Error("unchanged table row wrote");
+  }
+  liveSandbox.updateDispatchRow(row, {
+    dispatch_id: "d-1",
+    backend: "codex",
+    mode: "read-only",
+    state: "closed",
+    exit: 0,
+  });
+  if (row.children[2].textContent !== "read-only" || row.children[3].textContent !== "closed") {
+    throw new Error("table cells were not updated");
+  }
+
+  const gate = liveSandbox.createGate({
+    binding: "dirty",
+    policy: "baseline",
+    purpose: "unit",
+  });
+  snap = countWrites(gate);
+  liveSandbox.updateGate(gate, { binding: "dirty", policy: "baseline", purpose: "unit" });
+  if (deltaWrites(snap, countWrites(gate)).total !== 0) {
+    throw new Error("unchanged gate wrote");
+  }
+  liveSandbox.updateGate(gate, { binding: "clean", policy: "strict", purpose: "publish" });
+  if (gate._badge.textContent !== "clean") {
+    throw new Error("binding " + gate._badge.textContent);
+  }
+  if (gate._meta.textContent !== "strict · publish") {
+    throw new Error("gate meta " + gate._meta.textContent);
+  }
+  if (gate._note.textContent !== "Publication evidence") {
+    throw new Error("caveat " + gate._note.textContent);
+  }
+});
+
+check("update: updateDial writes changed fields; focused select is skipped until blur (headless)", function () {
+  const box = liveSandbox.createDial({
+    key: "stop",
+    record: { value: "worktree", scope: "policy", source: "default" },
+    locked: false,
+  });
+  const snap = countWrites(box);
+  liveSandbox.updateDial(box, {
+    key: "stop",
+    record: { value: "worktree", scope: "policy", source: "default" },
+    locked: false,
+  });
+  const quiet = deltaWrites(snap, countWrites(box));
+  if (quiet.total !== 0 || quiet.value !== 0) {
+    throw new Error("unchanged dial wrote " + JSON.stringify(quiet));
+  }
+  liveSandbox.document.activeElement = box._select;
+  liveSandbox.updateDial(box, {
+    key: "stop",
+    record: {
+      value: "merge",
+      scope: "permission",
+      source: "store",
+      set_by: "console",
+      set_at: "2026-08-18T00:00:00Z",
+      provenance: "selftest",
+    },
+    locked: false,
+  });
+  if (box._select.value !== "worktree") {
+    throw new Error("focused select was clobbered to " + box._select.value);
+  }
+  if (box._value.textContent !== "merge") {
+    throw new Error("dial current value stayed " + box._value.textContent);
+  }
+  if (box._meta.textContent.indexOf("permission") === -1 || box._meta.textContent.indexOf("selftest") === -1) {
+    throw new Error("dial meta " + box._meta.textContent);
+  }
+  if (!box._grant || box._grant.textContent !== "grants authority") {
+    throw new Error("grants-authority chip was not applied");
+  }
+  liveSandbox.document.activeElement = null;
+  box._select.blur();
+  if (box._select.value !== "merge") {
+    throw new Error("select was not reapplied after blur: " + box._select.value);
+  }
+});
+
+check("update: stampUpdated writes #updated-at through txt and is quiet on the same second (headless)", function () {
+  const updated = makeLiveNode("p");
+  let hours = 14;
+  let minutes = 54;
+  let seconds = 41;
+  liveSandbox.document.getElementById = function (id) {
+    return id === "updated-at" ? updated : null;
+  };
+  liveSandbox.Date = function () {
+    return {
+      getHours: function () {
+        return hours;
+      },
+      getMinutes: function () {
+        return minutes;
+      },
+      getSeconds: function () {
+        return seconds;
+      },
+    };
+  };
+  vm.runInContext(
+    "this.stampUpdated = " + extractBlock(/function stampUpdated\(/),
+    liveSandbox
+  );
+  liveSandbox.stampUpdated();
+  if (updated.textContent !== "Updated 14:54:41") {
+    throw new Error("first stamp " + updated.textContent);
+  }
+  const before = countWrites(updated);
+  liveSandbox.stampUpdated();
+  if (deltaWrites(before, countWrites(updated)).total !== 0) {
+    throw new Error("same-second stamp wrote");
+  }
+  seconds = 42;
+  liveSandbox.stampUpdated();
+  if (updated.textContent !== "Updated 14:54:42") {
+    throw new Error("later stamp " + updated.textContent);
+  }
+});
 JS
 then
   :
@@ -635,6 +1277,11 @@ if [[ -f "$TMP_ROOT/render.tap" ]]; then
 else
   fail "render: permission-scope dial shows grants-authority chip; default does not"
   fail "render: publish link text is host-plus-path; href stays the parsed URL"
+  fail "update: txt assigns only when the shown text differs (headless; no browser DOM)"
+  fail "update: updateUnit applies a changed review and is quiet when unchanged (headless)"
+  fail "update: vitals/dispatch/gate/table apply changed fields only (headless)"
+  fail "update: updateDial writes changed fields; focused select is skipped until blur (headless)"
+  fail "update: stampUpdated writes #updated-at through txt and is quiet on the same second (headless)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1335,6 +1982,21 @@ def csrf_good_state():
         raise RuntimeError("correct csrf state status %s" % status)
 
 
+def state_bodies_stable():
+    if not cookie or not csrf:
+        raise RuntimeError("no session")
+    status1, raw1, headers1 = capture("GET", "/api/state", headers=auth_headers())
+    status2, raw2, headers2 = capture("GET", "/api/state", headers=auth_headers())
+    if status1 != 200 or status2 != 200:
+        raise RuntimeError(
+            "consecutive /api/state status %s then %s" % (status1, status2)
+        )
+    require_security(headers1, "state stability first")
+    require_security(headers2, "state stability second")
+    if raw1 != raw2:
+        raise RuntimeError("consecutive /api/state bodies differ")
+
+
 def csrf_good_transcript():
     if not cookie or not csrf:
         raise RuntimeError("no session")
@@ -1682,6 +2344,7 @@ check("origin: Sec-Fetch-Site not same-origin is 403", get_sec_fetch_site)
 check("browser: GET /api/state same-origin is 200; none, cross-site, evil Origin are 403", api_state_browser_headers)
 check("browser: GET /api/dials same-origin is 200; none, cross-site, evil Origin are 403", api_dials_browser_headers)
 check("auth: /api/state with cookie matches the fixture", state_auth)
+check("two consecutive /api/state bodies are byte-identical on the unchanged fixture (JSON stability; DOM not observed)", state_bodies_stable)
 check("host: localhost is 400", host_localhost)
 check("host: 127.0.0.1 with the wrong port is 400", host_other_port)
 check("origin: mismatched POST Origin is 403", origin_mismatch)
@@ -2179,6 +2842,284 @@ else
   fail "index-timeout: loop-index timeout returns 504"
   fail "index-timeout: GET / still serves after 504"
 fi
+
+# ---------------------------------------------------------------------------
+# Transcript source is chosen per backend, not "newest file"
+# ---------------------------------------------------------------------------
+WS_SRC="$(workspace srcsel)"
+init_git_repo "$WS_SRC"
+SRC_COMMON="$(python3 - "$WS_SRC" <<'PY'
+import os, subprocess, sys
+ws = sys.argv[1]
+raw = subprocess.check_output(
+    ["git", "-C", ws, "rev-parse", "--git-common-dir"], text=True
+).strip()
+print(os.path.realpath(raw if os.path.isabs(raw) else os.path.join(ws, raw)))
+PY
+)"
+run_cmd begin-src "$RUN" begin --workspace "$WS_SRC"
+expect_status 0 "srcsel: loop-run begin"
+SRC_KEY="$(workspace_key "$WS_SRC")"
+SRC_CODEX="20260818T120000Z-srcodex"
+SRC_CURSOR="20260818T120000Z-srcursor"
+SRC_GROK="20260818T120000Z-srgrok"
+run_cmd src-codex "$JOURNAL" append --workspace "$WS_SRC" --event dispatch.start \
+  --field "dispatch_id=$SRC_CODEX" --field backend=codex --field mode=implement
+expect_status 0 "srcsel: codex dispatch is in the journal"
+run_cmd src-cursor "$JOURNAL" append --workspace "$WS_SRC" --event dispatch.start \
+  --field "dispatch_id=$SRC_CURSOR" --field backend=cursor --field mode=implement
+expect_status 0 "srcsel: cursor dispatch is in the journal"
+run_cmd src-grok "$JOURNAL" append --workspace "$WS_SRC" --event dispatch.start \
+  --field "dispatch_id=$SRC_GROK" --field backend=grok --field mode=implement
+expect_status 0 "srcsel: grok dispatch is in the journal"
+
+SRC_CODEX_DIR="$HOME/.config/olddonkey-loop/codex/$SRC_KEY/$SRC_CODEX"
+SRC_CURSOR_DIR="$SRC_COMMON/olddonkey-loop/cursor/$SRC_CURSOR"
+SRC_GROK_DIR="$SRC_COMMON/olddonkey-loop/grok/$SRC_GROK"
+mkdir -p "$SRC_CODEX_DIR" "$SRC_CURSOR_DIR" "$SRC_GROK_DIR"
+if python3 - "$SRC_CODEX_DIR" "$SRC_CURSOR_DIR" "$SRC_GROK_DIR" <<'PY'
+import os, sys
+
+base = 1700000000
+
+
+def plant(directory, rows):
+    os.makedirs(directory, exist_ok=True)
+    for name, offset, text in rows:
+        path = os.path.join(directory, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.utime(path, (base + offset, base + offset))
+
+
+plant(
+    sys.argv[1],
+    (
+        ("transcript.log", 0, "codex-preferred\n"),
+        ("prompt.txt", 200, "codex-decoy-prompt\n"),
+        ("last-message.txt", 300, "codex-newest-decoy\n"),
+        ("meta.tsv", 100, "codex-decoy-meta\n"),
+    ),
+)
+plant(
+    sys.argv[2],
+    (
+        ("stderr.log", 0, "cursor-preferred\n"),
+        ("output.json", 100, "cursor-fallback\n"),
+        ("prompt.txt", 200, "cursor-decoy-prompt\n"),
+        ("project-files.zlist", 300, "cursor-newest-decoy\n"),
+    ),
+)
+plant(
+    sys.argv[3],
+    (
+        ("transition.jsonl", 0, "grok-preferred\n"),
+        ("output.json", 100, "grok-fallback\n"),
+        ("state.json", 200, "grok-decoy-state\n"),
+        ("session.json", 300, "grok-newest-decoy\n"),
+    ),
+)
+PY
+then
+  pass "srcsel: planted decoy-newest files around each preferred source"
+else
+  fail "srcsel: planted decoy-newest files around each preferred source"
+fi
+
+CASE_STDOUT="$TMP_ROOT/srcsel.stdout"
+CASE_STDERR="$TMP_ROOT/srcsel.stderr"
+: >"$CASE_STDOUT"
+: >"$CASE_STDERR"
+"$CONSOLE" --workspace "$WS_SRC" >"$CASE_STDOUT" 2>"$CASE_STDERR" &
+SRC_PID=$!
+EXTRA_PIDS="$EXTRA_PIDS $SRC_PID"
+if wait_for_url "$CASE_STDOUT" "$SRC_PID"; then
+  pass "srcsel: printed a loopback URL"
+else
+  fail "srcsel: printed a loopback URL"
+fi
+SRC_FIELDS="$(parse_url "$CASE_STDOUT" 2>"$TMP_ROOT/srcsel-parse.err" || true)"
+SRC_PORT="${SRC_FIELDS%%	*}"
+SRC_TOKEN="${SRC_FIELDS#*	}"
+if [[ -n "$SRC_PORT" && -n "$SRC_TOKEN" && "$SRC_PORT" != "$SRC_FIELDS" ]]; then
+  SRC_TAP="$TMP_ROOT/srcsel.tap"
+  if python3 - "$SRC_PORT" "$SRC_TOKEN" \
+    "$SRC_CODEX" "$SRC_CURSOR" "$SRC_GROK" \
+    "$SRC_CODEX_DIR" "$SRC_CURSOR_DIR" "$SRC_GROK_DIR" \
+    >"$SRC_TAP" 2>"$TMP_ROOT/srcsel-http.err" <<'PY'
+import http.client
+import json
+import os
+import sys
+from urllib.parse import quote
+
+port = int(sys.argv[1])
+token = sys.argv[2]
+codex_id, cursor_id, grok_id = sys.argv[3], sys.argv[4], sys.argv[5]
+codex_dir, cursor_dir, grok_dir = sys.argv[6], sys.argv[7], sys.argv[8]
+host = "127.0.0.1:%d" % port
+origin = "http://127.0.0.1:%d" % port
+
+
+def check(name, fn):
+    try:
+        fn()
+        print("ok - %s" % name)
+    except Exception as error:
+        print("not ok - %s: %s" % (name, error))
+
+
+def request(method, path, body=None, headers=None):
+    hdrs = {}
+    if headers:
+        hdrs.update(headers)
+    payload = None
+    if body is not None:
+        payload = body if isinstance(body, bytes) else body.encode("utf-8")
+        hdrs.setdefault("Content-Length", str(len(payload)))
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        conn.request(method, path, body=payload, headers=hdrs)
+        response = conn.getresponse()
+        return response.status, response.read(), {
+            key.lower(): value for key, value in response.getheaders()
+        }
+    finally:
+        conn.close()
+
+
+status, raw, headers = request(
+    "POST",
+    "/api/session",
+    body=json.dumps({"token": token}),
+    headers={
+        "Host": host,
+        "Origin": origin,
+        "Content-Type": "application/json",
+    },
+)
+if status != 200:
+    raise SystemExit("srcsel session status %s body %r" % (status, raw))
+csrf = json.loads(raw.decode("utf-8"))["csrf"]
+cookie = headers.get("set-cookie", "").split(";", 1)[0]
+
+
+def transcript(dispatch_id):
+    status, raw, _headers = request(
+        "GET",
+        "/api/transcript?dispatch=%s" % quote(dispatch_id, safe=""),
+        headers={"Host": host, "Cookie": cookie, "X-Console-CSRF": csrf},
+    )
+    payload = None
+    if raw:
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError:
+            payload = raw
+    return status, payload
+
+
+def expect_path(dispatch_id, directory, name):
+    status, payload = transcript(dispatch_id)
+    if status != 200:
+        raise RuntimeError("status %s payload %r" % (status, payload))
+    wanted = os.path.realpath(os.path.join(directory, name))
+    got = payload.get("path")
+    if got != wanted:
+        raise RuntimeError("path %r want %r" % (got, wanted))
+    if os.path.basename(got) != name:
+        raise RuntimeError("basename %r" % os.path.basename(got))
+
+
+def expect_404(dispatch_id):
+    status, payload = transcript(dispatch_id)
+    if status != 404:
+        raise RuntimeError("status %s payload %r" % (status, payload))
+
+
+check(
+    "transcript source: codex prefers transcript.log over a newer decoy",
+    lambda: expect_path(codex_id, codex_dir, "transcript.log"),
+)
+check(
+    "transcript source: cursor prefers stderr.log over a newer decoy",
+    lambda: expect_path(cursor_id, cursor_dir, "stderr.log"),
+)
+check(
+    "transcript source: grok prefers transition.jsonl over a newer decoy",
+    lambda: expect_path(grok_id, grok_dir, "transition.jsonl"),
+)
+
+os.remove(os.path.join(cursor_dir, "stderr.log"))
+os.remove(os.path.join(grok_dir, "transition.jsonl"))
+
+check(
+    "transcript source: cursor falls back to output.json when stderr.log is gone",
+    lambda: expect_path(cursor_id, cursor_dir, "output.json"),
+)
+check(
+    "transcript source: grok falls back to output.json when transition.jsonl is gone",
+    lambda: expect_path(grok_id, grok_dir, "output.json"),
+)
+
+os.remove(os.path.join(codex_dir, "transcript.log"))
+os.remove(os.path.join(cursor_dir, "output.json"))
+os.remove(os.path.join(grok_dir, "output.json"))
+
+check(
+    "transcript source: 404 when no codex candidate remains (decoys ignored)",
+    lambda: expect_404(codex_id),
+)
+check(
+    "transcript source: 404 when no cursor candidate remains (decoys ignored)",
+    lambda: expect_404(cursor_id),
+)
+check(
+    "transcript source: 404 when no grok candidate remains (decoys ignored)",
+    lambda: expect_404(grok_id),
+)
+PY
+  then
+    :
+  else
+    printf 'not ok - srcsel driver crashed\n' >>"$SRC_TAP"
+  fi
+  if [[ -f "$SRC_TAP" ]]; then
+    while IFS= read -r line; do
+      case "$line" in
+        "ok - "*) pass "${line#ok - }" ;;
+        "not ok - "*)
+          CASE_STDOUT="$TMP_ROOT/srcsel.tap"
+          CASE_STDERR="$TMP_ROOT/srcsel-http.err"
+          fail "${line#not ok - }"
+          CASE_STDOUT=""
+          CASE_STDERR=""
+          ;;
+      esac
+    done < "$SRC_TAP"
+  else
+    fail "transcript source: codex prefers transcript.log over a newer decoy"
+    fail "transcript source: cursor prefers stderr.log over a newer decoy"
+    fail "transcript source: grok prefers transition.jsonl over a newer decoy"
+    fail "transcript source: cursor falls back to output.json when stderr.log is gone"
+    fail "transcript source: grok falls back to output.json when transition.jsonl is gone"
+    fail "transcript source: 404 when no codex candidate remains (decoys ignored)"
+    fail "transcript source: 404 when no cursor candidate remains (decoys ignored)"
+    fail "transcript source: 404 when no grok candidate remains (decoys ignored)"
+  fi
+else
+  fail "srcsel: URL is http://127.0.0.1:<port>/#token"
+  fail "transcript source: codex prefers transcript.log over a newer decoy"
+  fail "transcript source: cursor prefers stderr.log over a newer decoy"
+  fail "transcript source: grok prefers transition.jsonl over a newer decoy"
+  fail "transcript source: cursor falls back to output.json when stderr.log is gone"
+  fail "transcript source: grok falls back to output.json when transition.jsonl is gone"
+  fail "transcript source: 404 when no codex candidate remains (decoys ignored)"
+  fail "transcript source: 404 when no cursor candidate remains (decoys ignored)"
+  fail "transcript source: 404 when no grok candidate remains (decoys ignored)"
+fi
+stop_extra "$SRC_PID"
+SRC_PID=""
 
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' "$FAILED_CHECKS" "$CHECKS" >&2
