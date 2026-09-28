@@ -13,7 +13,7 @@ only what it would sign its name to.
 | `skills/cursor-implementation-loop/SKILL.md` | The loop: decompose → dispatch → review → iterate → gate → publish → next |
 | `skills/.../references/` | Dials rationale, unit-contract skeleton, review checklist, gate details, Cursor runtime notes |
 | `skills/.../scripts/run-gate.sh` | Test gate with real exit codes, baseline comparison, fail-closed parsing (verbatim from the Codex original) |
-| `skills/.../scripts/gate-selftest.sh` | 122 regression checks for the gate (interim byte-locked to the canonical suite) |
+| `skills/.../scripts/gate-selftest.sh` | 197 regression checks for the gate (interim byte-locked to the canonical suite) |
 | `agents/loop-implementer.md` | The only writable subagent — implements exactly one unit per dispatch |
 | `agents/loop-independent-reviewer.md` | Read-only deep reviewer; never saw the dispatch prompt, never fixes code |
 
@@ -40,7 +40,7 @@ After installing, verify the gate on your machine:
 
 ```bash
 bash skills/cursor-implementation-loop/scripts/gate-selftest.sh
-# expect: selftest: PASS (122 checks)
+# expect: selftest: PASS (197 checks)
 ```
 
 ## Pin your implementer model

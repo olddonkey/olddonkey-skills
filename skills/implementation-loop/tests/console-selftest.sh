@@ -658,6 +658,7 @@ vm.runInContext(extractBlock(/var DIAL_OPTIONS =/), sandbox);
   "wordVariant",
   "livenessVariant",
   "bindingVariant",
+  "verdictVariant",
   "reviewLabel",
   "publishSignature",
   "fillPublishFacts",
@@ -980,6 +981,7 @@ vm.runInContext(extractBlock(/var DIAL_OPTIONS =/), liveSandbox);
   "wordVariant",
   "livenessVariant",
   "bindingVariant",
+  "verdictVariant",
   "reviewLabel",
   "publishSignature",
   "fillPublishFacts",
@@ -1011,6 +1013,8 @@ vm.runInContext(extractBlock(/var DIAL_OPTIONS =/), liveSandbox);
     liveSandbox
   );
 });
+
+const GATE_CAVEAT = "Recorded gate result — not proof of what ships.";
 
 check("update: txt assigns only when the shown text differs (headless; no browser DOM)", function () {
   const node = makeLiveNode("p");
@@ -1155,16 +1159,109 @@ check("update: vitals/dispatch/gate/table apply changed fields only (headless)",
   if (deltaWrites(snap, countWrites(gate)).total !== 0) {
     throw new Error("unchanged gate wrote");
   }
-  liveSandbox.updateGate(gate, { binding: "clean", policy: "strict", purpose: "publish" });
+  liveSandbox.updateGate(gate, {
+    binding: "clean",
+    policy: "strict",
+    purpose: "publish",
+    verdict: "green",
+  });
   if (gate._badge.textContent !== "clean") {
     throw new Error("binding " + gate._badge.textContent);
   }
   if (gate._meta.textContent !== "strict · publish") {
     throw new Error("gate meta " + gate._meta.textContent);
   }
-  if (gate._note.textContent !== "Publication evidence") {
+  if (gate._verdict.textContent !== "green" || !/\bis-ok\b/.test(gate._verdict.className)) {
+    throw new Error("verdict " + gate._verdict.textContent + " " + gate._verdict.className);
+  }
+  if (gate._note.textContent !== GATE_CAVEAT) {
     throw new Error("caveat " + gate._note.textContent);
   }
+  liveSandbox.updateGate(gate, {
+    binding: "clean",
+    policy: "strict",
+    purpose: "publish",
+    verdict: "red",
+  });
+  if (gate._verdict.textContent !== "red" || !/\bis-danger\b/.test(gate._verdict.className)) {
+    throw new Error("verdict update " + gate._verdict.textContent + " " + gate._verdict.className);
+  }
+  liveSandbox.updateGate(gate, { binding: "clean", policy: "strict", purpose: "publish" });
+  if (gate._verdict.textContent !== "unknown" || !/\bis-neutral\b/.test(gate._verdict.className)) {
+    throw new Error("absent verdict " + gate._verdict.textContent + " " + gate._verdict.className);
+  }
+  if (gate._note.textContent !== GATE_CAVEAT) {
+    throw new Error("caveat after update " + gate._note.textContent);
+  }
+});
+
+function liveChips(card, marker) {
+  const found = [];
+  (function visit(node) {
+    if (/\bchip\b/.test(node.className || "") && new RegExp("\\b" + marker + "\\b").test(node.className)) {
+      found.push(node);
+    }
+    (node.children || []).forEach(visit);
+  })(card);
+  return found;
+}
+
+function expectCleanGateCard(gate, word, variant) {
+  const card = liveSandbox.createGate(gate);
+  const verdicts = liveChips(card, "gate-verdict");
+  if (verdicts.length !== 1) {
+    throw new Error("verdict chip count " + verdicts.length);
+  }
+  if (verdicts[0].textContent !== word) {
+    throw new Error("verdict text " + verdicts[0].textContent);
+  }
+  ["ok", "caution", "danger", "neutral"].forEach(function (name) {
+    if (new RegExp("\\bis-" + name + "\\b").test(verdicts[0].className) !== (name === variant)) {
+      throw new Error("verdict class " + verdicts[0].className);
+    }
+  });
+  const bindings = liveChips(card, "gate-binding");
+  if (bindings.length !== 1 || bindings[0].textContent !== "clean") {
+    throw new Error("binding chip lost");
+  }
+  if (card._meta.textContent !== "strict · unit-final") {
+    throw new Error("gate meta " + card._meta.textContent);
+  }
+  if (card._note.textContent !== GATE_CAVEAT) {
+    throw new Error("caveat " + card._note.textContent);
+  }
+  if (card.textContent.indexOf(GATE_CAVEAT) === -1) {
+    throw new Error("card text lacks the caveat: " + card.textContent);
+  }
+  if (/publication evidence/i.test(card.textContent)) {
+    throw new Error("card claims publication evidence: " + card.textContent);
+  }
+}
+
+check("render: clean green gate shows verdict chip 'green' (is-ok), the fixed caveat, no 'Publication evidence' (headless)", function () {
+  expectCleanGateCard(
+    { binding: "clean", policy: "strict", purpose: "unit-final", verdict: "green", gate_exit: 0 },
+    "green",
+    "ok"
+  );
+});
+
+check("render: clean red gate shows verdict chip 'red' (is-danger), the fixed caveat, no 'Publication evidence' (headless)", function () {
+  expectCleanGateCard(
+    { binding: "clean", policy: "strict", purpose: "unit-final", verdict: "red", gate_exit: 1 },
+    "red",
+    "danger"
+  );
+});
+
+check("render: clean unknown gate shows verdict chip 'unknown' (is-neutral), the fixed caveat, no 'Publication evidence' (headless)", function () {
+  [
+    { binding: "clean", policy: "strict", purpose: "unit-final", verdict: "unknown" },
+    { binding: "clean", policy: "strict", purpose: "unit-final", totals: "exit=0" },
+    { binding: "clean", policy: "strict", purpose: "unit-final", verdict: "maybe", gate_exit: 0 },
+  ].forEach(function (gate) {
+    expectCleanGateCard(gate, "unknown", "neutral");
+  });
 });
 
 check("update: updateDial writes changed fields; focused select is skipped until blur (headless)", function () {
@@ -1280,6 +1377,9 @@ else
   fail "update: txt assigns only when the shown text differs (headless; no browser DOM)"
   fail "update: updateUnit applies a changed review and is quiet when unchanged (headless)"
   fail "update: vitals/dispatch/gate/table apply changed fields only (headless)"
+  fail "render: clean green gate shows verdict chip 'green' (is-ok), the fixed caveat, no 'Publication evidence' (headless)"
+  fail "render: clean red gate shows verdict chip 'red' (is-danger), the fixed caveat, no 'Publication evidence' (headless)"
+  fail "render: clean unknown gate shows verdict chip 'unknown' (is-neutral), the fixed caveat, no 'Publication evidence' (headless)"
   fail "update: updateDial writes changed fields; focused select is skipped until blur (headless)"
   fail "update: stampUpdated writes #updated-at through txt and is quiet on the same second (headless)"
 fi

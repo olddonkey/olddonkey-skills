@@ -485,7 +485,11 @@ section {
   padding: 0.85rem 1rem;
 }
 
-.binding-note {
+.gate-verdict {
+  margin-right: 0.4rem;
+}
+
+.gate-note {
   display: block;
   margin: 0.35rem 0 0;
   color: var(--muted);

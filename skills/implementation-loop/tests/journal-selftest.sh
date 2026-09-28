@@ -860,6 +860,42 @@ expect_status 0 "loop-run: unit-end"
 run_cmd extra-check "$RUN" checkpoint --note pause --workspace "$WS_EXTRA"
 expect_status 0 "loop-run: checkpoint"
 
+# --- 11. gate.result verdict fields ---
+WS_GATE="$(workspace gate-result)"
+run_cmd gate-begin "$RUN" begin --workspace "$WS_GATE"
+RUN_GATE="$(field_from "$CASE_STDOUT" run)"
+GATE_FIELDS=(--field policy=strict --field purpose=unit-final --field binding=clean
+  --field totals=exit=0)
+run_cmd gate-green "$JOURNAL" append --workspace "$WS_GATE" --event gate.result \
+  "${GATE_FIELDS[@]}" --field verdict=green --field gate_exit=0
+expect_status 0 "gate.result: verdict=green gate_exit=0 is accepted"
+run_cmd gate-bad-verdict "$JOURNAL" append --workspace "$WS_GATE" --event gate.result \
+  "${GATE_FIELDS[@]}" --field verdict=maybe --field gate_exit=0
+expect_status 2 "gate.result: verdict=maybe is rejected (exit 2)"
+expect_output stderr "invalid verdict: maybe" "gate.result: verdict rejection names the value"
+run_cmd gate-bad-exit "$JOURNAL" append --workspace "$WS_GATE" --event gate.result \
+  "${GATE_FIELDS[@]}" --field verdict=red --field gate_exit=abc
+expect_status 2 "gate.result: gate_exit=abc is rejected (exit 2)"
+expect_output stderr "gate_exit must be an int" "gate.result: gate_exit rejection names the field"
+run_cmd gate-unknown-key "$JOURNAL" append --workspace "$WS_GATE" --event gate.result \
+  "${GATE_FIELDS[@]}" --field verdict=green --field gate_exit=0 --field outcome=green
+expect_status 2 "gate.result: an unknown key is still rejected (exit 2)"
+expect_output stderr "unknown payload key(s): outcome" "gate.result: unknown-key rejection names the key"
+if python3 - "$(store_dir "$WS_GATE")/runs/${RUN_GATE}.jsonl" <<'PY'
+import json, sys
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+gates = [event for event in events if event["event"] == "gate.result"]
+assert len(gates) == 1, gates
+assert gates[0]["verdict"] == "green"
+assert type(gates[0]["gate_exit"]) is int and gates[0]["gate_exit"] == 0
+assert gates[0]["totals"] == "exit=0"
+PY
+then
+  pass "gate.result: only the valid append lands, with gate_exit stored as an int"
+else
+  fail "gate.result: only the valid append lands, with gate_exit stored as an int"
+fi
+
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' "$FAILED_CHECKS" "$CHECKS" >&2
   exit 1

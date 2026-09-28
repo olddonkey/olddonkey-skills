@@ -24,35 +24,78 @@ The five lifecycle classes are moments on the production path:
 Authority is `scripts/loop-journal`. This section is a reader index, not a
 second store spec.
 
-**Root layout** (`scripts/loop-journal:322-338`):
+**Root layout** (`scripts/loop-journal:324-340`):
 
 `$HOME/.config/olddonkey-loop/journal/<workspace-key>/`
 
-`workspace-key` is `sha256(canonical workspace)` (`scripts/loop-journal:307-308`).
+`workspace-key` is `sha256(canonical workspace)` (`scripts/loop-journal:309-310`).
 The store contains `runs/`, `runs.tsv` (rebuildable cache), `context`,
 `unattributed.jsonl`, `generation`, and `meta.lock`. Retired context files are
-`context.retired-<run-id>` (`scripts/loop-journal:854`).
+`context.retired-<run-id>` (`scripts/loop-journal:856`).
 
-**Segment naming** (`scripts/loop-journal:411-414`):
+**Segment naming** (`scripts/loop-journal:413-416`):
 `runs/<run-id>.jsonl` where `<run-id>` is `YYYYMMDDTHHMMSSZ-` plus 6 hex
 digits (`scripts/loop-journal:45`).
 
 **Envelope fields** (`scripts/loop-journal:52`): `schema`, `seq`, `ts`,
 `event`, `run`, `attribution_failure`. Attributed lines carry `schema=1`,
-monotonic `seq`, UTC `ts`, `event`, and `run` (`scripts/loop-journal:869-875`).
+monotonic `seq`, UTC `ts`, `event`, and `run` (`scripts/loop-journal:871-877`).
 Unattributed lines omit `seq` and record `attribution_failure`
-(`scripts/loop-journal:889-894`).
+(`scripts/loop-journal:891-896`).
 
-**Closed event list** (`scripts/loop-journal:53-118`):
+**Closed event list** (`scripts/loop-journal:53-120`):
 
 `run.begin`, `run.end`, `unit.begin`, `unit.end`, `round.begin`,
 `checkpoint`, `review.recorded`, `publish.recorded`, `dispatch.start`,
 `dispatch.end`, `dispatch.abandoned`, `gate.result`, `journal.repaired`.
 
-**Segment classification** (`scripts/loop-journal:432-457`): an unterminated
+**Segment classification** (`scripts/loop-journal:434-459`): an unterminated
 valid tail line counts; an unterminated invalid tail is ignored (torn write);
 a newline-terminated invalid line mid-file or at the tail is mid-file
 corruption. The index uses this classification and never repairs.
+
+### `gate.result`
+
+Writer: `scripts/run-gate.sh` only — `journal_gate_result`, called from
+`emit_result` after the `RESULT:` line is printed and before the gate exits.
+It writes nothing when the journal helper is absent, and a failed append only
+warns; neither changes the gate's exit. Validation is the `gate.result` entry
+of `EVENT_SPECS` (`scripts/loop-journal:97-118`).
+
+| field | required | values | writer source |
+|---|---|---|---|
+| `policy` | yes | `strict`, `baseline`, `passthrough` | `--strict` / `--baseline` / neither |
+| `purpose` | yes | `unit-final`, `baseline-generation`, `focused`, `unspecified` | `--purpose` |
+| `binding` | yes | `clean`, `dirty`, `changed`, `unavailable` | before/after tree samples |
+| `verdict` | no | `green`, `red` | `green` iff the gate's own exit code is 0 |
+| `gate_exit` | no | int | the gate's own exit code — the value `run-gate.sh` exits with |
+| `totals` | no | `exit=<n>` (any JSON value is accepted) | the test suite's raw exit code |
+| `pre_head`, `pre_tree` | no | str | pre-run capture, only when it succeeded |
+| `post_head`, `post_tree` | no | str | post-run capture, only when it succeeded |
+| `reason` | no | str | why `binding` is `unavailable` |
+
+`verdict` and `gate_exit` record what the gate decided; `totals` records what
+the suite returned. They disagree whenever a policy overrides the suite: an
+exit-0 run judged red (a failed runner summary, an unrecognized runner under
+`--strict` or `--baseline`, zero executed tests, stray failure lines, a log
+replaced mid-run) is `totals=exit=0`, `verdict=red`, `gate_exit=1`, and a
+baseline-matched failure run is `totals=exit=1`, `verdict=green`,
+`gate_exit=0`. `run-gate.sh` always writes both `verdict` and `gate_exit`;
+they stay optional because earlier history and fixtures lack them.
+
+Readers (`build_gates` in `scripts/loop-index`) give every gate object a
+normalized `verdict`: `green` only when the journaled `verdict` is `green` and
+`gate_exit` is exactly the int 0; `red` only when it is `red` and `gate_exit`
+is an exact int other than 0; `unknown` otherwise — absent, malformed, or
+inconsistent pairs (`green` with 1, `red` with 0), a missing `gate_exit`, and
+non-int values such as `false` or `0.0`. `gate_exit` is passed through only
+when it is an exact int. An absent verdict reads as unknown; readers must
+never infer green from `totals`.
+
+No gate record is publication evidence, whatever its binding: a clean gate
+may be a `focused` or `baseline-generation` run, and even a `unit-final` gate
+only samples the tree at its endpoints. The console shows the verdict and the
+fixed caveat "Recorded gate result — not proof of what ships."
 
 ---
 

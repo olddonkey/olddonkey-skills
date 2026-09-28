@@ -737,17 +737,30 @@
     return row;
   }
 
+  function verdictVariant(verdict) {
+    if (verdict === "green") {
+      return "ok";
+    }
+    if (verdict === "red") {
+      return "danger";
+    }
+    return "neutral";
+  }
+
   function createGate(gate) {
     var box = el("div");
     box.className = "gate";
+    var verdict = chip("unknown", "neutral");
+    box.appendChild(verdict);
     var badge = chip("unknown", "neutral");
     box.appendChild(badge);
     var meta = el("p");
     meta.className = "meta";
     box.appendChild(meta);
     var note = el("span");
-    note.className = "binding-note";
+    note.className = "gate-note";
     box.appendChild(note);
+    box._verdict = verdict;
     box._badge = badge;
     box._meta = meta;
     box._note = note;
@@ -756,6 +769,17 @@
   }
 
   function updateGate(box, gate) {
+    var verdict =
+      gate.verdict === "green" || gate.verdict === "red"
+        ? gate.verdict
+        : "unknown";
+    setChip(
+      box._verdict,
+      verdict,
+      verdictVariant(verdict),
+      verdict !== "unknown",
+      "gate-verdict"
+    );
     var binding = gate.binding || "unknown";
     var clean = binding === "clean";
     setChip(box._badge, binding, bindingVariant(binding), clean, "gate-binding");
@@ -763,7 +787,7 @@
       box._meta,
       (gate.policy || "unknown") + " · " + (gate.purpose || "unknown")
     );
-    txt(box._note, clean ? "Publication evidence" : "Not publication evidence");
+    txt(box._note, "Recorded gate result — not proof of what ships.");
   }
 
   function appendCell(row, value, className) {

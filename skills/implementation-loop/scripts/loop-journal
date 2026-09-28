@@ -112,12 +112,14 @@ EVENT_SPECS = {
             "post_head": str,
             "post_tree": str,
             "reason": str,
+            "verdict": ("green", "red"),
+            "gate_exit": int,
         },
     },
     "journal.repaired": {"required": {"truncated_bytes": int}, "optional": {}},
 }
 INT_FIELDS = frozenset(
-    {"generation", "round", "exit", "truncated_bytes", "seq"}
+    {"generation", "round", "exit", "truncated_bytes", "seq", "gate_exit"}
 )
 
 

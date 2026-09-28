@@ -171,13 +171,33 @@ print(os.path.join(home, ".config", "olddonkey-loop", "journal", key))
 PY
 }
 
-expect_gate_result() { # $1=workspace $2=policy $3=purpose $4=binding $5=description
-  local store
-  store="$(journal_store "$1")"
-  if python3 - "$store" "$2" "$3" "$4" <<'PY'
+gate_result_count() { # $1=workspace; prints the number of journaled gate.result events
+  python3 - "$(journal_store "$1")" <<'PY'
 import json, os, sys
 
-store, policy, purpose, binding = sys.argv[1:]
+runs = os.path.join(sys.argv[1], "runs")
+count = 0
+if os.path.isdir(runs):
+    for name in sorted(os.listdir(runs)):
+        if name.endswith(".jsonl"):
+            for line in open(os.path.join(runs, name), encoding="utf-8"):
+                line = line.strip()
+                if line and json.loads(line).get("event") == "gate.result":
+                    count += 1
+print(count)
+PY
+}
+
+# The newest gate.result must be the one THIS case appended ($5=count before
+# the run), and its gate_exit/verdict must match the gate's actual process exit
+# ($CASE_STATUS), so journaling the suite's exit instead of the gate's fails.
+expect_gate_result() { # $1=workspace $2=policy $3=purpose $4=binding $5=prior count $6=verdict $7=totals $8=description
+  local store
+  store="$(journal_store "$1")"
+  if python3 - "$store" "$2" "$3" "$4" "$5" "$6" "$7" "$CASE_STATUS" <<'PY'
+import json, os, sys
+
+store, policy, purpose, binding, prior, verdict, totals, status = sys.argv[1:]
 events = []
 runs = os.path.join(store, "runs")
 if os.path.isdir(runs):
@@ -188,19 +208,54 @@ if os.path.isdir(runs):
                 if line:
                     events.append(json.loads(line))
 results = [event for event in events if event.get("event") == "gate.result"]
-if not results:
-    raise SystemExit(1)
+if len(results) != int(prior) + 1:
+    raise SystemExit(f"expected one new gate.result, found {len(results) - int(prior)}")
 event = results[-1]
 if event.get("policy") != policy or event.get("purpose") != purpose:
-    raise SystemExit(1)
+    raise SystemExit(f"policy/purpose {event}")
 if event.get("binding") != binding:
-    raise SystemExit(1)
+    raise SystemExit(f"binding {event}")
+if event.get("totals") != totals:
+    raise SystemExit(f"totals {event}")
+gate_exit = event.get("gate_exit")
+if type(gate_exit) is not int or gate_exit != int(status):
+    raise SystemExit(f"gate_exit {gate_exit!r} is not the gate's process exit {status}")
+if event.get("verdict") != ("green" if int(status) == 0 else "red"):
+    raise SystemExit(f"verdict {event.get('verdict')!r} disagrees with process exit {status}")
+if event.get("verdict") != verdict:
+    raise SystemExit(f"verdict {event.get('verdict')!r}, expected {verdict}")
 PY
   then
-    pass "$5"
+    pass "$8"
   else
-    fail "$5"
+    fail "$8"
   fi
+}
+
+# One journaled gate run in JOURNAL_WS (binding=clean): its exit, its unchanged
+# RESULT line, and the gate.result it appends. Without a journal helper the
+# same three checks are skipped, so the count is identical either way.
+journal_case() { # $1=name $2=gate exit $3=RESULT line $4=policy $5=purpose $6=verdict $7=totals, remaining=run-gate.sh args
+  local name="$1" status="$2" result="$3" policy="$4" purpose="$5" verdict="$6" totals="$7"
+  shift 7
+  local -a checks=(
+    "journal $name: gate exits $status"
+    "journal $name: RESULT line is unchanged"
+    "journal $name: gate.result policy=$policy purpose=$purpose verdict=$verdict gate_exit=$status totals=$totals"
+  )
+  if [[ -z "$JOURNAL" ]]; then
+    skip_checks "no loop-journal helper available" "${checks[@]}"
+    return 0
+  fi
+  local prior
+  prior="$(gate_result_count "$JOURNAL_WS")"
+  run_case_in_dir "journal-$name" "$JOURNAL_WS" \
+    env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
+    bash "$GATE" "$@"
+  expect_status "$status" "${checks[0]}"
+  expect_output "$result" "${checks[1]}"
+  expect_gate_result "$JOURNAL_WS" "$policy" "$purpose" clean "$prior" \
+    "$verdict" "$totals" "${checks[2]}"
 }
 
 # Without a baseline, run-gate keeps the suite's pass-through behavior.
@@ -836,60 +891,104 @@ if [[ -n "$JOURNAL" ]]; then
   init_git_repo "$JOURNAL_WS"
   env HOME="$HOME" "$JOURNAL" begin-run --workspace "$JOURNAL_WS" \
     > "$TMP_ROOT/journal-ws.begin-run"
+fi
 
-  run_case_in_dir journal-strict-green "$JOURNAL_WS" \
-    env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
-    bash "$GATE" --strict --purpose unit-final \
-    --log "$TMP_ROOT/journal-strict-green.log" -- \
-    bash -c 'printf '\''Ran 2 tests in 0.001s\nOK\n'\'''
-  expect_status 0 "strict green journal case stays green"
-  expect_output "RESULT: gate green" "strict green RESULT line is unchanged"
-  expect_gate_result "$JOURNAL_WS" strict unit-final clean \
-    "strict green emits gate.result policy=strict purpose=unit-final binding=clean"
+journal_case strict-green 0 "RESULT: gate green" \
+  strict unit-final green "exit=0" \
+  --strict --purpose unit-final --log "$TMP_ROOT/journal-strict-green.log" -- \
+  bash -c 'printf '\''Ran 2 tests in 0.001s\nOK\n'\'''
 
-  run_case_in_dir journal-strict-red "$JOURNAL_WS" \
-    env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
-    bash "$GATE" --strict --purpose focused \
-    --log "$TMP_ROOT/journal-strict-red.log" -- \
-    bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
-  expect_status 1 "strict red journal case stays red"
-  expect_output "RESULT: gate RED — do not publish until resolved or explained" \
-    "strict red RESULT line is unchanged"
-  expect_gate_result "$JOURNAL_WS" strict focused clean \
-    "strict red emits gate.result policy=strict purpose=focused binding=clean"
+journal_case strict-red 1 "RESULT: gate RED — do not publish until resolved or explained" \
+  strict focused red "exit=1" \
+  --strict --purpose focused --log "$TMP_ROOT/journal-strict-red.log" -- \
+  bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
 
-  run_case_in_dir journal-baseline-green "$JOURNAL_WS" \
-    env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
-    bash "$GATE" --baseline "$EMPTY_BASELINE" --purpose baseline-generation \
-    --log "$TMP_ROOT/journal-baseline-green.log" -- \
-    bash -c 'printf '\''=========================== 2 passed in 0.10s ===========================\n'\'''
-  expect_status 0 "baseline green journal case stays green"
-  expect_output "RESULT: gate green" "baseline green RESULT line is unchanged"
-  expect_gate_result "$JOURNAL_WS" baseline baseline-generation clean \
-    "baseline green emits gate.result policy=baseline purpose=baseline-generation binding=clean"
+journal_case baseline-green 0 "RESULT: gate green" \
+  baseline baseline-generation green "exit=0" \
+  --baseline "$EMPTY_BASELINE" --purpose baseline-generation \
+  --log "$TMP_ROOT/journal-baseline-green.log" -- \
+  bash -c 'printf '\''=========================== 2 passed in 0.10s ===========================\n'\'''
 
-  run_case_in_dir journal-plain-green "$JOURNAL_WS" \
-    env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
-    bash "$GATE" --purpose unspecified \
-    --log "$TMP_ROOT/journal-plain-green.log" -- \
-    bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
-  expect_status 0 "pass-through green journal case stays green"
-  expect_output "RESULT: gate green (pass-through: exit code only)" \
-    "pass-through green RESULT line is unchanged"
-  expect_gate_result "$JOURNAL_WS" passthrough unspecified clean \
-    "pass-through green emits gate.result policy=passthrough binding=clean"
+journal_case plain-green 0 "RESULT: gate green (pass-through: exit code only)" \
+  passthrough unspecified green "exit=0" \
+  --purpose unspecified --log "$TMP_ROOT/journal-plain-green.log" -- \
+  bash -c 'printf '\''Ran 1 test in 0.001s\nOK\n'\'''
 
-  run_case_in_dir journal-plain-red "$JOURNAL_WS" \
-    env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
-    bash "$GATE" --purpose unspecified \
-    --log "$TMP_ROOT/journal-plain-red.log" -- \
-    bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
-  expect_status 1 "pass-through red journal case stays red"
-  expect_output "RESULT: gate RED — do not publish until resolved or explained" \
-    "pass-through red RESULT line is unchanged"
-  expect_gate_result "$JOURNAL_WS" passthrough unspecified clean \
-    "pass-through red emits gate.result policy=passthrough binding=clean"
+journal_case plain-red 1 "RESULT: gate RED — do not publish until resolved or explained" \
+  passthrough unspecified red "exit=1" \
+  --purpose unspecified --log "$TMP_ROOT/journal-plain-red.log" -- \
+  bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n=========================== 1 failed in 0.01s ===========================\n'\''; exit 1'
 
+# Every path where the suite exits 0 but the gate is red must journal red:
+# totals keeps the suite's exit=0 while verdict/gate_exit record the gate's.
+journal_case plain-masked-summary 1 \
+  "RESULT: gate RED — runner summary reports failures but exit code is 0" \
+  passthrough focused red "exit=0" \
+  --purpose focused --log "$TMP_ROOT/journal-plain-masked-summary.log" -- \
+  bash -c 'printf '\''=========================== 1 failed in 0.01s ===========================\n'\'''
+
+journal_case strict-unrecognized 1 \
+  "RESULT: gate RED — strict needs a recognized unittest/pytest verdict; use pass-through for other runners" \
+  strict unit-final red "exit=0" \
+  --strict --purpose unit-final --log "$TMP_ROOT/journal-strict-unrecognized.log" -- \
+  bash -c ':'
+
+journal_case strict-zero-tests 1 \
+  "RESULT: gate RED — no executed tests — skipped-only or zero-test run" \
+  strict unit-final red "exit=0" \
+  --strict --purpose unit-final --log "$TMP_ROOT/journal-strict-zero-tests.log" -- \
+  bash -c 'printf '\''Ran 0 tests in 0.000s\nOK\n'\'''
+
+journal_case strict-failure-line 1 \
+  "RESULT: gate RED — failure lines present despite exit 0" \
+  strict unit-final red "exit=0" \
+  --strict --purpose unit-final --log "$TMP_ROOT/journal-strict-failure-line.log" -- \
+  bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n=========================== 2 passed in 0.10s ===========================\n'\'''
+
+journal_case baseline-masked-line 1 \
+  "RESULT: gate RED — exit 0 but failure lines present (is the runner masking its exit code?)" \
+  baseline unit-final red "exit=0" \
+  --baseline "$EMPTY_BASELINE" --purpose unit-final \
+  --log "$TMP_ROOT/journal-baseline-masked-line.log" -- \
+  bash -c 'printf '\''FAILED tests/test_widget.py::test_new - AssertionError: boom\n'\'''
+
+journal_case baseline-unrecognized 1 \
+  "RESULT: gate RED — unrecognized runner output; --baseline supports unittest/pytest only" \
+  baseline unit-final red "exit=0" \
+  --baseline "$EMPTY_BASELINE" --purpose unit-final \
+  --log "$TMP_ROOT/journal-baseline-unrecognized.log" -- \
+  bash -c ':'
+
+journal_case baseline-zero-tests 1 \
+  "RESULT: gate RED — no executed tests — skipped-only or unrecognized runner output" \
+  baseline unit-final red "exit=0" \
+  --baseline "$EMPTY_BASELINE" --purpose unit-final \
+  --log "$TMP_ROOT/journal-baseline-zero-tests.log" -- \
+  bash -c 'printf '\''Ran 0 tests in 0.000s\nOK\n'\'''
+
+JOURNAL_SWAP_LOG="$TMP_ROOT/journal-log-swap.log"
+journal_case log-swap 1 \
+  "RESULT: gate RED — log file was replaced during the run; refusing to judge it" \
+  passthrough focused red "exit=0" \
+  --purpose focused --log "$JOURNAL_SWAP_LOG" -- \
+  bash -c "rm -f '$JOURNAL_SWAP_LOG'; printf '=========================== 1 passed in 0.01s ===========================\n' > '$JOURNAL_SWAP_LOG'"
+
+# The reverse: a baseline-matched failure is a green gate over a suite exit 1,
+# and a nonzero no-tests run is red with the gate's exit, not the suite's.
+journal_case baseline-match 0 \
+  "RESULT: gate green (failures match baseline — no new failures)" \
+  baseline unit-final green "exit=1" \
+  --baseline "$UNIT_BASELINE" --purpose unit-final \
+  --log "$TMP_ROOT/journal-baseline-match.log" -- \
+  bash -c 'printf '\''FAIL: test_known (tests.Case.test_known)\nRan 1 test in 0.001s\nFAILED (failures=1)\n'\''; exit 1'
+
+journal_case baseline-no-tests-exit-5 1 "RESULT: gate RED — no tests ran" \
+  baseline focused red "exit=5" \
+  --baseline "$EMPTY_BASELINE" --purpose focused \
+  --log "$TMP_ROOT/journal-baseline-no-tests-exit-5.log" -- \
+  bash -c 'printf '\''ERROR t.py - RuntimeError: boom\nno tests ran in 0.01s\n'\''; exit 5'
+
+if [[ -n "$JOURNAL" ]]; then
   FAIL_JOURNAL="$TMP_ROOT/fail-journal"
   printf '%s\n' '#!/usr/bin/env bash' 'echo journal-stub-failed >&2' 'exit 6' \
     > "$FAIL_JOURNAL"
@@ -904,12 +1003,9 @@ if [[ -n "$JOURNAL" ]]; then
   expect_output "warning: loop-journal gate.result failed" \
     "a failing journal helper prints one warning"
 else
-  skip_checks "no tomllib python3 available" \
-    "strict green emits gate.result policy=strict purpose=unit-final binding=clean" \
-    "strict red emits gate.result policy=strict purpose=focused binding=clean" \
-    "baseline green emits gate.result policy=baseline purpose=baseline-generation binding=clean" \
-    "pass-through green emits gate.result policy=passthrough binding=clean" \
-    "pass-through red emits gate.result policy=passthrough binding=clean" \
+  skip_checks "no loop-journal helper available" \
+    "a failing journal helper does not change a green verdict" \
+    "failing helper keeps the RESULT line" \
     "a failing journal helper prints one warning"
 fi
 

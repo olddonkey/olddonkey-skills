@@ -475,6 +475,20 @@ def build_gates(events: list[dict]) -> list[dict]:
         }
         if "totals" in event:
             gate["totals"] = event["totals"]
+        # Stored JSON is not payload-validated here, and False == 0 == 0.0 in
+        # Python, so only an exact int gate_exit that agrees with the journaled
+        # verdict counts. Never infer a verdict from totals.
+        verdict = event.get("verdict")
+        gate_exit = event.get("gate_exit")
+        exact_exit = type(gate_exit) is int
+        if verdict == "green" and exact_exit and gate_exit == 0:
+            gate["verdict"] = "green"
+        elif verdict == "red" and exact_exit and gate_exit != 0:
+            gate["verdict"] = "red"
+        else:
+            gate["verdict"] = "unknown"
+        if exact_exit:
+            gate["gate_exit"] = gate_exit
         for key in ("reason", "pre_head", "post_head"):
             value = optional_str(event, key)
             if value is not None:
