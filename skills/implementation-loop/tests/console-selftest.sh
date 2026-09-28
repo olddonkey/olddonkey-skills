@@ -2314,9 +2314,13 @@ check("flow: a dispatch with no usable start draws an unknown backend node after
         return p.getAttribute("d");
       }).join(" | "));
     }
+    const aria = root._parts.svg.getAttribute("aria-label");
+    if (/plus dispatches with an unknown backend/.test(aria) !== shown) {
+      throw new Error(where + ": aria-label " + aria);
+    }
   }
   expectUnknown("All", true, "1 failed");
-  if (!/3 implementers, 3 dispatches/.test(root._parts.svg.getAttribute("aria-label"))) {
+  if (!/2 implementers, plus dispatches with an unknown backend, 3 dispatches/.test(root._parts.svg.getAttribute("aria-label"))) {
     throw new Error("aria-label " + root._parts.svg.getAttribute("aria-label"));
   }
   if (root._parts.recent.textContent.indexOf("#5 dispatch.end: unknown backend → Judge · exit 1") === -1) {

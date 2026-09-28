@@ -918,7 +918,10 @@
     return partial ? "partial: " + text : text;
   }
 
-  function flowAriaLabel(picked, implementers, partial) {
+  function flowAriaLabel(picked, backends, partial) {
+    // The unknown-backend lane is not an implementer; name it on its own.
+    var orphans = backends.indexOf(FLOW.unknown) !== -1;
+    var implementers = backends.length - (orphans ? 1 : 0);
     var dispatches = 0;
     var byBackend = flowOwn(picked, "dispatches");
     var keys = byBackend && typeof byBackend === "object" ? Object.keys(byBackend) : [];
@@ -934,6 +937,7 @@
       "Loop flow of recorded events, not verified: Judge, " +
       implementers +
       (implementers === 1 ? " implementer, " : " implementers, ") +
+      (orphans ? "plus dispatches with an unknown backend, " : "") +
       dispatches +
       " dispatches, " +
       (flowNum(flowOwn(reviews, "pass")) + flowNum(flowOwn(reviews, "iterate"))) +
@@ -1360,7 +1364,7 @@
     }
     syncKeyed(parts.edges, layout.edges, flowKey, createFlowEdge, updateFlowEdge);
     syncKeyed(parts.nodes, layout.nodes, flowKey, createFlowNode, updateFlowNode);
-    svgAttr(parts.svg, "aria-label", flowAriaLabel(picked, backends.length, partial));
+    svgAttr(parts.svg, "aria-label", flowAriaLabel(picked, backends, partial));
     // A damaged record's counts are partial, so a truncated, damaged run gets
     // one notice that says both and never claims whole-run totals.
     var damage = "";
