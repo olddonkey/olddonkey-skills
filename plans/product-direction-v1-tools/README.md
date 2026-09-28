@@ -9,7 +9,7 @@ shipped implementation-loop skill, and nothing in the skill calls them.
   and the OS sandbox → init tool-surface check → strict result contract →
   patch → `git apply`). Not a registered loop backend: it writes no
   `dispatch.*` journal events.
-- `claude-dispatch-selftest.sh` — stub-driven selftest for it (31 checks).
+- `claude-dispatch-selftest.sh` — stub-driven selftest for it (32 checks).
 - `ci-gate.sh` — host replica of `.github/workflows/selftest.yml`: extracts
   every `run:` step verbatim and runs each in a fresh `bash -e`.
 

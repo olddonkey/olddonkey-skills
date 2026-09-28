@@ -867,3 +867,10 @@ failed. The script now applies under `umask 022`, a selftest case asserts an
 applied file is 0644, and the eleven affected files in the unit worktree
 were restored to the modes git records (no content change).
 
+Found during Unit 3: `git diff --no-index` names a **new** file `work/X` on
+both sides of its header (and a deleted file `pristine/X` on both), which the
+script's header normalisation did not handle, so `git apply --check` refused
+the patch and left the worktree untouched. The normalisation now strips
+either prefix; a selftest case applies a new executable file and a deletion
+(32/32). Unit 3's retained copy was re-diffed and applied.
+

@@ -129,9 +129,11 @@ python3 - "$B/changes.raw.patch" "$B/changes.patch" <<'PY'
 import sys,re
 out=[]
 for line in open(sys.argv[1],'rb').read().decode('utf-8','surrogateescape').splitlines(True):
-    line=re.sub(r'^(diff --git )a/pristine/(\S+) b/work/(\S+)', r'\1a/\2 b/\3', line)
-    line=re.sub(r'^--- a/pristine/', '--- a/', line)
-    line=re.sub(r'^\+\+\+ b/work/', '+++ b/', line)
+    # --no-index names a new file work/X on both sides and a deleted file
+    # pristine/X on both sides, so strip either prefix everywhere.
+    line=re.sub(r'^(diff --git )a/(?:pristine|work)/(\S+) b/(?:pristine|work)/(\S+)', r'\1a/\2 b/\3', line)
+    line=re.sub(r'^--- a/(?:pristine|work)/', '--- a/', line)
+    line=re.sub(r'^\+\+\+ b/(?:pristine|work)/', '+++ b/', line)
     out.append(line)
 open(sys.argv[2],'wb').write(''.join(out).encode('utf-8','surrogateescape'))
 PY

@@ -82,6 +82,13 @@ rc=$(run good edits); if [[ "$rc" == 2 ]] && untouched; then ok "reused tag refu
 mode=$(stat -f '%Lp' "$T/root/good"); [[ "$mode" == 700 ]] && ok "copy dir mode 0700" || bad "copy dir mode $mode"
 rmode=$(stat -f '%Lp' "$T/root"); [[ "$rmode" == 700 ]] && ok "root mode 0700" || bad "root mode $rmode"
 
+# New and deleted files survive the patch normalisation.
+echo gone > "$REPO/old.txt"; git -C "$REPO" add old.txt; git -C "$REPO" -c user.email=t@t -c user.name=t commit -qm old
+mkstub newdel "$INIT_OK" "$RES_OK" 'mkdir -p sub && printf "new\n" > sub/new.sh && chmod 755 sub/new.sh && rm -f old.txt'
+rc=$(run t-newdel newdel)
+if [[ "$rc" == 0 && -f "$REPO/sub/new.sh" && ! -e "$REPO/old.txt" && "$(stat -f '%Lp' "$REPO/sub/new.sh")" == 755 ]]; then ok "a new executable file and a deleted file apply"; else bad "new/deleted rc=$rc"; cat "$T"/out.* | tail -5; fi
+git -C "$REPO" checkout -q -- old.txt 2>/dev/null; rm -rf "$REPO/sub"
+
 # Post-run boundary refusals.
 mkstub gitdir "$INIT_OK" "$RES_OK" 'mkdir -p .git'
 rc=$(run t-gitdir gitdir); if [[ "$rc" == 3 ]] && untouched; then ok ".git appearing in work -> refusal"; else bad "gitdir rc=$rc"; fi
