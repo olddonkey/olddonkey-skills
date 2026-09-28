@@ -12,6 +12,10 @@
 # Store: $HOME/.config/olddonkey-loop/journal/<sha256(canonical workspace)>/
 # JSONL segments are authoritative; runs.tsv is a rebuildable cache.
 #
+# Declared attribution: append fills unit/round from LOOP_UNIT/LOOP_ROUND for
+# dispatch.start, dispatch.end, dispatch.abandoned, and gate.result only, unless
+# the payload already carries them. An invalid value exits 2.
+#
 # Test-only overrides (not for production):
 #   LOOP_JOURNAL_GC_CAP_BYTES     default 52428800 (50 MB)
 #   LOOP_JOURNAL_LOCK_TIMEOUT_SEC default 5
@@ -84,15 +88,15 @@ EVENT_SPECS = {
             "backend": ("codex", "grok", "cursor"),
             "mode": ("implement", "read-only"),
         },
-        "optional": {},
+        "optional": {"unit": str, "round": int},
     },
     "dispatch.end": {
         "required": {"dispatch_id": str, "exit": int},
-        "optional": {"session": str},
+        "optional": {"session": str, "unit": str, "round": int},
     },
     "dispatch.abandoned": {
         "required": {"dispatch_id": str, "attested_by": ("user",)},
-        "optional": {},
+        "optional": {"unit": str, "round": int},
     },
     "gate.result": {
         "required": {
@@ -114,6 +118,8 @@ EVENT_SPECS = {
             "reason": str,
             "verdict": ("green", "red"),
             "gate_exit": int,
+            "unit": str,
+            "round": int,
         },
     },
     "journal.repaired": {"required": {"truncated_bytes": int}, "optional": {}},
@@ -121,6 +127,12 @@ EVENT_SPECS = {
 INT_FIELDS = frozenset(
     {"generation", "round", "exit", "truncated_bytes", "seq", "gate_exit"}
 )
+# Declared attribution: the only events that read LOOP_UNIT / LOOP_ROUND. The
+# label is whatever the caller declared, never proof of which unit ran.
+ATTRIBUTED_EVENTS = frozenset(
+    {"dispatch.start", "dispatch.end", "dispatch.abandoned", "gate.result"}
+)
+ATTRIBUTION_ENV = (("unit", "LOOP_UNIT"), ("round", "LOOP_ROUND"))
 
 
 class JournalError(Exception):
@@ -640,6 +652,8 @@ def validate_payload(event: str, payload: dict) -> dict:
         elif expected is str:
             if not isinstance(value, str):
                 fail(f"{key} must be a string", EXIT_USAGE)
+            if key == "unit" and event in ATTRIBUTED_EVENTS and not value:
+                fail("unit must not be empty", EXIT_USAGE)
             cleaned[key] = value
         elif expected is object:
             cleaned[key] = value
@@ -650,6 +664,25 @@ def validate_payload(event: str, payload: dict) -> dict:
         else:
             fail(f"invalid field {key}", EXIT_USAGE)
     return cleaned
+
+
+def attribution_from_env(event: str, payload: dict) -> None:
+    """Fill declared unit/round from LOOP_UNIT/LOOP_ROUND. Only the four
+    attributed events read them, and an explicit payload field wins."""
+    if event not in ATTRIBUTED_EVENTS:
+        return
+    for key, name in ATTRIBUTION_ENV:
+        if key in payload or name not in os.environ:
+            continue
+        raw = os.environ[name]
+        if key == "unit":
+            if not raw or contains_newline(raw):
+                fail(f"{name} must be a non-empty single-line string", EXIT_USAGE)
+            payload[key] = raw
+        else:
+            if not (raw.isascii() and raw.isdigit()) or int(raw) < 1:
+                fail(f"{name} must be a positive integer", EXIT_USAGE)
+            payload[key] = int(raw)
 
 
 def validate_event_object(obj: dict, *, require_seq: bool) -> None:
@@ -943,6 +976,7 @@ def cmd_append(args: argparse.Namespace) -> int:
             fail(f"reserved field: {key}", EXIT_USAGE)
         seen.add(key)
         payload[key] = parse_field_value(key, raw)
+    attribution_from_env(args.event, payload)
     payload = validate_payload(args.event, payload)
     canonical = resolve_workspace(args.workspace)
     paths = store_paths(canonical)
@@ -1159,6 +1193,41 @@ def unmatched_starts(events: list[dict]) -> list[str]:
     return [item for item in started if item not in closed]
 
 
+def duplicated_dispatch_ids(events: list[dict]) -> list[str]:
+    """Ids with more than one dispatch.start or more than one terminal event.
+    Such a history cannot be read as open or closed, so recovery refuses it."""
+    starts: dict[str, int] = {}
+    terminals: dict[str, int] = {}
+    order: list[str] = []
+    for event in events:
+        kind = event.get("event")
+        dispatch_id = event.get("dispatch_id")
+        if not isinstance(dispatch_id, str):
+            continue
+        if kind == "dispatch.start":
+            counter = starts
+        elif kind in {"dispatch.end", "dispatch.abandoned"}:
+            counter = terminals
+        else:
+            continue
+        counter[dispatch_id] = counter.get(dispatch_id, 0) + 1
+        if counter[dispatch_id] == 2 and dispatch_id not in order:
+            order.append(dispatch_id)
+    return order
+
+
+def abandoned_payload(events: list[dict], dispatch_id: str) -> dict:
+    """dispatch.abandoned for an id with exactly one start: copy that start's
+    declared unit/round when present. Never reads LOOP_UNIT/LOOP_ROUND."""
+    payload: dict = {"dispatch_id": dispatch_id, "attested_by": "user"}
+    for event in events:
+        if event.get("event") == "dispatch.start" and event.get("dispatch_id") == dispatch_id:
+            for key in ("unit", "round"):
+                if key in event:
+                    payload[key] = event[key]
+    return validate_payload("dispatch.abandoned", payload)
+
+
 def cmd_recover(args: argparse.Namespace) -> int:
     canonical = resolve_workspace(args.workspace)
     paths = store_paths(canonical)
@@ -1172,9 +1241,17 @@ def cmd_recover(args: argparse.Namespace) -> int:
                 fail("active run segment does not exist", EXIT_STORE)
             if info["mid_corrupt"]:
                 fail("mid-file corruption", EXIT_MID_CORRUPT)
+            # Every refusal below is decided on the parsed events before the
+            # first write: no tail repair, append, or context retirement.
             events = list(info["events"])
-            if info["truncated_bytes"]:
-                events, _seq = repair_and_prepare(paths, record["run"])
+            duplicated = duplicated_dispatch_ids(events)
+            if duplicated:
+                fail(
+                    "recover refused; dispatch_id(s) with more than one "
+                    "dispatch.start or more than one dispatch.end/dispatch.abandoned: "
+                    + ", ".join(duplicated),
+                    EXIT_USAGE,
+                )
             unmatched = unmatched_starts(events)
             leftover = [item for item in unmatched if item not in acks]
             unknown = [item for item in acks if item not in unmatched]
@@ -1192,14 +1269,19 @@ def cmd_recover(args: argparse.Namespace) -> int:
                     + ", ".join(unknown),
                     EXIT_USAGE,
                 )
-            for dispatch_id in [item for item in unmatched if item in acks]:
+            abandonments = [
+                abandoned_payload(events, item) for item in unmatched if item in acks
+            ]
+            if info["truncated_bytes"]:
+                events, _seq = repair_and_prepare(paths, record["run"])
+            for payload in abandonments:
                 events, seq = repair_and_prepare(paths, record["run"])
                 _ = events
                 append_event(
                     paths,
                     record["run"],
                     "dispatch.abandoned",
-                    {"dispatch_id": dispatch_id, "attested_by": "user"},
+                    payload,
                     seq=seq,
                 )
             events, seq = repair_and_prepare(paths, record["run"])

@@ -83,6 +83,27 @@ Checkpoint (every run object, including terminal; degraded is unknown):
   even when a later non-checkpoint agent event is the freshness
   evidence.
 
+Declared attribution (dispatch and gate objects, timeline events):
+  unit and round are whatever the command's caller declared (LOOP_UNIT,
+  LOOP_ROUND); any local process can write them, so they are recorded,
+  unverified claims. attribution is declared, none, partial (a dispatch
+  with no dispatch.start), or conflict (its events declare different
+  values; no unit or round is shown and it counts as unattributed).
+
+Per-run totals and timeline:
+  counts_complete     false when the run is degraded or a torn tail was
+                      discarded; counts are then partial
+  counts              {all, units: {<unit>: ...}, unattributed} over every
+                      parsed event, never the timeline window; "ok" means
+                      a recorded exit of 0, nothing more. A dispatch, gate,
+                      review, or publication counts under units[<unit>]
+                      only when its resolved attribution is declared;
+                      none, partial, and conflict count under
+                      unattributed. all counts everything
+  timeline            the last 500 events in seq order, projected to a
+                      closed field whitelist (no free-text fields)
+  timeline_truncated  true when older events fell outside the window
+
 Test-only environment overrides:
   LOOP_INDEX_ACTIVITY_SEC           default 300
   LOOP_INDEX_STALL_SEC              default 1200
@@ -179,6 +200,16 @@ AGENT_INVOKED_EVENTS = frozenset(
     }
 )
 
+DISPATCH_EVENTS = frozenset({"dispatch.start", "dispatch.end", "dispatch.abandoned"})
+
+JOURNAL_EVENTS = AGENT_INVOKED_EVENTS | DISPATCH_EVENTS | {"gate.result", "journal.repaired"}
+
+GATE_BINDINGS = frozenset({"clean", "dirty", "changed", "unavailable"})
+
+GATE_PURPOSES = frozenset({"unit-final", "baseline-generation", "focused", "unspecified"})
+
+TIMELINE_LIMIT = 500
+
 ISO_Z_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 
 
@@ -274,10 +305,11 @@ def inspect_run(runs_dir: str, run_id: str) -> dict:
             "run_id": run_id,
             "events": [],
             "mid_corrupt": True,
+            "counts_complete": False,
             "generation": None,
             "status": "degraded",
         }
-    events, _truncated, mid = parse_segment(data)
+    events, discarded, mid = parse_segment(data)
     generation = None
     status = "degraded" if mid else "active"
     if not mid:
@@ -301,10 +333,12 @@ def inspect_run(runs_dir: str, run_id: str) -> dict:
                 except (TypeError, ValueError):
                     pass
         status = "degraded"
+    # A discarded torn tail is not corruption, but its event is uncounted.
     return {
         "run_id": run_id,
         "events": events,
         "mid_corrupt": mid,
+        "counts_complete": not mid and discarded == 0,
         "generation": generation,
         "status": status,
     }
@@ -382,6 +416,10 @@ def build_units(events: list[dict], *, degraded: bool) -> list[dict]:
         name = event.get("unit")
         if not isinstance(name, str) or not name:
             continue
+        # A declared dispatch/gate label is attribution, not unit lifecycle:
+        # it never creates a unit row (a conflicted dispatch names no unit).
+        if kind in DISPATCH_EVENTS or kind == "gate.result":
+            continue
         record = ensure(name)
         if kind == "unit.end" and event.get("status") in {"done", "parked"}:
             record["status"] = str(event.get("status"))
@@ -415,9 +453,45 @@ def build_units(events: list[dict], *, degraded: bool) -> list[dict]:
     return result
 
 
+def declared_label(event: dict) -> tuple[str | None, int | None]:
+    """The unit/round an event declares. Stored JSON is not payload-validated
+    here, so a malformed value (empty or non-str unit, round that is not an
+    int >= 1) reads as absent rather than being guessed at."""
+    unit = event.get("unit")
+    round_n = event.get("round")
+    if not isinstance(unit, str) or not unit or contains_newline(unit):
+        unit = None
+    if type(round_n) is not int or round_n < 1:
+        round_n = None
+    return unit, round_n
+
+
+def resolve_attribution(
+    labels: list[tuple[str | None, int | None]], started: bool
+) -> dict:
+    """A dispatch's attribution is the label its events agree on. Different
+    declared values are a conflict and name no unit; never guess between them."""
+    units = {unit for unit, _ in labels if unit is not None}
+    rounds = {round_n for _, round_n in labels if round_n is not None}
+    if len(units) > 1 or len(rounds) > 1:
+        return {"attribution": "conflict"}
+    resolved: dict = {}
+    if units:
+        resolved["unit"] = units.pop()
+    if rounds:
+        resolved["round"] = rounds.pop()
+    if not started:
+        resolved["attribution"] = "partial"
+    else:
+        resolved["attribution"] = "declared" if "unit" in resolved else "none"
+    return resolved
+
+
 def build_dispatches(events: list[dict], *, degraded: bool) -> list[dict]:
     dispatches: dict[str, dict] = {}
     order: list[str] = []
+    labels: dict[str, list[tuple[str | None, int | None]]] = {}
+    started: set[str] = set()
     for event in events:
         kind = event.get("event")
         dispatch_id = event.get("dispatch_id")
@@ -433,8 +507,12 @@ def build_dispatches(events: list[dict], *, degraded: bool) -> list[dict]:
                 "state": "unknown" if degraded else "open",
             }
             order.append(dispatch_id)
+            labels[dispatch_id] = []
         record = dispatches[dispatch_id]
+        if kind in DISPATCH_EVENTS:
+            labels[dispatch_id].append(declared_label(event))
         if kind == "dispatch.start":
+            started.add(dispatch_id)
             if event.get("backend") in {"codex", "grok", "cursor"}:
                 record["backend"] = event.get("backend")
             if event.get("mode") in {"implement", "read-only"}:
@@ -459,8 +537,36 @@ def build_dispatches(events: list[dict], *, degraded: bool) -> list[dict]:
             record["backend"] = "unknown"
         if record.get("mode") not in {"implement", "read-only"}:
             record["mode"] = "unknown"
+        record.update(resolve_attribution(labels[dispatch_id], dispatch_id in started))
         result.append(record)
     return result
+
+
+def gate_verdict(event: dict) -> str:
+    # Stored JSON is not payload-validated here, and False == 0 == 0.0 in
+    # Python, so only an exact int gate_exit that agrees with the journaled
+    # verdict counts. Never infer a verdict from totals.
+    verdict = event.get("verdict")
+    gate_exit = event.get("gate_exit")
+    exact_exit = type(gate_exit) is int
+    if verdict == "green" and exact_exit and gate_exit == 0:
+        return "green"
+    if verdict == "red" and exact_exit and gate_exit != 0:
+        return "red"
+    return "unknown"
+
+
+def own_attribution(event: dict) -> dict:
+    """Attribution for an event that is its own record: declared when it names
+    a unit, none otherwise."""
+    unit, round_n = declared_label(event)
+    resolved: dict = {}
+    if unit is not None:
+        resolved["unit"] = unit
+    if round_n is not None:
+        resolved["round"] = round_n
+    resolved["attribution"] = "declared" if unit is not None else "none"
+    return resolved
 
 
 def build_gates(events: list[dict]) -> list[dict]:
@@ -475,26 +581,146 @@ def build_gates(events: list[dict]) -> list[dict]:
         }
         if "totals" in event:
             gate["totals"] = event["totals"]
-        # Stored JSON is not payload-validated here, and False == 0 == 0.0 in
-        # Python, so only an exact int gate_exit that agrees with the journaled
-        # verdict counts. Never infer a verdict from totals.
-        verdict = event.get("verdict")
+        gate["verdict"] = gate_verdict(event)
         gate_exit = event.get("gate_exit")
-        exact_exit = type(gate_exit) is int
-        if verdict == "green" and exact_exit and gate_exit == 0:
-            gate["verdict"] = "green"
-        elif verdict == "red" and exact_exit and gate_exit != 0:
-            gate["verdict"] = "red"
-        else:
-            gate["verdict"] = "unknown"
-        if exact_exit:
+        if type(gate_exit) is int:
             gate["gate_exit"] = gate_exit
         for key in ("reason", "pre_head", "post_head"):
             value = optional_str(event, key)
             if value is not None:
                 gate[key] = value
+        gate.update(own_attribution(event))
         gates.append(gate)
     return gates
+
+
+def empty_counts() -> dict:
+    return {
+        "dispatches": {},
+        "reviews": {"iterate": 0, "pass": 0},
+        "gates": {"green": 0, "red": 0, "unknown": 0},
+        "publishes": 0,
+    }
+
+
+def dispatch_outcome(record: dict) -> str:
+    # "ok" means a recorded exit of 0, nothing more. A start with no parsed
+    # terminal event is open, even when a degraded run reads its state unknown.
+    state = record.get("state")
+    if state == "abandoned":
+        return "abandoned"
+    if state == "ended":
+        exit_code = record.get("exit")
+        return "ok" if type(exit_code) is int and exit_code == 0 else "failed"
+    return "open"
+
+
+def build_counts(events: list[dict], dispatches: list[dict], gates: list[dict]) -> dict:
+    """Totals over every parsed event of the run, never the timeline window."""
+    totals = empty_counts()
+    units: dict[str, dict] = {}
+    unattributed = empty_counts()
+
+    def targets(resolved: dict) -> list[dict]:
+        # One rule for every event kind: a unit owns a count only through a
+        # resolved "declared" attribution. none, partial, and conflict are
+        # unattributed, even when a partial record still carries a unit.
+        unit = resolved.get("unit")
+        if resolved.get("attribution") != "declared" or not isinstance(unit, str) or not unit:
+            return [totals, unattributed]
+        if unit not in units:
+            units[unit] = empty_counts()
+        return [totals, units[unit]]
+
+    for record in dispatches:
+        outcome = dispatch_outcome(record)
+        for counts in targets(record):
+            per_backend = counts["dispatches"].setdefault(
+                record["backend"],
+                {"ok": 0, "failed": 0, "open": 0, "abandoned": 0},
+            )
+            per_backend[outcome] += 1
+    for gate in gates:
+        for counts in targets(gate):
+            counts["gates"][gate["verdict"]] += 1
+    for event in events:
+        kind = event.get("event")
+        if kind == "review.recorded":
+            verdict = event.get("verdict")
+            if verdict not in {"pass", "iterate"}:
+                continue
+            for counts in targets(own_attribution(event)):
+                counts["reviews"][verdict] += 1
+        elif kind == "publish.recorded":
+            for counts in targets(own_attribution(event)):
+                counts["publishes"] += 1
+    return {
+        "all": totals,
+        "units": {name: units[name] for name in sorted(units)},
+        "unattributed": unattributed,
+    }
+
+
+def timeline_item(event: dict, records: dict[str, dict]) -> dict:
+    """Project one event to the closed timeline whitelist. Free text (findings,
+    note, plan, reason, attested_by, branch, pr, sha, session, ...) never
+    passes."""
+    kind = event["event"]
+    item: dict = {}
+    seq = event.get("seq")
+    if type(seq) is int:
+        item["seq"] = seq
+    if parse_iso_z(event.get("ts")) is not None:
+        item["ts"] = event["ts"]
+    item["event"] = kind
+    if kind in DISPATCH_EVENTS:
+        dispatch_id = event.get("dispatch_id")
+        record = None
+        if isinstance(dispatch_id, str) and dispatch_id:
+            item["dispatch_id"] = dispatch_id
+            record = records.get(dispatch_id)
+        if kind == "dispatch.start" and event.get("mode") in {"implement", "read-only"}:
+            item["mode"] = event["mode"]
+        if kind == "dispatch.end" and type(event.get("exit")) is int:
+            item["exit"] = event["exit"]
+        # Resolved from the whole dispatch, not this event, so an end whose
+        # start fell outside the window still names its backend, and every
+        # event of a conflicted dispatch reads conflict with no unit.
+        if record is None:
+            item["attribution"] = "none"
+        else:
+            item["backend"] = record["backend"]
+            for key in ("unit", "round", "attribution"):
+                if key in record:
+                    item[key] = record[key]
+    elif kind == "gate.result":
+        for key, allowed in (("binding", GATE_BINDINGS), ("purpose", GATE_PURPOSES)):
+            if event.get(key) in allowed:
+                item[key] = event[key]
+        item["gate_verdict"] = gate_verdict(event)
+        item.update(own_attribution(event))
+    elif kind in {"review.recorded", "publish.recorded"}:
+        if kind == "review.recorded":
+            verdict = event.get("verdict")
+            item["review_verdict"] = verdict if verdict in {"pass", "iterate"} else "unknown"
+        unit = declared_label(event)[0]
+        if unit is not None:
+            item["unit"] = unit
+        item["attribution"] = "declared" if unit is not None else "none"
+    return item
+
+
+def build_timeline(events: list[dict], dispatches: list[dict]) -> tuple[list[dict], bool]:
+    records = {record["dispatch_id"]: record for record in dispatches}
+    known = [event for event in events if event.get("event") in JOURNAL_EVENTS]
+    # Stable sort: seq order, file order among equal seqs, and any line without
+    # an int seq after every sequenced event.
+    known.sort(
+        key=lambda event: (0, event["seq"]) if type(event.get("seq")) is int else (1, 0)
+    )
+    truncated = len(known) > TIMELINE_LIMIT
+    window = known[-TIMELINE_LIMIT:]
+    return [timeline_item(event, records) for event in window], truncated
 
 
 def count_unattributed_lines(path: str) -> int:
@@ -760,6 +986,13 @@ def main(argv: list[str]) -> int:
             )
             for info in infos:
                 generation = info["generation"]
+                dispatches = build_dispatches(
+                    info["events"], degraded=info["mid_corrupt"]
+                )
+                gates = build_gates(info["events"])
+                timeline, timeline_truncated = build_timeline(
+                    info["events"], dispatches
+                )
                 run = {
                     "run_id": info["run_id"],
                     "generation": generation if generation is not None else "unknown",
@@ -767,15 +1000,17 @@ def main(argv: list[str]) -> int:
                     "units": build_units(
                         info["events"], degraded=info["mid_corrupt"]
                     ),
-                    "dispatches": build_dispatches(
-                        info["events"], degraded=info["mid_corrupt"]
-                    ),
-                    "gates": build_gates(info["events"]),
+                    "dispatches": dispatches,
+                    "gates": gates,
                     "checkpoint": build_checkpoint(
                         info["events"],
                         degraded=info["mid_corrupt"],
                         now=now,
                     ),
+                    "counts_complete": info["counts_complete"],
+                    "counts": build_counts(info["events"], dispatches, gates),
+                    "timeline": timeline,
+                    "timeline_truncated": timeline_truncated,
                 }
                 runs_out.append(run)
         else:

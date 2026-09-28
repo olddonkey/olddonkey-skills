@@ -17,6 +17,8 @@ TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/codex-loop-selftest.XXXXXX")" || exit 1
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
 export HOME="$TMP_ROOT/home"
 mkdir -p "$HOME"
+# A caller's declared attribution must not leak into journaled gate results.
+unset LOOP_UNIT LOOP_ROUND
 
 if [[ -x "$SCRIPT_DIR/../../engineering-mode/scripts/tree-oid.sh" ]]; then
   TREE_OID="$SCRIPT_DIR/../../engineering-mode/scripts/tree-oid.sh"
@@ -1032,6 +1034,83 @@ else
     "a failing journal helper does not change a green verdict" \
     "failing helper keeps the RESULT line" \
     "a failing journal helper prints one warning"
+fi
+
+# Declared attribution: the gate hands its environment to loop-journal, which
+# labels gate.result from LOOP_UNIT/LOOP_ROUND. An invalid value fails the
+# append, so the gate only warns and keeps its verdict.
+ATTRIBUTION_CHECKS=(
+  "journal attributed: gate exits 0 with LOOP_UNIT/LOOP_ROUND set"
+  "journal attributed: the new gate.result carries unit and round from LOOP_UNIT/LOOP_ROUND"
+  "journal attributed: gate.result appended without the variables carries neither"
+  "journal attributed: an invalid LOOP_ROUND keeps the green verdict"
+  "journal attributed: an invalid LOOP_ROUND keeps the RESULT line"
+  "journal attributed: an invalid LOOP_ROUND makes the gate warn"
+  "journal attributed: an invalid LOOP_ROUND appends no gate.result"
+)
+if [[ -n "$JOURNAL" ]]; then
+  ATTRIBUTION_PRIOR="$(gate_result_count "$JOURNAL_WS")"
+  run_case_in_dir journal-attributed "$JOURNAL_WS" \
+    env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
+    LOOP_UNIT=u-gate LOOP_ROUND=3 bash "$GATE" --strict --purpose unit-final \
+    --log "$TMP_ROOT/journal-attributed.log" -- \
+    bash -c 'printf '\''Ran 2 tests in 0.001s\nOK\n'\'''
+  expect_status 0 "${ATTRIBUTION_CHECKS[0]}"
+  ATTRIBUTION_RESULTS="$TMP_ROOT/journal-attributed.results"
+  python3 - "$(journal_store "$JOURNAL_WS")" > "$ATTRIBUTION_RESULTS" <<'PY'
+import json, os, sys
+
+runs = os.path.join(sys.argv[1], "runs")
+for name in sorted(os.listdir(runs)):
+    if name.endswith(".jsonl"):
+        for line in open(os.path.join(runs, name), encoding="utf-8"):
+            line = line.strip()
+            if line and json.loads(line).get("event") == "gate.result":
+                print(line)
+PY
+  if python3 - "$ATTRIBUTION_RESULTS" "$ATTRIBUTION_PRIOR" <<'PY'
+import json, sys
+
+results = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+if len(results) != int(sys.argv[2]) + 1:
+    raise SystemExit(f"expected one new gate.result, found {len(results) - int(sys.argv[2])}")
+last = results[-1]
+if last.get("unit") != "u-gate" or type(last.get("round")) is not int or last["round"] != 3:
+    raise SystemExit(f"labels {last}")
+PY
+  then
+    pass "${ATTRIBUTION_CHECKS[1]}"
+  else
+    fail "${ATTRIBUTION_CHECKS[1]}"
+  fi
+  if python3 - "$ATTRIBUTION_RESULTS" <<'PY'
+import json, sys
+
+earlier = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")][:-1]
+if not earlier or any("unit" in event or "round" in event for event in earlier):
+    raise SystemExit(f"unlabelled results {earlier}")
+PY
+  then
+    pass "${ATTRIBUTION_CHECKS[2]}"
+  else
+    fail "${ATTRIBUTION_CHECKS[2]}"
+  fi
+  ATTRIBUTION_PRIOR="$(gate_result_count "$JOURNAL_WS")"
+  run_case_in_dir journal-attributed-invalid "$JOURNAL_WS" \
+    env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
+    LOOP_UNIT=u-gate LOOP_ROUND=0 bash "$GATE" --strict --purpose unit-final \
+    --log "$TMP_ROOT/journal-attributed-invalid.log" -- \
+    bash -c 'printf '\''Ran 2 tests in 0.001s\nOK\n'\'''
+  expect_status 0 "${ATTRIBUTION_CHECKS[3]}"
+  expect_output "RESULT: gate green" "${ATTRIBUTION_CHECKS[4]}"
+  expect_output "warning: loop-journal gate.result failed" "${ATTRIBUTION_CHECKS[5]}"
+  if [[ "$(gate_result_count "$JOURNAL_WS")" == "$ATTRIBUTION_PRIOR" ]]; then
+    pass "${ATTRIBUTION_CHECKS[6]}"
+  else
+    fail "${ATTRIBUTION_CHECKS[6]}"
+  fi
+else
+  skip_checks "no loop-journal helper available" "${ATTRIBUTION_CHECKS[@]}"
 fi
 
 SCRATCH_GATE_DIR="$TMP_ROOT/scratch-gate"

@@ -60,16 +60,20 @@ RECOVER_HELP = f"""\
 usage: loop-run recover [--workspace DIR] [--acknowledge DISPATCH_ID]...
 
 Scan the active run for dispatch.start events and match them against
-dispatch.end and dispatch.abandoned. Proceeds only when every start is
-matched. Successful recovery appends run.end(status=abandoned) and
-atomically retires the context.
+dispatch.end and dispatch.abandoned. Refuses with exit 2, writing nothing,
+when a dispatch_id has more than one start or more than one of those
+terminal events. Proceeds only when every start is matched. Successful
+recovery appends run.end(status=abandoned) and atomically retires the
+context.
 
 {D2A_SENTENCE}
 
 --acknowledge <dispatch-id> may be repeated. It records
-dispatch.abandoned {{dispatch_id, attested_by:"user"}} for that start
-and retires the context only together with that attestation in the same
-invocation. No code path ever writes a synthetic dispatch.end.
+dispatch.abandoned {{dispatch_id, attested_by:"user"}} for that start,
+copying the start's declared unit/round when present (never from
+LOOP_UNIT/LOOP_ROUND), and retires the context only together with that
+attestation in the same invocation. No code path ever writes a synthetic
+dispatch.end.
 """
 
 

@@ -24,35 +24,36 @@ The five lifecycle classes are moments on the production path:
 Authority is `scripts/loop-journal`. This section is a reader index, not a
 second store spec.
 
-**Root layout** (`scripts/loop-journal:324-340`):
+**Root layout** (`scripts/loop-journal:336-352`):
 
 `$HOME/.config/olddonkey-loop/journal/<workspace-key>/`
 
-`workspace-key` is `sha256(canonical workspace)` (`scripts/loop-journal:309-310`).
+`workspace-key` is `sha256(canonical workspace)` (`scripts/loop-journal:321-322`).
 The store contains `runs/`, `runs.tsv` (rebuildable cache), `context`,
 `unattributed.jsonl`, `generation`, and `meta.lock`. Retired context files are
-`context.retired-<run-id>` (`scripts/loop-journal:856`).
+`context.retired-<run-id>` (`scripts/loop-journal:889`).
 
-**Segment naming** (`scripts/loop-journal:413-416`):
+**Segment naming** (`scripts/loop-journal:425-428`):
 `runs/<run-id>.jsonl` where `<run-id>` is `YYYYMMDDTHHMMSSZ-` plus 6 hex
-digits (`scripts/loop-journal:45`).
+digits (`scripts/loop-journal:49`).
 
-**Envelope fields** (`scripts/loop-journal:52`): `schema`, `seq`, `ts`,
+**Envelope fields** (`scripts/loop-journal:56`): `schema`, `seq`, `ts`,
 `event`, `run`, `attribution_failure`. Attributed lines carry `schema=1`,
-monotonic `seq`, UTC `ts`, `event`, and `run` (`scripts/loop-journal:871-877`).
+monotonic `seq`, UTC `ts`, `event`, and `run` (`scripts/loop-journal:904-910`).
 Unattributed lines omit `seq` and record `attribution_failure`
-(`scripts/loop-journal:891-896`).
+(`scripts/loop-journal:924-929`).
 
-**Closed event list** (`scripts/loop-journal:53-120`):
+**Closed event list** (`scripts/loop-journal:57-126`):
 
 `run.begin`, `run.end`, `unit.begin`, `unit.end`, `round.begin`,
 `checkpoint`, `review.recorded`, `publish.recorded`, `dispatch.start`,
 `dispatch.end`, `dispatch.abandoned`, `gate.result`, `journal.repaired`.
 
-**Segment classification** (`scripts/loop-journal:434-459`): an unterminated
+**Segment classification** (`scripts/loop-journal:446-471`): an unterminated
 valid tail line counts; an unterminated invalid tail is ignored (torn write);
 a newline-terminated invalid line mid-file or at the tail is mid-file
-corruption. The index uses this classification and never repairs.
+corruption. The index uses this classification and never repairs; a
+discarded torn tail makes that run's `counts_complete` false.
 
 ### `gate.result`
 
@@ -60,7 +61,7 @@ Intended mechanical writer: `scripts/run-gate.sh` — `journal_gate_result`,
 called from `emit_result` after the `RESULT:` line is printed and before the
 gate exits. It writes nothing when the journal helper is absent, and a failed
 append only warns; neither changes the gate's exit. Validation is the
-`gate.result` entry of `EVENT_SPECS` (`scripts/loop-journal:97-118`). The
+`gate.result` entry of `EVENT_SPECS` (`scripts/loop-journal:101-124`). The
 journal is local and unauthenticated — validation checks the payload's shape,
 not the actor, so any process running as the user can append a well-shaped
 `gate.result` through `loop-journal append` — so a `gate.result` is a
@@ -77,6 +78,8 @@ recorded claim, not proof of who wrote it.
 | `pre_head`, `pre_tree` | no | str | pre-run capture, only when it succeeded |
 | `post_head`, `post_tree` | no | str | post-run capture, only when it succeeded |
 | `reason` | no | str | why `binding` is `unavailable` |
+| `unit` | no | non-empty str | declared: `LOOP_UNIT` of the gate's caller (see below) |
+| `round` | no | int ≥ 1 | declared: `LOOP_ROUND` of the gate's caller (see below) |
 
 `verdict` and `gate_exit` record what the gate decided; `totals` records what
 the suite returned. They disagree whenever a policy overrides the suite: an
@@ -100,6 +103,90 @@ No gate record is publication evidence, whatever its binding: a clean gate
 may be a `focused` or `baseline-generation` run, and even a `unit-final` gate
 only samples the tree at its endpoints. The console shows the verdict and the
 fixed caveat "Recorded gate result — not proof of what ships."
+
+### Declared attribution (`unit`, `round`)
+
+`dispatch.start`, `dispatch.end`, `dispatch.abandoned`, and `gate.result`
+accept optional `unit` (non-empty str) and `round` (int ≥ 1). `loop-journal
+append` fills them from `LOOP_UNIT` and `LOOP_ROUND` when the payload does not
+already carry them (`attribution_from_env`, `scripts/loop-journal:669`); an
+explicit `--field`/`--json` value wins, key by key. An empty or multi-line
+`LOOP_UNIT`, or a `LOOP_ROUND` that is not a positive decimal integer, fails
+the append with exit 2 — an adapter then refuses to launch and the gate warns.
+Every other event ignores both variables. The three adapters and
+`run-gate.sh` call `loop-journal append` as a child process with their own
+environment, so the caller sets the variables on the dispatch or gate command.
+
+`recover --acknowledge` never reads the environment. First, before any tail
+repair, append, or context retirement, it refuses with exit 2 when any
+`dispatch_id` in the active run has more than one `dispatch.start` or more than
+one terminal event (`dispatch.end` / `dispatch.abandoned`): such a history is
+neither open nor closed (`duplicated_dispatch_ids`,
+`scripts/loop-journal:1196`). Otherwise each acknowledged id has exactly one
+start and no terminal event, and its `dispatch.abandoned` copies that start's
+`unit`/`round` when present and writes neither when absent
+(`abandoned_payload`, `scripts/loop-journal:1219`).
+
+**The label is a declaration, not proof.** `unit` and `round` record what
+whoever ran the command declared. They carry no digest binding them to a
+prompt, diff, or tree, and, like every journal line, any process running as
+the user can write them (the journal is local and unauthenticated; see
+`gate.result` above). Readers take them as declared attribution with the
+weakest assurance and never present them as verified.
+
+The index (`scripts/loop-index`) resolves a dispatch's `unit`/`round` as the
+values its `dispatch.start`, `dispatch.end`, and `dispatch.abandoned` agree
+on. An absent label does not disagree; a malformed stored value (empty or
+non-str `unit`, `round` not an int ≥ 1) reads as absent. It never joins events
+by order or time.
+
+| `attribution` | when | `unit` / `round` |
+| --- | --- | --- |
+| `declared` | the events agree and name a unit | shown |
+| `none` | no event names a unit | `round` only if declared |
+| `partial` | the dispatch has no `dispatch.start` | whatever its other events agree on; still counted as unattributed |
+| `conflict` | its events declare different units or rounds | never shown; views treat it as unattributed |
+
+A gate object is `declared` when its own `gate.result` names a unit and
+`none` otherwise. A declared dispatch or gate label never creates a `units`
+row; unit rows still come from unit, round, review, and publish events.
+
+### Run totals and timeline (`loop-index`)
+
+Each run object also carries:
+
+- `counts_complete` — `true` only when the segment parsed with no mid-file
+  corruption and no discarded torn tail. When it is `false`, every consumer
+  labels the counts "partial".
+- `counts` — totals over every parsed event of the run, never the timeline
+  window: `{"all": C, "units": {"<unit>": C, …}, "unattributed": C}` where
+  `C` is `{"dispatches": {"<backend>": {"ok", "failed", "open",
+  "abandoned"}}, "reviews": {"iterate", "pass"}, "gates": {"green", "red",
+  "unknown"}, "publishes": n}`. `ok` means a recorded exit of 0, nothing more;
+  a start with no parsed terminal event is `open`. One rule covers
+  dispatches, gates, reviews, and publications: an item counts under
+  `units["<unit>"]` only when its resolved attribution is `declared` and
+  names that unit (a dispatch's resolution above; a gate, review, or
+  publication's own label). `none`, `partial`, and `conflict` count under
+  `unattributed` — a `partial` dispatch too, even though it still carries
+  the unit its other events agree on. `all` counts everything.
+- `timeline` — the run's last 500 events in `seq` order, with
+  `timeline_truncated` saying whether older events fell outside the window.
+  Each event is projected to a closed whitelist: `seq`, `ts`, `event`;
+  `dispatch_id`, `mode`, and `exit` on dispatch events; `binding`, `purpose`,
+  and `gate_verdict` (the normalized verdict above) on `gate.result`;
+  `review_verdict` (`pass`, `iterate`, anything else `unknown`) on
+  `review.recorded`. Dispatch events carry `backend`, `unit`, `round`, and
+  `attribution` resolved from the whole dispatch, so an end whose start fell
+  outside the window still names its backend and every event of a conflicted
+  dispatch reads `conflict` with no unit. `gate.result` carries its own
+  declared `unit`/`round` and `attribution`; `review.recorded` and
+  `publish.recorded` carry their `unit` with `attribution: declared`.
+  Free-text fields (`findings`, `note`, `plan`, `reason`, `attested_by`,
+  `branch`, `pr`, `sha`, `session`) are never projected.
+
+Events in `unattributed.jsonl` are in no run's timeline or counts; the
+top-level `unattributed_events` count is unchanged.
 
 ---
 

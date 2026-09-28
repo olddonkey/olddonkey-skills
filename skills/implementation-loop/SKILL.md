@@ -73,14 +73,18 @@ A unit = one coherent, reviewable change, roughly one PR. Settle the design **be
 # manually with the skill's install directory.
 # State the intent settled at kickoff on EVERY dispatch — model names age, and
 # ambient config can change under you between one unit and the next.
-"${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
-    --model gpt-5.6-sol --effort max      # both are per-turn overrides
-"${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" --prompt-file /tmp/unit-prompt.txt   # inherit whatever config says
-"${CLAUDE_SKILL_DIR}/backends/grok/dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
-    --model grok-4.6 --effort xhigh
-"${CLAUDE_SKILL_DIR}/backends/cursor/dispatch.sh" --prompt-file /tmp/unit-prompt.txt \
-    --model cursor-grok-4.6-xhigh
+# LOOP_UNIT/LOOP_ROUND label the journaled dispatch with the unit and round it serves.
+LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" \
+    --prompt-file /tmp/unit-prompt.txt --model gpt-5.6-sol --effort max   # both are per-turn overrides
+LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" \
+    --prompt-file /tmp/unit-prompt.txt                                    # inherit whatever config says
+LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/grok/dispatch.sh" \
+    --prompt-file /tmp/unit-prompt.txt --model grok-4.6 --effort xhigh
+LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/cursor/dispatch.sh" \
+    --prompt-file /tmp/unit-prompt.txt --model cursor-grok-4.6-xhigh
 ```
+
+Set `LOOP_UNIT` and `LOOP_ROUND` on every dispatch and gate command, iterations included, so the journal can attribute each event to its unit without guessing from order or time. The label is a declaration by whoever ran the command, not proof of which unit ran.
 
 For absolute-path invocation from Cursor, a plain shell, or CI, see
 [references/running-anywhere.md](references/running-anywhere.md).
@@ -155,13 +159,14 @@ Repeat until the diff is something you'd sign. A bug that surfaces **outside** a
 Run the whole suite yourself via the bundled helper — piping through `tail` masks the real exit code:
 
 ```bash
+# LOOP_UNIT/LOOP_ROUND label the journaled gate.result, as on dispatch (§2).
 # strict policy — zero failures ENFORCED (recognized verdict + executed tests + no failure lines):
-"${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --strict --log /tmp/gate.log -- <test command>
+LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --strict --log /tmp/gate.log -- <test command>
 # baseline policy ONLY — tolerates failures already present in the base-branch log:
-"${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log --baseline /tmp/base.log -- <test command>
+LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log --baseline /tmp/base.log -- <test command>
 # no flag = pass-through (exit code only, works with any runner) — WEAKEST; only for
 # runners the parser doesn't support, and say so when reporting the result:
-"${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log -- <test command>
+LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log -- <test command>
 ```
 
 `baseline` policy = no new non-flake failures vs the base branch, decided mechanically (pytest identifiers include the exception class; skipped-only, empty, or unparseable runs fail closed). It proves *no new failure identifiers and that tests executed* — not that the full calibrated suite ran; check the reported count when it matters. **A check you forbade Codex from running is a check you own, and it runs before you judge the diff — not after the cheap ones.** Dispatches routinely prohibit the slow, environment-heavy suites (browser e2e, anything needing a database or two servers) while the spec still requires them to pass. That combination is a blind spot you built: Codex cannot discover the breakage, so nothing does until you run it. And it is exactly where a change of UI surface lands — a flow moved from a dialog to a route, a heading renamed, a default filter added — because those specs drive the product through the same affordances the unit just rewrote.
