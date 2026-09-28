@@ -24,6 +24,22 @@ The five lifecycle classes are moments on the production path:
 Authority is `scripts/loop-journal`. This section is a reader index, not a
 second store spec.
 
+**Readers.** `scripts/loop-index` is the only reader of the store. Every other
+reader consumes its JSON document and opens no segment, cache, context, or
+repository file itself:
+
+- `scripts/loop-console` — the local web console.
+- `scripts/loop-evidence` — the per-unit record card. It runs the sibling
+  `loop-index --workspace <canonical>` with a fixed argv and a timeout, and
+  uses only the unit's `units` row (`rounds`, `review`, `publish`), dispatch
+  and gate objects whose `attribution` is `declared` for that unit, dispatches
+  whose `attribution` is `conflict` or `partial` (listed as attribution
+  unclear, counted for no unit), `counts.units[<unit>].reviews`, and
+  `counts_complete`. Its final gate is the unit's last `unit-final` gate; it
+  compares that gate's `post_head` with the publication's `sha` only when both
+  are 40 lowercase hex, and labels every row `recorded`, `declared`,
+  `values match`, or `unknown` — never verified.
+
 **Root layout** (`scripts/loop-journal:336-352`):
 
 `$HOME/.config/olddonkey-loop/journal/<workspace-key>/`

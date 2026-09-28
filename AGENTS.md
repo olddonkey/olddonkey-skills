@@ -75,14 +75,16 @@ run):
 7. `bash skills/implementation-loop/tests/contract-core.sh`,
    `bash skills/implementation-loop/tests/contract-negative.sh`, and
    `bash skills/implementation-loop/tests/shim-selftest.sh` — expect all green.
-8. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
+8. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
+   `scripts/loop-evidence` record card) — expect `selftest: PASS (143 checks)`.
+9. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
-9. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
-10. Packaging checks: both marketplace JSON manifests must parse; every
+10. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
+11. Packaging checks: both marketplace JSON manifests must parse; every
    `SKILL.md` (under `skills/` and `cursor-implementation-loop/skills/`) must
    have non-empty `name:` and `description:` frontmatter; engineering-mode and
    Codex-loop Markdown must have no dangling relative links.
-11. `tree-oid` job (runs on ubuntu **and** macos):
+12. `tree-oid` job (runs on ubuntu **and** macos):
    `bash skills/engineering-mode/scripts/tree-oid-selftest.sh` and the
    Cursor copy — expect `selftest: PASS (202 checks)` each. Keep these scripts
    portable across GNU and BSD userlands.
