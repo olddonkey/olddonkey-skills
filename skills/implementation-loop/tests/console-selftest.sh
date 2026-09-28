@@ -708,6 +708,7 @@ const FLOW_HELPERS = [
   "flowFilterFor",
   "flowUnits",
   "flowBackends",
+  "flowBackendName",
   "flowCounts",
   "flowParts",
   "flowEdgeLabel",
@@ -1758,17 +1759,17 @@ function nodeLabels(root) {
   });
 }
 
-check("flow: implementer nodes exist only for backends present in counts, in the order codex, cursor, grok (headless)", function () {
+check("flow: implementer nodes exist only for backends present in counts, in the order codex, cursor, grok, then unknown backend (headless)", function () {
   const root = flowRoot();
   const run = flowRun("A", busy(1, 4));
   run.counts.all.dispatches = { grok: tally(1), unknown: tally(2), codex: tally(0, 1) };
   liveSandbox.drawFlow(root, flowState("A", run));
   const labels = nodeLabels(root).join(",");
-  if (labels !== "Judge,codex,grok,Review,Gate,Publication") {
+  if (labels !== "Judge,codex,grok,unknown backend,Review,Gate,Publication") {
     throw new Error("nodes " + labels);
   }
   const edges = Object.keys(root._parts.edges._byId).sort().join(",");
-  if (edges !== "gate,impl-codex,impl-grok,publish,review") {
+  if (edges !== "gate,impl-codex,impl-grok,impl-unknown,publish,review") {
     throw new Error("edges " + edges);
   }
   const bare = flowRoot();
@@ -2221,6 +2222,215 @@ check("flow: a truncated timeline shows the notice, and edge labels equal the ru
   }
 });
 
+check("flow: a truncated, damaged run shows one notice that calls counts partial and never claims whole-run totals; each flag alone keeps its own notice (headless)", function () {
+  const both = "packets show the last 500 events; counts are partial because the record is damaged";
+  const cut = "packets show the last 500 events; totals cover the whole run";
+  const damaged = "The run's record is damaged: every count here is partial.";
+  function notices(root) {
+    return root.children
+      .filter(function (child) {
+        return /\bflow-notice\b/.test(classOf(child));
+      })
+      .map(function (child) {
+        return child.textContent;
+      });
+  }
+  // [timeline_truncated, counts_complete, notices shown]
+  const cases = [
+    [true, false, [both]],
+    [true, true, [cut]],
+    [false, false, [damaged]],
+    [false, true, []],
+  ];
+  // Each state on a fresh root, then one root walked through every state and
+  // back, so no notice from an earlier state survives a transition.
+  const walked = flowRoot();
+  cases.concat(cases.slice().reverse()).forEach(function (entry) {
+    [flowRoot(), walked].forEach(function (root) {
+      const run = flowRun("A", busy(1, 4), {
+        timeline_truncated: entry[0],
+        counts_complete: entry[1],
+      });
+      liveSandbox.drawFlow(root, flowState("A", run));
+      const shown = notices(root);
+      const state = "truncated " + entry[0] + ", complete " + entry[1];
+      if (JSON.stringify(shown) !== JSON.stringify(entry[2])) {
+        throw new Error(state + ": notices " + JSON.stringify(shown));
+      }
+      const claims = root.textContent.indexOf("totals cover the whole run") !== -1;
+      if (claims !== (entry[0] && entry[1])) {
+        throw new Error(state + ": whole-run claim " + claims);
+      }
+      if (!entry[1]) {
+        if (edgeLabel(root, "impl-codex").indexOf("partial: ") !== 0) {
+          throw new Error(state + ": label " + edgeLabel(root, "impl-codex"));
+        }
+        if (!/\bis-damaged\b/.test(root._parts.damaged.className)) {
+          throw new Error(state + ": notice class " + root._parts.damaged.className);
+        }
+      }
+    });
+  });
+});
+
+check("flow: a dispatch with no usable start draws an unknown backend node after grok with its count label, makes no packet, and leaves when the filter excludes it (headless)", function () {
+  const root = flowRoot();
+  const base = busy(1, 4);
+  const plain = {
+    all: bucket({ dispatches: { codex: tally(1), grok: tally(1) } }),
+    units: { u1: bucket({ dispatches: { codex: tally(1) } }) },
+    unattributed: bucket({ dispatches: { grok: tally(1) } }),
+  };
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", base, { counts: plain })));
+  if (nodeLabels(root).join(",") !== "Judge,codex,grok,Review,Gate,Publication") {
+    throw new Error("no unknown entry, nodes " + nodeLabels(root).join(","));
+  }
+  // loop-index output for an orphan dispatch.end: backend unknown,
+  // attribution partial, counted under all and unattributed only.
+  const counts = JSON.parse(JSON.stringify(plain));
+  counts.all.dispatches.unknown = tally(0, 1);
+  counts.unattributed.dispatches.unknown = tally(0, 1);
+  const orphan = ev(5, "dispatch.end", {
+    dispatch_id: "d-orphan",
+    backend: "unknown",
+    exit: 1,
+    attribution: "partial",
+  });
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", base.concat([orphan]), { counts: counts })));
+  function expectUnknown(where, shown, label) {
+    const nodes = nodeLabels(root).join(",");
+    const want = shown
+      ? "Judge,codex,grok,unknown backend,Review,Gate,Publication"
+      : "Judge,codex,grok,Review,Gate,Publication";
+    if (nodes !== want) {
+      throw new Error(where + ": nodes " + nodes);
+    }
+    const edge = root._parts.edges._byId["impl-unknown"];
+    if (shown ? !edge || edgeLabel(root, "impl-unknown") !== label : edge) {
+      throw new Error(where + ": unknown edge " + (edge ? edge._label.textContent : "absent"));
+    }
+    if (packetsOf(root).length !== 0) {
+      throw new Error(where + ": packets " + packetsOf(root).map(function (p) {
+        return p.getAttribute("d");
+      }).join(" | "));
+    }
+  }
+  expectUnknown("All", true, "1 failed");
+  if (!/3 implementers, 3 dispatches/.test(root._parts.svg.getAttribute("aria-label"))) {
+    throw new Error("aria-label " + root._parts.svg.getAttribute("aria-label"));
+  }
+  if (root._parts.recent.textContent.indexOf("#5 dispatch.end: unknown backend → Judge · exit 1") === -1) {
+    throw new Error("event list " + root._parts.recent.textContent);
+  }
+  chooseFilter(root, "u1");
+  expectUnknown("u1", false);
+  chooseFilter(root, "Unattributed");
+  expectUnknown("Unattributed", true, "1 failed");
+  chooseFilter(root, "All");
+  expectUnknown("All again", true, "1 failed");
+  const more = base.concat([
+    orphan,
+    ev(6, "dispatch.abandoned", { dispatch_id: "d-lost", backend: "unknown", attribution: "partial" }),
+  ]);
+  counts.all.dispatches.unknown = tally(0, 1, 0, 1);
+  counts.unattributed.dispatches.unknown = tally(0, 1, 0, 1);
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", more, { counts: counts, counts_complete: false })));
+  expectUnknown("partial", true, "partial: 1 failed · 1 abandoned");
+
+  // Three backends and unknown: four rows, all inside the viewBox, none overlapping.
+  const four = flowRoot();
+  const wide = flowRun("B", []);
+  wide.counts.all.dispatches = { unknown: tally(1), grok: tally(1), cursor: tally(1), codex: tally(1) };
+  liveSandbox.drawFlow(four, flowState("B", wide));
+  if (nodeLabels(four).join(",") !== "Judge,codex,cursor,grok,unknown backend,Review,Gate,Publication") {
+    throw new Error("four-row nodes " + nodeLabels(four).join(","));
+  }
+  let floor = -Infinity;
+  ["codex", "cursor", "grok", "unknown"].forEach(function (name) {
+    const box = four._parts.nodes._byId["impl-" + name]._box;
+    const top = Number(box.getAttribute("y"));
+    const bottom = top + Number(box.getAttribute("height"));
+    if (top < 0 || bottom > liveSandbox.FLOW.height || top < floor) {
+      throw new Error(name + " node spans " + top + ".." + bottom);
+    }
+    floor = bottom;
+  });
+});
+
+check("flow: the hidden list holds the last ten timeline events of every type; unit-less types show under All only (headless)", function () {
+  const root = flowRoot();
+  const declared = { unit: "u1", attribution: "declared" };
+  const timeline = busy(1, 18).concat([
+    ev(19, "gate.result", { gate_verdict: "red", attribution: "none" }),
+    ev(20, "publish.recorded", { attribution: "none" }),
+    // A unit field on a unit-less type must not move it under that unit.
+    ev(21, "round.begin", declared),
+    ev(22, "unit.begin", declared),
+    ev(23, "dispatch.start", Object.assign({ dispatch_id: "d-u", backend: "codex" }, declared)),
+    ev(24, "dispatch.end", Object.assign({ dispatch_id: "d-u", backend: "codex", exit: 0 }, declared)),
+    ev(25, "checkpoint"),
+    ev(26, "review.recorded", Object.assign({ review_verdict: "pass" }, declared)),
+    ev(27, "gate.result", Object.assign({ gate_verdict: "green" }, declared)),
+    ev(28, "unit.end", declared),
+    ev(29, "journal.repaired"),
+    ev(30, "checkpoint"),
+  ]);
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", timeline)));
+  function listed() {
+    return root._parts.recent.children.map(function (row) {
+      return row.textContent;
+    });
+  }
+  function expectList(where, want) {
+    const got = listed();
+    if (got.length > 10 || JSON.stringify(got) !== JSON.stringify(want)) {
+      throw new Error(where + ": list " + JSON.stringify(got));
+    }
+  }
+  if (root._parts.recentHead.textContent !== "Last ten recorded events") {
+    throw new Error("heading " + root._parts.recentHead.textContent);
+  }
+  const owned = [
+    "#23 dispatch.start: Judge → codex · unit u1",
+    "#24 dispatch.end: codex → Judge · exit 0 · unit u1",
+    "#26 review.recorded: Judge → Review · pass · unit u1",
+    "#27 gate.result: Judge → Gate · green · unit u1",
+  ];
+  expectList("All", [
+    "#21 round.begin",
+    "#22 unit.begin",
+    owned[0],
+    owned[1],
+    "#25 checkpoint",
+    owned[2],
+    owned[3],
+    "#28 unit.end",
+    "#29 journal.repaired",
+    "#30 checkpoint",
+  ]);
+  chooseFilter(root, "u1");
+  expectList("u1", owned);
+  chooseFilter(root, "Unattributed");
+  const unattributed = listed();
+  if (unattributed.length !== 10 || unattributed[9] !== "#20 publish.recorded: Judge → Publication · unattributed") {
+    throw new Error("Unattributed: list " + JSON.stringify(unattributed));
+  }
+  if (/checkpoint|unit\.|round\.begin|journal\.repaired/.test(unattributed.join(" | "))) {
+    throw new Error("Unattributed lists a unit-less type: " + JSON.stringify(unattributed));
+  }
+  chooseFilter(root, "All");
+  const quiet = evs(31, 70, function (seq) {
+    return ev(seq, ["checkpoint", "round.begin", "unit.begin", "unit.end"][seq % 4], declared);
+  });
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", timeline.concat(quiet))));
+  const tail = listed();
+  if (tail.length !== 10 || tail[0].indexOf("#61 ") !== 0 || tail[9].indexOf("#70 ") !== 0) {
+    throw new Error("All after 40 unit-less events: " + JSON.stringify(tail));
+  }
+  chooseFilter(root, "u1");
+  expectList("u1 after 40 unit-less events", owned);
+});
+
 check("flow: a hostile unit name reaches the DOM only as text (headless)", function () {
   const hostile = "<img src=x onerror=1>";
   const root = flowRoot();
@@ -2418,7 +2628,7 @@ else
   fail "update: stampUpdated writes #updated-at through txt and is quiet on the same second (headless)"
   fail "flow: svgEl creates each allowlisted tag in the SVG namespace and refuses every other tag"
   fail "flow: svgAttr sets each allowlisted attribute and refuses every other name and any url( / javascript: / < value"
-  fail "flow: implementer nodes exist only for backends present in counts, in the order codex, cursor, grok (headless)"
+  fail "flow: implementer nodes exist only for backends present in counts, in the order codex, cursor, grok, then unknown backend (headless)"
   fail "flow: the first render animates nothing; two new events make exactly two packets with their recorded classes; a repeat makes none (headless)"
   fail "flow: packet variants are recorded outcomes: exit 0, pass, green, and unknown are neutral; nonzero exit, red, and abandoned are danger; iterate is caution; nothing is is-ok (headless)"
   fail "flow: run.*, unit.*, round.begin, checkpoint, journal.repaired, and unknown-backend dispatches make no packet (headless)"
@@ -2432,6 +2642,9 @@ else
   fail "flow: counts_complete false prefixes every edge label with partial and says the record is damaged (headless)"
   fail "flow: a publication routes Judge → Publication with no gate and after a red gate; no Gate → Publication path is drawn (headless)"
   fail "flow: a truncated timeline shows the notice, and edge labels equal the run's counts, not the window (headless)"
+  fail "flow: a truncated, damaged run shows one notice that calls counts partial and never claims whole-run totals; each flag alone keeps its own notice (headless)"
+  fail "flow: a dispatch with no usable start draws an unknown backend node after grok with its count label, makes no packet, and leaves when the filter excludes it (headless)"
+  fail "flow: the hidden list holds the last ten timeline events of every type; unit-less types show under All only (headless)"
   fail "flow: a hostile unit name reaches the DOM only as text (headless)"
   fail "flow: render, filter change, and run switch make no request (headless)"
   fail "flow: a poll updates the SVG in place; nodes, edges, and filter options keep their identity (headless)"

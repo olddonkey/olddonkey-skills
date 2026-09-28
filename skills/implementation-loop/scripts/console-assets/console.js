@@ -58,6 +58,15 @@
   };
   var FLOW = {
     backends: ["codex", "cursor", "grok"],
+    unknown: "unknown",
+    owned: [
+      "dispatch.start",
+      "dispatch.end",
+      "dispatch.abandoned",
+      "gate.result",
+      "review.recorded",
+      "publish.recorded",
+    ],
     sinks: [
       ["review", "Review"],
       ["gate", "Gate"],
@@ -68,6 +77,7 @@
     width: 900,
     height: 304,
     row: 96,
+    pad: 12,
     nodeW: 132,
     nodeH: 40,
     left: 86,
@@ -829,7 +839,7 @@
     return names;
   }
 
-  function flowBackends(all) {
+  function flowBackends(all, picked) {
     var dispatches = flowOwn(all, "dispatches");
     var found = [];
     for (var i = 0; i < FLOW.backends.length; i += 1) {
@@ -837,7 +847,16 @@
         found.push(FLOW.backends[i]);
       }
     }
+    // loop-index files a dispatch with no usable start under "unknown". It
+    // gets a node only while the shown counts hold one, and never a packet.
+    if (flowOwn(flowOwn(picked, "dispatches"), FLOW.unknown)) {
+      found.push(FLOW.unknown);
+    }
     return found;
+  }
+
+  function flowBackendName(backend) {
+    return backend === FLOW.unknown ? "unknown backend" : backend;
   }
 
   function flowCounts(counts, filter) {
@@ -987,16 +1006,27 @@
   }
 
   function flowMatches(filter, item) {
-    return filter === "all" || filter === flowOwner(item);
+    if (filter === "all") {
+      return true;
+    }
+    // run.*, unit.*, round.begin, checkpoint, and journal.repaired carry no
+    // unit in the timeline, so they show under All and nowhere else.
+    return FLOW.owned.indexOf(item.event) !== -1 && filter === flowOwner(item);
   }
 
   function flowEventText(item) {
-    var route = flowRoute(item);
+    var kind = typeof item.event === "string" ? item.event : "unknown event";
+    var head = (flowSeq(item) >= 0 ? "#" + item.seq + " " : "") + kind;
+    if (FLOW.owned.indexOf(kind) === -1) {
+      return head;
+    }
+    // Only a dispatch with no usable backend has no route.
+    var route = flowRoute(item) || {
+      far: flowBackendName(FLOW.unknown),
+      back: kind !== "dispatch.start",
+    };
     var bits = [
-      (flowSeq(item) >= 0 ? "#" + item.seq + " " : "") +
-        item.event +
-        ": " +
-        (route.back ? route.far + " → Judge" : "Judge → " + route.far),
+      head + ": " + (route.back ? route.far + " → Judge" : "Judge → " + route.far),
     ];
     if (item.event === "dispatch.end") {
       bits.push(typeof item.exit === "number" ? "exit " + item.exit : "exit unknown");
@@ -1042,6 +1072,11 @@
   function flowLayout(backends) {
     var mid = FLOW.height / 2;
     var half = FLOW.nodeW / 2;
+    // Four implementer rows (three backends and unknown) close up to fit.
+    var row =
+      backends.length > 1
+        ? Math.min(FLOW.row, (FLOW.height - FLOW.nodeH - FLOW.pad * 2) / (backends.length - 1))
+        : FLOW.row;
     var nodes = [
       { key: "judge", label: "Judge", cx: FLOW.center, cy: mid, judge: true },
     ];
@@ -1049,8 +1084,13 @@
     var i;
     var y;
     for (i = 0; i < backends.length; i += 1) {
-      y = mid + (i - (backends.length - 1) / 2) * FLOW.row;
-      nodes.push({ key: "impl-" + backends[i], label: backends[i], cx: FLOW.left, cy: y });
+      y = mid + (i - (backends.length - 1) / 2) * row;
+      nodes.push({
+        key: "impl-" + backends[i],
+        label: flowBackendName(backends[i]),
+        cx: FLOW.left,
+        cy: y,
+      });
       edges.push(
         flowEdge("impl-" + backends[i], backends[i], FLOW.center - half, FLOW.left + half, y)
       );
@@ -1137,7 +1177,7 @@
     var used = {};
     for (var i = timeline.length - 1; i >= 0 && picked.length < FLOW.recent; i -= 1) {
       var item = timeline[i];
-      if (flowRoute(item) && flowMatches(filter, item)) {
+      if (item && typeof item === "object" && flowMatches(filter, item)) {
         var key = flowSeq(item) >= 0 ? "s" + item.seq : "i" + i;
         if (used[key]) {
           key += ":" + i;
@@ -1306,10 +1346,11 @@
       flow.filter = "all";
     }
     syncFlowFilter(parts.filter, flow, units);
-    var backends = flowBackends(counts.all);
-    var layout = flowLayout(backends);
     var picked = flowCounts(counts, flow.filter);
+    var backends = flowBackends(counts.all, picked);
+    var layout = flowLayout(backends);
     var partial = run.counts_complete !== true;
+    var truncated = run.timeline_truncated === true;
     var edges = {};
     var i;
     for (i = 0; i < layout.edges.length; i += 1) {
@@ -1320,11 +1361,19 @@
     syncKeyed(parts.edges, layout.edges, flowKey, createFlowEdge, updateFlowEdge);
     syncKeyed(parts.nodes, layout.nodes, flowKey, createFlowNode, updateFlowNode);
     svgAttr(parts.svg, "aria-label", flowAriaLabel(picked, backends.length, partial));
+    // A damaged record's counts are partial, so a truncated, damaged run gets
+    // one notice that says both and never claims whole-run totals.
+    var damage = "";
+    if (partial) {
+      damage = truncated
+        ? "packets show the last 500 events; counts are partial because the record is damaged"
+        : "The run's record is damaged: every count here is partial.";
+    }
     parts.truncated = updateOptional(
       root,
       parts.truncated,
       "flow-notice",
-      run.timeline_truncated === true
+      truncated && !partial
         ? "packets show the last 500 events; totals cover the whole run"
         : "",
       parts.figure
@@ -1333,7 +1382,7 @@
       root,
       parts.damaged,
       "flow-notice is-damaged",
-      partial ? "The run's record is damaged: every count here is partial." : "",
+      damage,
       parts.truncated && parts.truncated.parentNode === root ? parts.truncated : parts.figure
     );
     syncKeyed(
