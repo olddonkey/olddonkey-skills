@@ -56,11 +56,15 @@ corruption. The index uses this classification and never repairs.
 
 ### `gate.result`
 
-Writer: `scripts/run-gate.sh` only — `journal_gate_result`, called from
-`emit_result` after the `RESULT:` line is printed and before the gate exits.
-It writes nothing when the journal helper is absent, and a failed append only
-warns; neither changes the gate's exit. Validation is the `gate.result` entry
-of `EVENT_SPECS` (`scripts/loop-journal:97-118`).
+Intended mechanical writer: `scripts/run-gate.sh` — `journal_gate_result`,
+called from `emit_result` after the `RESULT:` line is printed and before the
+gate exits. It writes nothing when the journal helper is absent, and a failed
+append only warns; neither changes the gate's exit. Validation is the
+`gate.result` entry of `EVENT_SPECS` (`scripts/loop-journal:97-118`). The
+journal is local and unauthenticated — validation checks the payload's shape,
+not the actor, so any process running as the user can append a well-shaped
+`gate.result` through `loop-journal append` — so a `gate.result` is a
+recorded claim, not proof of who wrote it.
 
 | field | required | values | writer source |
 |---|---|---|---|

@@ -235,6 +235,7 @@ PY
 # One journaled gate run in JOURNAL_WS (binding=clean): its exit, its unchanged
 # RESULT line, and the gate.result it appends. Without a journal helper the
 # same three checks are skipped, so the count is identical either way.
+# JOURNAL_GATE_PATH, when set, is the PATH of the gate process alone.
 journal_case() { # $1=name $2=gate exit $3=RESULT line $4=policy $5=purpose $6=verdict $7=totals, remaining=run-gate.sh args
   local name="$1" status="$2" result="$3" policy="$4" purpose="$5" verdict="$6" totals="$7"
   shift 7
@@ -251,7 +252,7 @@ journal_case() { # $1=name $2=gate exit $3=RESULT line $4=policy $5=purpose $6=v
   prior="$(gate_result_count "$JOURNAL_WS")"
   run_case_in_dir "journal-$name" "$JOURNAL_WS" \
     env HOME="$HOME" LOOP_JOURNAL="$JOURNAL" LOOP_TREE_OID="$TREE_OID" \
-    bash "$GATE" "$@"
+    PATH="${JOURNAL_GATE_PATH:-$PATH}" bash "$GATE" "$@"
   expect_status "$status" "${checks[0]}"
   expect_output "$result" "${checks[1]}"
   expect_gate_result "$JOURNAL_WS" "$policy" "$purpose" clean "$prior" \
@@ -972,6 +973,30 @@ journal_case log-swap 1 \
   passthrough focused red "exit=0" \
   --purpose focused --log "$JOURNAL_SWAP_LOG" -- \
   bash -c "rm -f '$JOURNAL_SWAP_LOG'; printf '=========================== 1 passed in 0.01s ===========================\n' > '$JOURNAL_SWAP_LOG'"
+
+# strip_ansi is the gate's only sed call, so a failing sed first on the gate's
+# PATH deterministically forces the log-normalization failure after an exit-0
+# suite.
+# Selective: tree-oid binding also runs sed, so all other calls use the real sed.
+REAL_SED="$(command -v sed)"
+SED_STUB_DIR="$TMP_ROOT/sed-stub"
+mkdir -p "$SED_STUB_DIR"
+{
+  cat <<'SH'
+#!/usr/bin/env bash
+if [ "${1-}" = "s/$(printf '\033')\\[[0-9;]*[A-Za-z]//g" ]; then
+  echo sed-stub-failed >&2
+  exit 1
+fi
+SH
+  printf 'exec %q "$@"\n' "$REAL_SED"
+} > "$SED_STUB_DIR/sed"
+chmod 755 "$SED_STUB_DIR/sed"
+JOURNAL_GATE_PATH="$SED_STUB_DIR:$PATH" journal_case normalization-failed 1 \
+  "RESULT: gate RED — log normalization failed; refusing to judge unparsed output" \
+  passthrough focused red "exit=0" \
+  --purpose focused --log "$TMP_ROOT/journal-normalization-failed.log" -- \
+  bash -c 'printf '\''=========================== 1 passed in 0.01s ===========================\n'\'''
 
 # The reverse: a baseline-matched failure is a green gate over a suite exit 1,
 # and a nonzero no-tests run is red with the gate's exit, not the suite's.

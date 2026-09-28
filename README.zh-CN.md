@@ -94,7 +94,7 @@ ln -s "$(pwd)/olddonkey-skills/cursor-implementation-loop" \
 
 ```bash
 bash ~/.cursor/plugins/local/cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
-# 期望输出：selftest: PASS (197 checks)
+# 期望输出：selftest: PASS (200 checks)
 ```
 
 若想手动复现默认安装，请裸拷贝文件——两步都要做：
