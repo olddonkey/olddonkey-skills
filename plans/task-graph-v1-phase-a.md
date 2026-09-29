@@ -448,6 +448,25 @@ G: none (no Cursor build input is touched).
 Gate: full host replica of `.github/workflows/selftest.yml` plus
 `reduce-selftest.sh`.
 
+### 3.9 Clarifications from implementation review (2026-09-29)
+
+The cross-review of the round-1 implementation (Codex gpt-6-sol, read-only)
+found three places where this section was silent or loose; the judge settles
+them here, and they bind 0a.1:
+
+- **The candidate commit is bound to `sha`.** For unit `commit`, `pr`, and
+  `merge`, each reference whose content is the candidate commit (`review_ref`,
+  `gate_ref`, `publish_ref`) is also related to the terminal evidence's
+  `sha`: a git content with `head = sha` is `identity-claimed`, anything else
+  `unproven` — recorded, not refused, like every relation above.
+- **`integrate` is the merge stop point's failure phase only.** It is
+  admissible only for a unit pinned to `merge`. Its gate alternative is the
+  **pre-merge** gate: `failure_evidence` then also carries
+  `integration_content`, and the red gate's claimed `input_content` must equal
+  it (otherwise refused). The provider-receipt alternative is unchanged.
+- **Canonical limits.** Integers are limited to ±(2^53 − 1) and nesting to
+  depth 64; anything beyond has no canonical encoding and is refused.
+
 ---
 
 ## 4. What 0a.3 must pick up (hand-off)
