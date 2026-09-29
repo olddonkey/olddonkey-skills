@@ -19,11 +19,17 @@
 # argument runs only the inventory/transport and coverage controls. The
 # default suite still includes every existing section and case.
 #
-# --crash-matrix runs every frame-byte cut of genesis frame 1 and of an
-# epoch-rotation frame. The cut list is enumerated from the two frames'
-# planned sizes N (probed, or given by --sizes G,R so that separate runs
-# agree): <kind>:frame-byte-n for n from 1 to N - 2 (the torn prefixes),
-# then <kind>:frame-byte-last (the final byte). --shard K/N runs its
+# --crash-matrix runs every frame-byte cut of genesis frame 1, of an
+# epoch-rotation frame, and of the active epoch's revocation frame (the
+# compound with its quarantine: recovery must leave both the revocation
+# record and the exact quarantine marker, or neither with the old epoch still
+# active; the crash state itself is pending with no current authorization).
+# The cut list is enumerated from the three frames' planned sizes N (probed,
+# or given by --sizes G,R,V so that separate runs agree): <kind>:frame-byte-n
+# for n from 1 to N - 2 (the torn prefixes), then <kind>:frame-byte-last
+# (the final byte). Re-genesis and verify-only revocation frames keep every
+# named crash point, sampled real frame-byte cuts, and the full classifier
+# sweep in the default run. --shard K/N runs its
 # deterministic partition (the i-th cut, from 0, to shard i mod N + 1) and
 # prints that partition's digest and count beside the full list's. A run's
 # frame length follows its pid, tty, and start-time digits, so it need not
@@ -52,7 +58,7 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 LIB="$SCRIPT_DIR/../lib"
 SCRIPTS="$SCRIPT_DIR/../scripts"
 usage() {
-  printf 'usage: authority-selftest.sh [--review-only [inventory] | --crash-matrix [--shard K/N] [--sizes G,R] [--cut-ids-out FILE] [--plan | --check-shards DIR]]\n' >&2
+  printf 'usage: authority-selftest.sh [--review-only [inventory] | --crash-matrix [--shard K/N] [--sizes G,R,V] [--cut-ids-out FILE] [--plan | --check-shards DIR]]\n' >&2
   exit 2
 }
 MODE_ARG="${1:-}"
@@ -72,7 +78,7 @@ case "$MODE_ARG" in
           [[ "${2:-}" =~ ^([1-9][0-9]{0,2})/([1-9][0-9]{0,2})$ ]] || usage
           (( BASH_REMATCH[1] <= BASH_REMATCH[2] )) || usage
           shard="$2" ;;
-        --sizes) [[ "${2:-}" =~ ^[1-9][0-9]{0,6},[1-9][0-9]{0,6}$ ]] || usage; sizes="$2" ;;
+        --sizes) [[ "${2:-}" =~ ^[1-9][0-9]{0,6},[1-9][0-9]{0,6},[1-9][0-9]{0,6}$ ]] || usage; sizes="$2" ;;
         --cut-ids-out) [[ -n "${2:-}" ]] || usage ;;
         --check-shards) [[ -d "${2:-}" ]] || usage; check="$2" ;;
         --plan) plan=1; MATRIX_ARGS+=(--plan); shift; continue ;;
@@ -1308,19 +1314,40 @@ def frame_of_intent(intent):
     return base64.b64decode(intent["frame_b64"])
 
 
+def restore_home(case, saved):
+    """Put case.home back byte for byte (modes included) from a saved copy."""
+    try:
+        shutil.rmtree(case.home)
+    except PermissionError:
+        subprocess.run(["chmod", "-R", "u+w", case.home], check=False)
+        shutil.rmtree(case.home)
+    shutil.copytree(saved, case.home, symlinks=True)
+
+
 def last_byte_crash(case, args, probe, intent_of, tries=8):
     """Crash `ceremony *args` after every byte but the frame's final newline.
     The frame's length follows the ceremony process's pid digits (its start
     token), which can change between a probe and the run (pids wrap in a
     busy parallel run), so check the crash landed on the last byte; after a
-    miss, recover the case to its pre-crash state and try again."""
+    miss, put HOME back byte for byte as it was before the first attempt and
+    try again. Recovering the miss instead would leave its leftovers behind
+    (abandoning a re-genesis keeps the intent-named directory, and a miss
+    refused before its intent keeps the directory with no intent at all), so
+    a retried cut would carry one extra unpublished directory per miss. A
+    miss never reaches the push (the byte crash and the refusal of a byte
+    outside the frame both precede it): the remote is checked unmoved."""
+    saved = os.path.join(case.dir, "home-before-last-byte")
+    shutil.copytree(case.home, saved, symlinks=True)
+    tip = case.tip()
     for _attempt in range(tries):
         size = probe()
         result = case.ceremony(*args, env={"LOOP_AUTHORITY_CRASH_AT": f"frame-byte-{size - 1}"})
         intent = intent_of()
         if result.rc == 137 and intent is not None and len(frame_of_intent(intent)) == size:
             return result, intent
-        case.writer("recover")
+        if case.tip() != tip:
+            raise RuntimeError(f"{case.label}: a missed last-byte attempt of {args} moved the remote")
+        restore_home(case, saved)
     raise RuntimeError(f"{case.label}: no crash landed on the last byte of {args}")
 
 
@@ -3704,10 +3731,15 @@ def matrix_cut(slot, kind, cut, size, base_log, base_tip, produced):
     MATRIX_ATTEMPTS, never credited; any other exit fails the cut at once.
     produced(intent) is called with every crashed run's intent, checked or
     discarded, for the classifier sweep.
+    The active epoch's revocation is a compound: after recovery a torn cut
+    must be neither part (no revocation record, no quarantine marker, epoch 1
+    still active) and the last-byte cut both (the record anchored and the
+    exact bytes of the marker recovery's quarantine row writes,
+    revocation_marker, test-side).
     Returns (ok, detail, the checked run's evidence (kind, frame length,
     crash offset measured on disk), or None when no run was checked)."""
     case = slot.case
-    args = ("genesis", "--remote", case.url) if kind == "genesis" else ("rotate",)
+    args = ("genesis", "--remote", case.url) if kind == "genesis" else MATRIX_CEREMONY[kind]
     n = size - 1 if cut == "last" else cut
     seen = {}
     refusals = 0
@@ -3759,6 +3791,8 @@ def matrix_cut(slot, kind, cut, size, base_log, base_tip, produced):
         problems.append(f"the frame's type is {frame_type}, not {MATRIX_FRAME_TYPES[kind]}")
     if on_disk != base_log + frame_bytes[:n] or case.tip() != base_tip:
         problems.append(f"on disk: not exactly the first {n} bytes of the frame, or the remote moved")
+    if kind == "revocation" and os.path.lexists(os.path.join(case.store_dir(), "quarantine")):
+        problems.append("a quarantine marker exists while the revocation frame is incomplete")
     if kind == "genesis":
         want = ("genesis-pending", "A2.3 row 7", "anchor-replay-forward") if last else \
             ("genesis-pending", "A2.3 row 6", "abandon")
@@ -3767,14 +3801,16 @@ def matrix_cut(slot, kind, cut, size, base_log, base_tip, produced):
             ("needs-recovery", "A1.6 torn", "torn-frame-truncation")
     independent = case.verifier()
     got = (independent.json.get("state"), independent.json.get("table"), independent.json.get("row"))
-    if got != want or independent.json.get("authorizing_state") is not False:
-        problems.append(f"verifier {got} != {want}")
+    if got != want or independent.json.get("authorizing_state") is not False \
+            or independent.json.get("current_authorization") is not False:
+        problems.append(f"verifier {got} != {want}, or the crash state authorizes")
     recovered = case.writer("recover")
     steps = recovered.json.get("steps") or [{}]
     first = (steps[0].get("state"), steps[0].get("table"), steps[0].get("row"))
     if first != want:
         problems.append(f"writer classified the crash state {first} != {want}")
     final = recovered.json
+    marker = None
     if kind == "genesis" and not last:
         # abandonment removes only the intent: the torn frame 1 stays, unpublished
         ok = final.get("state") == "none" and case.genesis_intent() is None \
@@ -3783,6 +3819,27 @@ def matrix_cut(slot, kind, cut, size, base_log, base_tip, produced):
     elif kind == "genesis":
         ok = final.get("state") == "committed" and final.get("seq") == 1 \
             and case.tip() == intent["anchor_commit"] and case.read(log) == frame_bytes
+    elif kind == "revocation":
+        # the compound: neither part (epoch 1 still active, no marker), or
+        # both (the record anchored, then recovery's quarantine row writing
+        # the marker's exact bytes)
+        store_id = case.active()["store_id"]
+        marker_path = os.path.join(case.store_dir(store_id), "quarantine")
+        marker = case.read(marker_path) if os.path.lexists(marker_path) else None
+        rows = [step.get("row") for step in steps]
+        if not last:
+            ok = recovered.rc == 0 and rows == ["torn-frame-truncation", "recovery-tidy"] \
+                and final.get("state") == "committed" and final.get("seq") == 1 \
+                and final.get("epochs") == {"1": "active"} and final.get("active_epoch") == 1 \
+                and final.get("authorizing_state") is True and marker is None \
+                and case.read(log) == base_log and case.intent() is None and case.tip() == base_tip
+        else:
+            ok = recovered.rc == 6 and rows == ["anchor-replay-forward", "recovery-tidy", "store-quarantine"] \
+                and final.get("state") == "quarantined" and final.get("seq") == 2 \
+                and final.get("epochs") == {"1": "revoked"} and final.get("active_epoch") is None \
+                and final.get("authorizing_state") is False and final.get("rule") == "active-epoch-revoked" \
+                and marker == revocation_marker(store_id, 2) and case.read(log) == base_log + frame_bytes \
+                and case.intent() is None and case.tip() == intent["anchor_commit"]
     elif not last:
         ok = final.get("state") == "committed" and final.get("seq") == 1 and case.read(log) == base_log \
             and case.intent() is None and case.tip() == base_tip
@@ -3790,14 +3847,30 @@ def matrix_cut(slot, kind, cut, size, base_log, base_tip, produced):
         ok = final.get("state") == "committed" and final.get("seq") == 2 \
             and case.read(log) == base_log + frame_bytes and case.tip() == intent["anchor_commit"]
     if not ok:
-        problems.append(f"recovery outcome {final.get('state')} seq {final.get('seq')}: {recovered}"[:400])
+        problems.append(f"recovery outcome {final.get('state')} seq {final.get('seq')} epochs {final.get('epochs')}"
+                        f" rows {[step.get('row') for step in steps]} marker {marker!r}: {recovered}"[:600])
     return not problems, "; ".join(problems), evidence
 
 
-MATRIX_KINDS = ("genesis", "rotation")
-MATRIX_LABELS = {"genesis": "genesis frame 1", "rotation": "an epoch-rotation frame"}
-MATRIX_FRAME_TYPES = {"genesis": "store.genesis", "rotation": "epoch.rotated"}
+def revocation_marker(store_id, seq):
+    """The quarantine marker recovery's store-quarantine row writes when it
+    completes the active epoch's revocation after a crash (A1.3: its plan's
+    rule, position, and detail), encoded test-side as canonical JSON. (The
+    ceremony's own quarantine child, which a frame-byte cut never reaches,
+    words the detail "the active epoch was revoked".)"""
+    return canon({"store_id": store_id, "rule": "active-epoch-revoked", "position": {"seq": seq},
+                  "detail": "the active epoch is revoked"})
+
+
+MATRIX_KINDS = ("genesis", "rotation", "revocation")
+MATRIX_LABELS = {"genesis": "genesis frame 1", "rotation": "an epoch-rotation frame",
+                 "revocation": "the active epoch's revocation frame (with its quarantine)"}
+MATRIX_FRAME_TYPES = {"genesis": "store.genesis", "rotation": "epoch.rotated", "revocation": "epoch.revoked"}
 MATRIX_KIND_OF = {frame_type: kind for kind, frame_type in MATRIX_FRAME_TYPES.items()}
+# The ceremony each kind crashes (genesis adds its --remote): rotation and
+# revocation run on a template holding one real genesis, so epoch 1 is the
+# active epoch the revocation revokes.
+MATRIX_CEREMONY = {"genesis": ("genesis",), "rotation": ("rotate",), "revocation": ("revoke", "--epoch", "1")}
 # Runs per cut before it fails: each is a fresh ceremony process, so fresh
 # pid, tty, and start-time digits.
 MATRIX_ATTEMPTS = 50
@@ -3815,7 +3888,7 @@ EVIDENCE_LINE = re.compile(r"((" + "|".join(MATRIX_KINDS) + r"):frame-byte-([1-9
 
 
 def matrix_options(argv):
-    """--crash-matrix [--shard K/N] [--sizes G,R] [--cut-ids-out FILE] [--plan | --check-shards DIR]
+    """--crash-matrix [--shard K/N] [--sizes G,R,V] [--cut-ids-out FILE] [--plan | --check-shards DIR]
     (the wrapper validated the shapes and combinations)."""
     options = {"shard": None, "sizes": None, "out": None, "plan": False, "check": None}
     index = 0
@@ -3830,8 +3903,7 @@ def matrix_options(argv):
             shard, count = (int(part) for part in value.split("/"))
             options["shard"] = (shard, count)
         elif flag == "--sizes":
-            genesis, rotation = (int(part) for part in value.split(","))
-            options["sizes"] = {"genesis": genesis, "rotation": rotation}
+            options["sizes"] = dict(zip(MATRIX_KINDS, (int(part) for part in value.split(","))))
         elif flag == "--cut-ids-out":
             options["out"] = os.path.abspath(value)
         elif flag == "--check-shards":
@@ -3842,15 +3914,20 @@ def matrix_options(argv):
 
 def matrix_cut_ids(sizes):
     """The enumerated crash-matrix cuts, in order: for genesis frame 1, then
-    for an epoch-rotation frame, byte n for every n from 1 to the planned
-    size - 2 (a torn prefix), then "last" (a run's own final byte, whatever
-    its length). The planned final byte is "last", never a numeric id."""
+    for an epoch-rotation frame, then for the active epoch's revocation
+    frame, byte n for every n from 1 to the planned size - 2 (a torn prefix),
+    then "last" (a run's own final byte, whatever its length). The planned
+    final byte is "last", never a numeric id."""
     return [f"{kind}:frame-byte-{n}" for kind in MATRIX_KINDS for n in (*range(1, sizes[kind] - 1), "last")]
+
+
+def matrix_sizes_text(sizes):
+    return ", ".join(f"{kind} frame {sizes[kind]} bytes" for kind in MATRIX_KINDS)
 
 
 def matrix_shard(ids, shard, count):
     """The deterministic partition: the i-th enumerated cut (from 0) belongs
-    to shard i mod count + 1, so every shard gets both frames' cuts."""
+    to shard i mod count + 1, so every shard gets every frame's cuts."""
     return [cut for index, cut in enumerate(ids) if index % count == shard - 1]
 
 
@@ -3863,12 +3940,12 @@ def matrix_note(line):
 
 
 def matrix_slots(kind, count):
-    """count slots for one frame, each with its template saved (rotation:
-    after a real genesis, scratch-free)."""
+    """count slots for one frame, each with its template saved (rotation and
+    revocation: after a real genesis, scratch-free, epoch 1 active)."""
     slots = [Slot(kind, index) for index in range(count)]
 
     def prepare(slot):
-        if kind == "rotation":
+        if kind != "genesis":
             result = slot.case.genesis()
             if result.rc != 0:
                 raise RuntimeError(f"template genesis failed: {result}")
@@ -3891,7 +3968,7 @@ def matrix_probe(kind, slot):
         crashed(slot.case, "genesis-step-2", "genesis", "--remote", slot.case.url)
         frame_bytes = frame_of_intent(slot.case.genesis_intent())
     else:
-        crashed(slot.case, "after-intent-fsync", "rotate")
+        crashed(slot.case, "after-intent-fsync", *MATRIX_CEREMONY[kind])
         frame_bytes = frame_of_intent(slot.case.intent())
     slot.restore()
     matrix_note(f"{kind} probe: a {len(frame_bytes)}-byte frame, principal {frame_principal(frame_bytes)}")
@@ -3969,8 +4046,9 @@ def matrix_sweep(kind, size, cuts, frames):
 def g_matrixsweep(argv):
     """The real offline classifier (frame_prefix_classes: A2.3's frame-1
     classes for genesis frame 1, A1.6's tail classes for an epoch-rotation
-    frame) over every prefix 1 .. N - 1 of each frame in argv[0]: 1 .. N - 2
-    torn, N - 1 unterminated."""
+    frame and the active epoch's revocation frame) over every prefix
+    1 .. N - 1 of each frame in argv[0]: 1 .. N - 2 torn, N - 1
+    unterminated."""
     m = load_lib(os.path.join(TMP, f"inproc-matrixsweep-{os.getpid()}"))
     with open(argv[0], encoding="utf-8") as handle:
         sweep = json.load(handle)
@@ -4047,8 +4125,7 @@ def matrix_coverage(lists, sizes, note=lambda line: None):
     with evidence crediting every cut, and together every planned cut
     exactly once. Returns [(description, ok, detail)]."""
     ids = matrix_cut_ids(sizes)
-    note(f"cut list: {len(ids)} cuts, digest {ids_digest(ids)} (genesis frame {sizes['genesis']} bytes, "
-         f"rotation frame {sizes['rotation']} bytes)")
+    note(f"cut list: {len(ids)} cuts, digest {ids_digest(ids)} ({matrix_sizes_text(sizes)})")
     counts = {count for _shard, count in lists}
     count = counts.pop() if len(counts) == 1 else None
     complete = count is not None and sorted(lists) == [(shard, count) for shard in range(1, count + 1)]
@@ -4085,13 +4162,15 @@ def matrix_check_shards(directory, sizes):
 
 
 def s_crash_matrix():
-    """Every frame-byte cut of (a) genesis frame 1 and (b) an epoch rotation
-    frame, each a real writer crash plus recovery -- all of them, or one
-    shard's deterministic partition -- then the classifier sweep over every
-    prefix of each distinct real frame those crashes wrote. Revocation and
-    re-genesis frames keep every named crash point as a real crash plus
-    sampled real frame-byte cuts and the full classifier sweep (the default
-    run)."""
+    """Every frame-byte cut of (a) genesis frame 1, (b) an epoch rotation
+    frame, and (c) the active epoch's revocation frame (recovery checked for
+    the compound: record and exact quarantine marker, or neither), each a
+    real writer crash plus recovery -- all of them, or one shard's
+    deterministic partition -- then the classifier sweep over every prefix
+    of each distinct real frame those crashes wrote. Re-genesis and
+    verify-only revocation frames keep every named crash point as a real
+    crash plus sampled real frame-byte cuts and the full classifier sweep
+    (the default run)."""
     options = MATRIX
     sizes = options["sizes"]
     if options["check"] is not None:
@@ -4105,10 +4184,9 @@ def s_crash_matrix():
             slots[kind] = matrix_slots(kind, 1 if options["plan"] else MATRIX_WORKERS)
             sizes[kind] = matrix_probe(kind, slots[kind][0])
     ids = matrix_cut_ids(sizes)
-    matrix_note(f"cut list: {len(ids)} cuts, digest {ids_digest(ids)} (genesis frame {sizes['genesis']} bytes, "
-                f"rotation frame {sizes['rotation']} bytes)")
+    matrix_note(f"cut list: {len(ids)} cuts, digest {ids_digest(ids)} ({matrix_sizes_text(sizes)})")
     if options["plan"]:
-        matrix_note(f"sizes={sizes['genesis']},{sizes['rotation']}")
+        matrix_note(f"sizes={','.join(str(sizes[kind]) for kind in MATRIX_KINDS)}")
         for kind in MATRIX_KINDS:
             emit(f"crash matrix plan: {MATRIX_LABELS[kind]} probed at {sizes[kind]} bytes (a real crashed ceremony)",
                  sizes[kind] > 1)
@@ -4159,12 +4237,15 @@ def s_matrix_coverage_selftest():
     included), one cut missing, or a numeric id for the planned final byte,
     fails. A scripted run that exits 11 refusing a principal read is retried
     within the bound and never credited; any other exit fails the cut."""
-    sizes = {"genesis": 6, "rotation": 5}
+    sizes = {"genesis": 6, "rotation": 5, "revocation": 5}
     ids = matrix_cut_ids(sizes)
-    emit("crash matrix coverage check: the enumerator plans bytes 1 .. N - 2 of each frame (torn prefixes), then "
-         "last, and no numeric id for the final byte N - 1",
-         ids == [f"genesis:frame-byte-{n}" for n in (1, 2, 3, 4, "last")]
-         + [f"rotation:frame-byte-{n}" for n in (1, 2, 3, "last")], ids)
+    emit("crash matrix coverage check: the enumerator plans bytes 1 .. N - 2 of each of the three frames (genesis, "
+         "rotation, the active epoch's revocation: torn prefixes), then last, and no numeric id for the final byte "
+         "N - 1", ids == [f"genesis:frame-byte-{n}" for n in (1, 2, 3, 4, "last")]
+         + [f"rotation:frame-byte-{n}" for n in (1, 2, 3, "last")]
+         + [f"revocation:frame-byte-{n}" for n in (1, 2, 3, "last")], ids)
+    emit("crash matrix coverage check: --sizes G,R,V gives the three frames' sizes in that order",
+         matrix_options(["--sizes", "6,5,4"])["sizes"] == {"genesis": 6, "rotation": 5, "revocation": 4})
 
     def run_evidence(cut, longer):
         """What a real run of this cut would record, its frame `longer`
@@ -4187,6 +4268,8 @@ def s_matrix_coverage_selftest():
     for label, cut, evidence in (
             ("another crash offset", "rotation:frame-byte-2", ("rotation", 5, 3)),
             ("another frame kind", "rotation:frame-byte-3", ("genesis", 5, 3)),
+            ("another frame kind (a rotation frame for the revocation's cut)", "revocation:frame-byte-2",
+             ("rotation", 5, 2)),
             ("a frame not longer than n", "genesis:frame-byte-4", ("genesis", 4, 4)),
             ("a frame of exactly n + 1 bytes (n its final byte: unterminated, not torn)",
              "genesis:frame-byte-4", ("genesis", 5, 4)),
@@ -4200,10 +4283,11 @@ def s_matrix_coverage_selftest():
          "numeric id, even with torn evidence) fail, on the partition and the union",
          failed and any("partition" in description for description in failed)
          and any("combine" in description for description in failed), failed)
-    failed = verdict(drop="rotation:frame-byte-last")
-    emit("crash matrix coverage check: shard lists missing one planned cut (rotation:frame-byte-last) fail, on the "
-         "partition and the union", failed and any("partition" in description for description in failed)
-         and any("combine" in description for description in failed), failed)
+    for drop in ("rotation:frame-byte-last", "revocation:frame-byte-1"):
+        failed = verdict(drop=drop)
+        emit(f"crash matrix coverage check: shard lists missing one planned cut ({drop}) fail, on the partition and "
+             "the union", failed and any("partition" in description for description in failed)
+             and any("combine" in description for description in failed), failed)
     failed = verdict(count=1)
     emit("crash matrix coverage check: the unsharded run's single list, complete and matching, passes",
          not failed, failed)
@@ -4216,14 +4300,15 @@ def s_matrix_coverage_selftest():
         cycling (no process, nothing written: no intent)."""
 
         def __init__(self, *results):
-            self.results, self.calls = results, 0
+            self.results, self.calls, self.args = results, 0, set()
             self.case, self.url = self, "file:///matrix-coverage-check.git"
 
         def restore(self):
             pass
 
-        def ceremony(self, *_args, env=None):
+        def ceremony(self, *args, env=None):
             self.calls += 1
+            self.args.add(args)
             return self.results[(self.calls - 1) % len(self.results)]
 
         def genesis_intent(self):
@@ -4237,14 +4322,17 @@ def s_matrix_coverage_selftest():
     start = Res(11, "error: start-token: cannot read the session start token: sysctl KERN_PROC_PID failed\n", "")
     traceback_run = Res(1, "Traceback (most recent call last):\nOSError: [Errno 5] Input/output error\n", "")
     challenge = Res(11, "error: challenge: the challenge was not echoed exactly\n", "")
-    for kind, cut in (("rotation", "last"), ("genesis", 3)):
+    ceremonies = {"genesis": ("genesis", "--remote", "file:///matrix-coverage-check.git"), "rotation": ("rotate",),
+                  "revocation": ("revoke", "--epoch", "1")}
+    for kind, cut in (("rotation", "last"), ("genesis", 3), ("revocation", 2)):
         slot = Scripted(tty_name, start)
         ok, detail, evidence = matrix_cut(slot, kind, cut, sizes[kind], b"", None, lambda intent: None)
-        emit(f"crash matrix retry: {kind} frame-byte-{cut} runs that each exit 11 refusing a principal read (the "
-             f"terminal's name, the start token) are discarded and retried up to {MATRIX_ATTEMPTS} runs, never "
-             "credited", not ok and evidence is None and slot.calls == MATRIX_ATTEMPTS
+        emit(f"crash matrix retry: {kind} frame-byte-{cut} runs (each `ceremony {' '.join(ceremonies[kind])}`) that "
+             "each exit 11 refusing a principal read (the terminal's name, the start token) are discarded and retried "
+             f"up to {MATRIX_ATTEMPTS} runs, never credited", not ok and evidence is None
+             and slot.calls == MATRIX_ATTEMPTS and slot.args == {ceremonies[kind]}
              and detail.startswith("not credited") and f"principal read: {MATRIX_ATTEMPTS})" in detail,
-             (slot.calls, detail))
+             (slot.calls, slot.args, detail))
     for label, results, calls in (
             ("an exit-11 terminal-name refusal, then a traceback (exit 1): retried once, then the traceback fails "
              "the cut", (tty_name, traceback_run), 2),
@@ -4528,11 +4616,11 @@ else:
 PY
 
 if [[ "$MODE_ARG" == --crash-matrix ]]; then
-  printf 'note: the crash matrix -- the real writer crashed at every frame-byte cut of genesis frame 1 and of an epoch-rotation frame (bytes 1 .. N - 2 as torn prefixes, then the final byte; all of them, or one shard'"'"'s deterministic partition), each followed by the verifier and recovery, then the offline classifier over every prefix of each real frame the crashes wrote\n'
+  printf 'note: the crash matrix -- the real writer crashed at every frame-byte cut of genesis frame 1, of an epoch-rotation frame, and of the active epoch'"'"'s revocation frame (bytes 1 .. N - 2 as torn prefixes, then the final byte; all of them, or one shard'"'"'s deterministic partition), each followed by the verifier and recovery (for the revocation: the record and the exact quarantine marker, or neither with epoch 1 still active), then the offline classifier over every prefix of each real frame the crashes wrote; re-genesis frames are not in it (sampled real bytes and the full sweep, in the default run)\n'
 elif [[ "$MODE_ARG" == --review-only ]]; then
   printf 'note: review regressions, frozen point/transport inventory, named scenario cuts, and coverage negative controls only; no frame-byte crash matrix\n'
 else
-  printf 'note: genesis and rotation frames get every-byte real crashes in --crash-matrix (sharded CI jobs); here, revocation and re-genesis frames get every named crash point as a real crash, sampled real frame-byte cuts, and the full classifier sweep over every byte\n'
+  printf 'note: genesis, rotation, and active-epoch revocation frames get every-byte real crashes in --crash-matrix (sharded CI jobs); here, re-genesis and verify-only revocation frames get every named crash point as a real crash, sampled real frame-byte cuts, and the full classifier sweep over every byte\n'
 fi
 python3 "$TMP_ROOT/at.py" main "$SCRIPTS" "$LIB" "$TMP_ROOT" "$MODE_ARG" ${MATRIX_ARGS[@]+"${MATRIX_ARGS[@]}"} \
   > "$TMP_ROOT/at.tsv" 2> "$TMP_ROOT/at.stderr"

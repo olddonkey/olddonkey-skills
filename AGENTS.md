@@ -140,14 +140,21 @@ run):
    `sysctl kern.bootsessionuuid` (sandbox denial is an environment failure,
    not a skipped or passed case). Then the crash matrix,
    `bash skills/implementation-loop/tests/authority-selftest.sh --crash-matrix`
-   (the real writer crashed at every frame-byte cut of genesis frame 1 and of
-   an epoch-rotation frame, each followed by the verifier and recovery, then
-   the classifier sweep below; slow, parallel) — expect `selftest: PASS`,
-   with one check per cut, one classifier-sweep check per frame kind, and
-   four coverage checks: (G − 1) + (R − 1) + 2 + 4 = G + R + 4 for planned
-   lengths G and R, which is 6466 checks measured on the judge's macOS host
-   (6460 cuts: genesis frame 1 and a rotation frame). The count follows the
-   two frames' planned lengths N, which
+   (the real writer crashed at every frame-byte cut of genesis frame 1, of an
+   epoch-rotation frame, and of the active epoch's revocation frame, each
+   followed by the verifier and recovery -- for the revocation, the compound:
+   after a torn cut neither the record nor a quarantine marker, epoch 1 still
+   active; after the last byte the record anchored and the exact bytes of the
+   marker recovery's quarantine row writes -- then the classifier sweep
+   below; slow, parallel) — expect `selftest: PASS`, with one check per cut,
+   one classifier-sweep check per frame kind, and four coverage checks:
+   (G − 1) + (R − 1) + (V − 1) + 3 + 4 = G + R + V + 4 for planned lengths
+   G, R, and V. The two-frame matrix measured 6466 checks on the judge's
+   macOS host (6460 cuts: genesis frame 1 and a rotation frame); the
+   revocation frame adds V. Re-genesis frames are not in it: they keep every
+   named crash point, sampled real frame-byte cuts, and the full classifier
+   sweep in the default run. The count follows the
+   three frames' planned lengths N, which
    include the temporary directory's path (the pinned `file://` remote) and
    the ceremony's pid, tty, and start-time digits, and so vary by machine;
    every run prints the enumerated cut list's count and digest
@@ -167,21 +174,21 @@ run):
    length. Then, for every distinct actual frame length the run's crashes
    wrote (discarded runs included), per kind, the offline classifier — A2.3's
    frame-1 classifier for genesis frame 1, A1.6's tail classifier for a
-   rotation frame, the same code as the revocation and re-genesis sweeps —
+   rotation or revocation frame, the same code as the re-genesis sweeps —
    classifies every prefix 1 .. N − 1 of that exact frame, and prefixes
    1 .. N − 2 must be torn and N − 1 unterminated; the unsharded run and
    each shard print, per kind, the planned numeric range, the `last` cut,
    and the lengths swept (`# crash matrix <kind> classifier sweep: ...`). In
-   CI it is its own jobs: `crash-matrix-plan` probes the two sizes once
-   (`--crash-matrix --plan` prints `# crash matrix sizes=G,R`); eight
+   CI it is its own jobs: `crash-matrix-plan` probes the three sizes once
+   (`--crash-matrix --plan` prints `# crash matrix sizes=G,R,V`); eight
    `crash-matrix` shards (`fail-fast: false`, 120 minutes each) run
-   `--crash-matrix --shard K/8 --sizes G,R --cut-ids-out cut-ids-K-of-8.txt`
+   `--crash-matrix --shard K/8 --sizes G,R,V --cut-ids-out cut-ids-K-of-8.txt`
    — the i-th enumerated cut (from 0) belongs to shard i mod 8 + 1, and each
    shard prints its partition's count and digest and its classifier sweep
    and uploads its credited cuts, one line each: the cut id, then the
    checked run's actual frame kind, frame length, and crash offset; and
    `crash-matrix-coverage` fails unless the plan and every shard succeeded
-   and `--crash-matrix --check-shards <dir> --sizes G,R`, which recomputes
+   and `--crash-matrix --check-shards <dir> --sizes G,R,V`, which recomputes
    the full list from the same enumerator, finds the eight lists to be
    exactly its partitions, every planned cut exactly once, with every cut's
    evidence crediting it: the cut's kind; for byte n, offset n and a frame
@@ -208,7 +215,37 @@ run):
    pending, quarantined, and in each bootstrap terminal state, with the
    journal store, the authority directory, and the remote byte-identical
    afterwards; needs `ssh-keygen` with `-Y` and `git`) — expect
-   `selftest: PASS (167 checks)`.
+   `selftest: PASS (167 checks)`. Then
+   `bash skills/implementation-loop/tests/falsifier-selftest.sh` (0a.4: the
+   named falsifier over the final 0a tree, one check set per claim -- F1
+   sinks reachable only through admitted rows, with registry-selftest.sh's own
+   static mode re-run, six planted bypasses, alias-proof scans of the writer
+   entry and the verifier (every import and attribute chain resolved against
+   the real modules; planted aliases such as `import os as o; o.system(...)`
+   and `import subprocess as sp; sp.run(...)` fail), the writer entry's
+   loopauth accesses frozen through every alias (a planted forged-token
+   bypass through `s = mods["store"]`, `s._new(s.Token(...))`, `s._grant`,
+   and `s._fs_create` fails, and is shown live), the verifier's runner frozen
+   to its one `subprocess.run(argv, ...)` (an extra call planted inside it
+   fails), and the verifier's complete fetch argv and git environment frozen
+   for file://, SSH, and HTTPS remotes; F2 the frozen entry-point table
+   against the real parser and the ordered token trace of `recover` for every
+   case of the crash matrix;
+   F3 derived rows with no entry and the compound children's token refusals;
+   F4 no generic sealing or append hatch, each row validator dominating its
+   record (planted dead validators, and stand-in validators in lib/loopauth or
+   the entry, fail); F5 recovery that never invents authority; F6 compound
+   transitions that never come apart -- "both" for the active epoch's
+   revocation is its record anchored with writer, verifier, and refs
+   classifying the store quarantined by its exact rule and position (the
+   marker's exact bytes asserted once recovery completes from every cut), and
+   "abandoned" re-genesis needs the recorded old remote tip, each with
+   planted half-transitions, and the every-byte crash matrix's enumerator is
+   checked to cover all three frame kinds -- ceremonies in-process with the TTY
+   stubbed, so no pty; needs `ssh-keygen` with `-Y` and `git`; the crash
+   matrix runs in parallel beside the other modes) — expect one `F1` … `F6`
+   line each with `PASS`, `escape-hatch: none`,
+   `falsifier: PASS (2143 checks)`, and `selftest: PASS (2143 checks)`.
 13. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
 14. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
