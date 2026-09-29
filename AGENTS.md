@@ -21,7 +21,10 @@ Components:
   backend-neutral gate, while the other eight `scripts/*.sh` executables are
   one-release forwarding shims removed in 0.5.0. The shared observable interface
   is recorded in `references/dispatch-contract.md` and enforced by the contract
-  suites.
+  suites. `lib/loopauth/` is stdlib-only python3 shared by `scripts/loop-journal`
+  and `scripts/loop-index` (canonical JSON and digests, the task-graph-v1
+  schema-2 vocabulary, and the pure reducer); both import it only from the
+  `lib/` beside their real `scripts/` directory and refuse a symlinked `lib/`.
 - `skills/engineering-mode/` — goal-first wrapper over the loop. Shared
   playbooks in `references/playbooks/`, plus `scripts/tree-oid.sh` and its
   selftest.
@@ -87,6 +90,11 @@ run):
    `contract-negative: PASS (42 checks; 21 broken adapters rejected)`.
 9. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
    `scripts/loop-evidence` record card) — expect `selftest: PASS (152 checks)`.
+10. `bash skills/implementation-loop/tests/reduce-selftest.sh` (`lib/loopauth`:
+   canonical encoding, the schema-2 vocabulary, and the reducer against a
+   frozen oracle of the transition table and the terminal_evidence matrix,
+   plus schema-2 records written through `loop-journal append --schema 2`) —
+   expect `selftest: PASS (685 checks)`.
 10. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
 11. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.

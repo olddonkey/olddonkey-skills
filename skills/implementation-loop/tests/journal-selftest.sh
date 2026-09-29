@@ -7,6 +7,7 @@ set -uo pipefail
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 JOURNAL="$SCRIPT_DIR/../scripts/loop-journal"
 RUN="$SCRIPT_DIR/../scripts/loop-run"
+LIB="$(CDPATH= cd -- "$SCRIPT_DIR/../lib" && pwd -P)"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/journal-selftest.XXXXXX")" || exit 1
 
 cleanup() {
@@ -33,6 +34,7 @@ trap 'cleanup 143' TERM
 export HOME="$TMP_ROOT/home"
 mkdir -p "$HOME" || exit 1
 export LC_ALL=C
+export PYTHONDONTWRITEBYTECODE=1
 # A caller's declared attribution must not leak into fixture events.
 unset LOOP_UNIT LOOP_ROUND
 
@@ -1580,6 +1582,507 @@ assert "reviewer" not in reviews[-1]
 assert reviews[-2]["round"] == 2 and reviews[-2]["verdict"] == "iterate"
 PY
 then pass "reviewer: enum, loop-run round-trip, and absent key are stored exactly"; else fail "reviewer: enum, loop-run round-trip, and absent key are stored exactly"; fi
+
+# --- 14. Schema 2 (task-graph-v1 vocabulary tg-v1.0a1) through the CLI ---
+# Payloads are sealed with the library's own digest subjects; the subjects
+# themselves are frozen and checked in reduce-selftest.sh.
+S2GEN="$TMP_ROOT/s2gen.py"
+cat > "$S2GEN" <<'PY'
+"""Write schema-2 cases for one run: accept.tsv and refuse.tsv rows are
+description<TAB>event<TAB>expected exit<TAB>stderr fragment<TAB>payload file."""
+import json
+import os
+import sys
+
+sys.dont_write_bytecode = True
+lib, run_id, out = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, lib)
+from loopauth import canonical, vocabulary  # noqa: E402
+
+D = canonical.digest
+VOCABULARY = "tg-v1.0a1"
+SNAPSHOT = D("run-snapshot")
+
+
+def git(head, tree):
+    return {"kind": "git", "head": head * 40, "tree_oid": tree * 40}
+
+
+INPUT = git("a", "b")
+COMMIT = git("c", "d")
+SHA = "c" * 40
+INVOCATION = {"argv": ["/usr/bin/env", "true"], "cwd": "/work", "env_digest": D("env"), "executor_version": "exec-1"}
+IDENTITY = {
+    "adapter": {"boot_id": "boot-1", "pid": 100, "pgid": 100, "start_time": "t-100"},
+    "effect_child": {"boot_id": "boot-1", "pid": 101, "pgid": 100, "start_time": "t-101"},
+}
+PRODUCER = {"tool": "journal-selftest", "tool_digest": D("journal-selftest")}
+DISPATCH = {"backend": "codex", "model": "model-1", "effort": "high", "prompt_digest": D("prompt")}
+PINS = {
+    "a1": ("u1", "unit", "pr"),
+    "b1": ("op1", "operation", None),
+    "c1": ("inv1", "investigation", None),
+    "d1": ("ap1", "approval", None),
+}
+
+
+def base(attempt):
+    node = PINS[attempt][0]
+    return {
+        "vocabulary": VOCABULARY,
+        "run_id": run_id,
+        "run_snapshot_digest": SNAPSHOT,
+        "node_id": node,
+        "node_spec_digest": D(["spec", node]),
+        "attempt_id": attempt,
+    }
+
+
+def ref(kind, attempt, content=None):
+    node = PINS[attempt][0]
+    return {"kind": kind, "digest": D([kind, attempt]), "node_id": node, "attempt_id": attempt, "content": content}
+
+
+valid = []
+
+
+def case(label, event, payload):
+    valid.append((label, event, vocabulary.seal(event, payload)))
+
+
+for attempt, (node, node_type, stop_point) in PINS.items():
+    payload = base(attempt)
+    payload.update({"node_type": node_type, "input_content": INPUT})
+    if node_type == "unit":
+        payload["stop_point"] = stop_point
+    if node_type in ("unit", "investigation"):
+        payload["dispatch"] = DISPATCH
+    if node_type == "operation":
+        payload.update({"invocation": INVOCATION, "catalog_entry_digest": D("catalog")})
+    if node_type == "approval":
+        payload["envelope_digest"] = D("envelope")
+    case(f"attempt.begin ({node_type})", "attempt.begin", payload)
+transition = base("a1")
+transition.update({
+    "content": INPUT,
+    "from": "ready",
+    "to": "starting",
+    "node_type": "unit",
+    "stop_point": "pr",
+    "evidence": {
+        "selection_ref": ref("selection", "a1"),
+        "authorization_ref": ref("authorization", "a1"),
+        "preconditions_digest": D("preconditions"),
+    },
+})
+case("node.transition", "node.transition", transition)
+operation = base("b1")
+operation.update({"invocation": INVOCATION, "expected_preconditions": {"branch": "main"}, "retry_class": "reconcilable"})
+case("operation.reserve", "operation.reserve", dict(operation))
+case("operation.spawned", "operation.spawned", dict(operation, identity=IDENTITY))
+case("operation.released", "operation.released", dict(operation))
+case("operation.result", "operation.result", dict(
+    operation, content=COMMIT, outcome="succeeded", producer=PRODUCER, log_digest=D("log"),
+    identity=IDENTITY, output_content=COMMIT,
+))
+reconciled = base("b1")
+reconciled.update({
+    "request_digest": vocabulary.request_digest("operation.reserve", operation),
+    "reconciliation_outcome": "succeeded",
+    "method": "receipt-lookup",
+    "substitutes": "operation-result",
+    "observed_content": COMMIT,
+    "receipt_ref": ref("provider-receipt", "b1"),
+    "producer": PRODUCER,
+    "substituted_result": {"outcome": "succeeded", "output_content": COMMIT, "identity": IDENTITY},
+})
+case("reconciliation.result (operation-result)", "reconciliation.result", reconciled)
+published = {"stop_point": "pr", "branch": "topic", "content": COMMIT, "outcome": "published",
+             "sha": SHA, "pr": "https://example.invalid/pr/1", "head_sha": SHA}
+reconciled = base("a1")
+reconciled.update({
+    "request_digest": D({"stop_point": "pr", "branch": "topic", "content": COMMIT}),
+    "reconciliation_outcome": "succeeded",
+    "method": "reconciliation",
+    "substitutes": "publish",
+    "observed_content": COMMIT,
+    "producer": PRODUCER,
+    "substituted_result": published,
+})
+case("reconciliation.result (publish)", "reconciliation.result", reconciled)
+case("graph.diverged", "graph.diverged", {
+    "vocabulary": VOCABULARY,
+    "run_id": run_id,
+    "prior_semantic_digest": D("graph-1"),
+    "observed_semantic_digest": D("graph-2"),
+    "successor_run_id": "20000101T000000Z-0c3c3c",
+})
+gate = base("a1")
+gate.update({
+    "content": COMMIT, "policy": "strict", "purpose": "unit-final", "binding": "clean",
+    "verdict": "green", "gate_exit": 0, "suite_exit": 0, "suite_invocation": INVOCATION,
+    "input_content": COMMIT, "producer": PRODUCER, "log_digest": D("gate-log"), "output_content": COMMIT,
+})
+case("gate.result", "gate.result", gate)
+review = base("a1")
+review.update({
+    "content": COMMIT, "reviewer": "reviewer-1", "request_id": "request-1",
+    "reviewed_content_digest": D(COMMIT), "verdict": "pass", "findings_digest": D("findings"),
+})
+case("review.recorded", "review.recorded", review)
+case("publish.recorded (published)", "publish.recorded", dict(base("a1"), **published))
+case("publish.recorded (failed)", "publish.recorded", dict(
+    base("a1"), stop_point="pr", branch="topic", content=COMMIT, outcome="failed", error_code="push-rejected",
+))
+
+os.makedirs(os.path.join(out, "payloads"), exist_ok=True)
+rows = {"accept": [], "refuse": []}
+count = [0]
+
+
+def write(group, description, event, status, fragment, payload):
+    count[0] += 1
+    path = os.path.join(out, "payloads", f"{count[0]:04d}.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+    rows[group].append("\t".join([description, event, str(status), fragment, path]))
+
+
+named = {}
+for label, event, payload in valid:
+    named[label] = (event, payload)
+    write("accept", f"{label} is accepted with its required fields", event, 0, "-", payload)
+    for key in payload:
+        pruned = {name: value for name, value in payload.items() if name != key}
+        write("refuse", f"{label} is refused without {key}", event, 2, "[missing-field]", pruned)
+    if event == "node.transition":
+        for key in payload["evidence"]:
+            pruned = dict(payload, evidence={name: value for name, value in payload["evidence"].items() if name != key})
+            write("refuse", f"{label} is refused without evidence.{key}", event, 2, "[evidence-missing]", pruned)
+for axis, weak, strong, label in (
+    ("input_isolation", "endpoint-sampled", "immutable", "gate.result"),
+    ("capability_assurance", "declared", "enforced", "attempt.begin (unit)"),
+    ("atomicity", "unproven", "atomic", "operation.result"),
+    ("conformance", "unproven", "conformant", "node.transition"),
+):
+    event, payload = named[label]
+    write("accept", f"{label} with the weak {axis}={weak} is accepted", event, 0, "-", dict(payload, **{axis: weak}))
+    write("refuse", f"{label} with the strong {axis}={strong} is refused", event, 2, "[strong-assurance]",
+          dict(payload, **{axis: strong}))
+event, payload = named["attempt.begin (unit)"]
+write("refuse", "a record whose run_id differs from the envelope run is refused", event, 2, "[run-mismatch]",
+      dict(payload, run_id="20000101T000000Z-0d4d4d"))
+event, payload = named["gate.result"]
+changed = dict(payload, suite_invocation=dict(INVOCATION, argv=["/usr/bin/env", "false"]))
+write("refuse", "a gate whose suite_invocation differs from its request_digest's is refused", event, 2,
+      "[request-digest-mismatch]", changed)
+write("refuse", "a gate whose log_digest differs from its result_digest's is refused", event, 2,
+      "[result-digest-mismatch]", dict(payload, log_digest=D("another log")))
+write("refuse", "approval.consume is refused with its distinct error", "approval.consume", 10,
+      "approval.consume is refused in Phase A", dict(base("d1"), capability_ref=ref("authorization", "d1")))
+for group, lines in rows.items():
+    with open(os.path.join(out, f"{group}.tsv"), "w", encoding="utf-8") as handle:
+        handle.write("".join(line + "\n" for line in lines))
+PY
+
+store_tree_sum() { # $1=store root: one digest over every path, mode, and byte
+  python3 - "$1" <<'PY'
+import hashlib, os, stat, sys
+root = sys.argv[1]
+digest = hashlib.sha256()
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames.sort()
+    for name in sorted(dirnames + filenames):
+        path = os.path.join(dirpath, name)
+        info = os.lstat(path)
+        digest.update(os.path.relpath(path, root).encode() + b"\0" + oct(stat.S_IMODE(info.st_mode)).encode())
+        if stat.S_ISREG(info.st_mode):
+            digest.update(open(path, "rb").read())
+print(digest.hexdigest())
+PY
+}
+
+run_s2_rows() { # $1=tsv $2=workspace $3=case prefix
+  local description event status fragment file label index=0
+  while IFS=$'\t' read -r description event status fragment file; do
+    index=$((index + 1))
+    label="exit $status"
+    [[ "$fragment" == - ]] || label+=", $fragment"
+    run_cmd "$3-$index" "$JOURNAL" append --schema 2 --workspace "$2" --event "$event" --json "$(cat "$file")"
+    if [[ $CASE_STATUS -eq $status ]] && { [[ "$fragment" == - ]] || grep -Fq -- "$fragment" "$CASE_STDERR"; }; then
+      pass "schema2: $description ($label)"
+    else
+      fail "schema2: $description (expected $label, got exit $CASE_STATUS)"
+    fi
+  done < "$1"
+}
+
+WS_S2="$(workspace schema2)"
+run_cmd s2-begin "$RUN" begin --workspace "$WS_S2"
+expect_status 0 "schema2: begin succeeds"
+RUN_S2="$(field_from "$CASE_STDOUT" run)"
+STORE_S2="$(store_dir "$WS_S2")"
+SEG_S2="$STORE_S2/runs/${RUN_S2}.jsonl"
+run_cmd s2-gen python3 "$S2GEN" "$LIB" "$RUN_S2" "$TMP_ROOT/s2"
+expect_status 0 "schema2: the case generator runs"
+run_cmd s2-legacy "$JOURNAL" append --workspace "$WS_S2" --event checkpoint --field note=before-schema-2
+expect_status 0 "schema2: a schema-1 append lands before the schema-2 records"
+run_s2_rows "$TMP_ROOT/s2/accept.tsv" "$WS_S2" s2-accept
+SUM_S2="$(file_sums "$SEG_S2" "$STORE_S2/context" "$STORE_S2/unattributed.jsonl")"
+run_s2_rows "$TMP_ROOT/s2/refuse.tsv" "$WS_S2" s2-refuse
+if [[ "$(file_sums "$SEG_S2" "$STORE_S2/context" "$STORE_S2/unattributed.jsonl")" == "$SUM_S2" ]]; then
+  pass "schema2: no refused record reached the segment, the context, or unattributed.jsonl"
+else
+  fail "schema2: no refused record reached the segment, the context, or unattributed.jsonl"
+fi
+run_cmd s2-approval-schema1 "$JOURNAL" append --workspace "$WS_S2" --event approval.consume --field note=x
+expect_status 10 "schema2: approval.consume without --schema is refused with the same distinct exit"
+expect_output stderr "approval.consume is refused in Phase A" "schema2: that refusal names approval.consume"
+
+if python3 - "$SEG_S2" "$RUN_S2" "$TMP_ROOT/s2/accept.tsv" <<'PY'
+import json, sys
+path, run_id, accept = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = open(path, "rb").read().decode("utf-8").splitlines()
+schema_2 = [line for line in lines if json.loads(line).get("schema") == 2]
+# One schema-2 line per accept.tsv row the generator wrote (each expects exit 0).
+rows = [row.split("\t") for row in open(accept, encoding="utf-8").read().splitlines() if row]
+expected = sum(1 for row in rows if row[2] == "0")
+if expected == 0 or expected != len(rows) or len(schema_2) != expected:
+    raise SystemExit(f"{len(schema_2)} schema-2 lines, {expected} accepted rows of {len(rows)}")
+for line in schema_2:
+    obj = json.loads(line)
+    canonical = json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if line != canonical or list(obj) != sorted(obj):
+        raise SystemExit(f"not canonical: {line[:120]}")
+    if obj["run"] != run_id or type(obj["seq"]) is not int or not obj.get("ts"):
+        raise SystemExit(f"envelope: {line[:120]}")
+PY
+then
+  pass "schema2: every schema-2 line is canonical JSON with sorted keys and the journal envelope"
+else
+  fail "schema2: every schema-2 line is canonical JSON with sorted keys and the journal envelope"
+fi
+
+run_cmd s2-legacy-note "$JOURNAL" append --workspace "$WS_S2" --event checkpoint --field "note=caf$(printf '\303\251')"
+run_cmd s2-legacy-gate "$JOURNAL" append --workspace "$WS_S2" --event gate.result "${GATE_FIELDS[@]}" \
+  --field verdict=green --field gate_exit=0
+if python3 - "$SEG_S2" <<'PY'
+import json, sys
+lines = open(sys.argv[1], "rb").read().decode("utf-8").splitlines()
+note, gate = lines[-2], lines[-1]
+for line, keys in (
+    (note, ["schema", "seq", "ts", "event", "run", "note"]),
+    (gate, ["schema", "seq", "ts", "event", "run", "policy", "purpose", "binding", "totals", "verdict", "gate_exit"]),
+):
+    obj = json.loads(line)
+    if list(obj) != keys or obj["schema"] != 1:
+        raise SystemExit(f"key order {list(obj)}")
+    if json.dumps(obj, ensure_ascii=True, separators=(",", ":")) != line:
+        raise SystemExit(f"bytes {line}")
+if "caf\\u00e9" not in note:
+    raise SystemExit("non-ASCII is escaped as before")
+PY
+then
+  pass "schema2: appends without --schema are byte-for-byte the schema-1 serialization"
+else
+  fail "schema2: appends without --schema are byte-for-byte the schema-1 serialization"
+fi
+
+run_cmd s2-field "$JOURNAL" append --schema 2 --workspace "$WS_S2" --event gate.result --field policy=strict
+expect_status 2 "schema2: --schema 2 with --field is refused"
+run_cmd s2-version "$JOURNAL" append --schema 3 --workspace "$WS_S2" --event gate.result --json '{}'
+expect_status 2 "schema2: an undefined --schema value is refused"
+run_cmd s2-float "$JOURNAL" append --schema 2 --workspace "$WS_S2" --event gate.result --json '{"gate_exit": 0.5}'
+expect_status 2 "schema2: a float in the payload is refused"
+expect_output stderr "floats" "schema2: the float refusal names floats"
+run_cmd s2-dup "$JOURNAL" append --schema 2 --workspace "$WS_S2" --event gate.result --json '{"a": 1, "a": 2}'
+expect_status 2 "schema2: a duplicate key in the payload is refused"
+run_cmd s2-legacy-event "$JOURNAL" append --schema 2 --workspace "$WS_S2" --event checkpoint --json '{"note": "x"}'
+expect_status 2 "schema2: a schema-1-only event is refused under --schema 2"
+
+run_cmd s2-rebuild "$JOURNAL" rebuild --workspace "$WS_S2"
+expect_status 0 "schema2: rebuild reads the mixed segment"
+if grep -Fq $'\t'"$RUN_S2"$'\tactive\t' "$STORE_S2/runs.tsv"; then
+  pass "schema2: a mixed schema-1/schema-2 run reads active"
+else
+  fail "schema2: a mixed schema-1/schema-2 run reads active"
+fi
+run_cmd s2-end "$JOURNAL" end-run --workspace "$WS_S2" --status completed
+expect_status 0 "schema2: end-run completes a mixed run"
+if grep -Fq $'\t'"$RUN_S2"$'\tcompleted\t' "$STORE_S2/runs.tsv" && [[ ! -e "$STORE_S2/context" ]]; then
+  pass "schema2: the mixed run reads completed and its context is retired"
+else
+  fail "schema2: the mixed run reads completed and its context is retired"
+fi
+
+WS_S2_NOCTX="$(workspace schema2-noctx)"
+run_cmd s2-noctx "$JOURNAL" append --schema 2 --workspace "$WS_S2_NOCTX" --event attempt.begin \
+  --json "$(cat "$TMP_ROOT/s2/payloads/0001.json")"
+expect_status 2 "schema2: a schema-2 record without a fresh context is refused"
+expect_output stderr "[no-context]" "schema2: the refusal names no-context"
+if [[ ! -e "$(store_dir "$WS_S2_NOCTX")/unattributed.jsonl" ]]; then
+  pass "schema2: a refused schema-2 record is never written unattributed"
+else
+  fail "schema2: a refused schema-2 record is never written unattributed"
+fi
+
+# --- 15. Unknown schema: every mutating command fails closed ---
+WS_UNK="$(workspace unknown-schema)"
+run_cmd unk-begin "$RUN" begin --workspace "$WS_UNK"
+RUN_UNK="$(field_from "$CASE_STDOUT" run)"
+STORE_UNK="$(store_dir "$WS_UNK")"
+SEG_UNK="$STORE_UNK/runs/${RUN_UNK}.jsonl"
+run_cmd unk-note "$JOURNAL" append --workspace "$WS_UNK" --event checkpoint --field note=before
+run_cmd unk-gen python3 "$S2GEN" "$LIB" "$RUN_UNK" "$TMP_ROOT/s2-unk"
+printf '{"schema":3,"seq":3,"ts":"2026-09-28T12:00:00Z","event":"checkpoint","run":"%s","note":"future"}\n' \
+  "$RUN_UNK" >> "$SEG_UNK"
+TREE_UNK="$(store_tree_sum "$STORE_UNK")"
+expect_unknown_refused() { # $1=name $2=description, remaining=command
+  local name="$1" description="$2"
+  shift 2
+  run_cmd "unk-$name" "$@"
+  expect_status 9 "unknown-schema: $description exits 9"
+  expect_output stderr "unknown schema" "unknown-schema: $description names the unknown schema"
+  if [[ "$(store_tree_sum "$STORE_UNK")" == "$TREE_UNK" ]]; then
+    pass "unknown-schema: $description leaves the segment, context, and store byte-identical"
+  else
+    fail "unknown-schema: $description leaves the segment, context, and store byte-identical"
+  fi
+}
+expect_unknown_refused append "append" \
+  "$JOURNAL" append --workspace "$WS_UNK" --event checkpoint --field note=after
+expect_unknown_refused append-schema-2 "append --schema 2" \
+  "$JOURNAL" append --schema 2 --workspace "$WS_UNK" --event attempt.begin --json "$(cat "$TMP_ROOT/s2-unk/payloads/0001.json")"
+expect_unknown_refused begin-run "begin-run" "$JOURNAL" begin-run --workspace "$WS_UNK"
+expect_unknown_refused end-run "end-run" "$JOURNAL" end-run --workspace "$WS_UNK" --status completed
+expect_unknown_refused recover "recover" "$JOURNAL" recover --workspace "$WS_UNK"
+expect_unknown_refused gc "gc" env LOOP_JOURNAL_GC_CAP_BYTES=1 "$JOURNAL" gc --workspace "$WS_UNK"
+run_cmd unk-rebuild "$JOURNAL" rebuild --workspace "$WS_UNK"
+expect_status 0 "unknown-schema: rebuild still reads the store"
+if grep -Fq $'\t'"$RUN_UNK"$'\tdegraded\t' "$STORE_UNK/runs.tsv" && grep -Fq '"schema":3' "$SEG_UNK"; then
+  pass "unknown-schema: the reader reports the run degraded and keeps the line"
+else
+  fail "unknown-schema: the reader reports the run degraded and keeps the line"
+fi
+# The refusal comes before the first store write: with a metadata file the
+# store bootstrap would recreate missing, nothing is created either.
+for missing in runs.tsv generation meta.lock; do
+  mv "$STORE_UNK/$missing" "$TMP_ROOT/unk-saved-$missing"
+  TREE_UNK="$(store_tree_sum "$STORE_UNK")"
+  expect_unknown_refused "append-no-$missing" "append with $missing missing" \
+    "$JOURNAL" append --workspace "$WS_UNK" --event checkpoint --field note=after
+  expect_unknown_refused "append-schema-2-no-$missing" "append --schema 2 with $missing missing" \
+    "$JOURNAL" append --schema 2 --workspace "$WS_UNK" --event attempt.begin --json "$(cat "$TMP_ROOT/s2-unk/payloads/0001.json")"
+  expect_unknown_refused "begin-run-no-$missing" "begin-run with $missing missing" \
+    "$JOURNAL" begin-run --workspace "$WS_UNK"
+  expect_unknown_refused "end-run-no-$missing" "end-run with $missing missing" \
+    "$JOURNAL" end-run --workspace "$WS_UNK" --status completed
+  expect_unknown_refused "recover-no-$missing" "recover with $missing missing" \
+    "$JOURNAL" recover --workspace "$WS_UNK"
+  expect_unknown_refused "gc-no-$missing" "gc with $missing missing" \
+    env LOOP_JOURNAL_GC_CAP_BYTES=1 "$JOURNAL" gc --workspace "$WS_UNK"
+  mv "$TMP_ROOT/unk-saved-$missing" "$STORE_UNK/$missing"
+done
+
+WS_UNKGC="$(workspace unknown-schema-gc)"
+UNKGC_RUNS=()
+for i in $(seq 1 21); do
+  run_cmd "unkgc-begin-$i" "$RUN" begin --workspace "$WS_UNKGC"
+  UNKGC_RUNS+=("$(field_from "$CASE_STDOUT" run)")
+  run_cmd "unkgc-end-$i" "$RUN" end --status completed --workspace "$WS_UNKGC"
+done
+STORE_UNKGC="$(store_dir "$WS_UNKGC")"
+SEG_UNKGC="$STORE_UNKGC/runs/${UNKGC_RUNS[0]}.jsonl"
+printf '{"schema":"2","seq":9,"event":"checkpoint","run":"%s"}\n' "${UNKGC_RUNS[0]}" >> "$SEG_UNKGC"
+SUM_UNKGC="$(file_sums "$SEG_UNKGC")"
+TREE_UNKGC="$(store_tree_sum "$STORE_UNKGC")"
+run_cmd unkgc-gc env LOOP_JOURNAL_GC_CAP_BYTES=1 "$JOURNAL" gc --workspace "$WS_UNKGC"
+expect_status 9 "unknown-schema: gc under cap pressure refuses a terminated run with an unknown-schema line"
+if [[ "$(file_sums "$SEG_UNKGC")" == "$SUM_UNKGC" && "$(store_tree_sum "$STORE_UNKGC")" == "$TREE_UNKGC" ]]; then
+  pass "unknown-schema: the oldest terminated run stays byte-identical under gc cap pressure"
+else
+  fail "unknown-schema: the oldest terminated run stays byte-identical under gc cap pressure"
+fi
+
+# --- 16. Schema-2 lines never feed a schema-1 view ---
+# The journal is unauthenticated, so these schema-2 lines are hand-inserted:
+# read as schema 1 they would close a dispatch or end the run.
+WS_S1V="$(workspace schema-1-view)"
+run_cmd s1v-begin "$RUN" begin --workspace "$WS_S1V"
+RUN_S1V="$(field_from "$CASE_STDOUT" run)"
+STORE_S1V="$(store_dir "$WS_S1V")"
+SEG_S1V="$STORE_S1V/runs/${RUN_S1V}.jsonl"
+run_cmd s1v-start "$JOURNAL" append --workspace "$WS_S1V" --event dispatch.start \
+  --field dispatch_id=d-s1v --field backend=codex --field mode=implement
+printf '{"dispatch_id":"d-s1v","event":"dispatch.end","exit":0,"run":"%s","schema":2,"seq":3,"ts":"2026-09-28T12:00:00Z"}\n' \
+  "$RUN_S1V" >> "$SEG_S1V"
+TREE_S1V="$(store_tree_sum "$STORE_S1V")"
+run_cmd s1v-recover "$JOURNAL" recover --workspace "$WS_S1V"
+expect_status 7 "schema-1 view: a schema-2 dispatch.end does not close a schema-1 dispatch.start (recover exits 7)"
+expect_output stderr "unmatched dispatch_id(s): d-s1v" "schema-1 view: recover still names the unmatched dispatch_id"
+if [[ "$(store_tree_sum "$STORE_S1V")" == "$TREE_S1V" ]]; then
+  pass "schema-1 view: the refused recover leaves the store byte-identical"
+else
+  fail "schema-1 view: the refused recover leaves the store byte-identical"
+fi
+run_cmd s1v-ack "$JOURNAL" recover --workspace "$WS_S1V" --acknowledge d-s1v
+expect_status 0 "schema-1 view: acknowledging the still-unmatched dispatch_id recovers the run"
+if python3 - "$SEG_S1V" <<'PY'
+import json, sys
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+abandoned = [e for e in events if e.get("schema") == 1 and e.get("event") == "dispatch.abandoned"]
+if [e.get("dispatch_id") for e in abandoned] != ["d-s1v"] or events[-1].get("event") != "run.end":
+    raise SystemExit(f"events {events}")
+PY
+then
+  pass "schema-1 view: recover appends a schema-1 dispatch.abandoned for the id and ends the run"
+else
+  fail "schema-1 view: recover appends a schema-1 dispatch.abandoned for the id and ends the run"
+fi
+
+WS_S1E="$(workspace schema-1-view-end)"
+run_cmd s1e-begin "$RUN" begin --workspace "$WS_S1E"
+RUN_S1E="$(field_from "$CASE_STDOUT" run)"
+STORE_S1E="$(store_dir "$WS_S1E")"
+SEG_S1E="$STORE_S1E/runs/${RUN_S1E}.jsonl"
+printf '{"event":"run.end","run":"%s","schema":2,"seq":2,"status":"completed","ts":"2026-09-28T12:00:00Z"}\n' \
+  "$RUN_S1E" >> "$SEG_S1E"
+run_cmd s1e-rebuild "$JOURNAL" rebuild --workspace "$WS_S1E"
+expect_status 0 "schema-1 view: rebuild reads a run holding a schema-2 run.end"
+if grep -Fq $'\t'"$RUN_S1E"$'\tactive\t' "$STORE_S1E/runs.tsv"; then
+  pass "schema-1 view: a schema-2 line named run.end does not make the run terminal"
+else
+  fail "schema-1 view: a schema-2 line named run.end does not make the run terminal"
+fi
+run_cmd s1e-begin-again "$JOURNAL" begin-run --workspace "$WS_S1E"
+expect_status 8 "schema-1 view: the context stays fresh, so begin-run refuses a second run (exit 8)"
+run_cmd s1e-append "$JOURNAL" append --workspace "$WS_S1E" --event checkpoint --field note=still-active
+if [[ $CASE_STATUS -eq 0 ]] && tail -n 1 "$SEG_S1E" | grep -Fq '"note":"still-active"' \
+  && [[ ! -e "$STORE_S1E/unattributed.jsonl" ]]; then
+  pass "schema-1 view: an append still lands in the run, not in unattributed.jsonl"
+else
+  fail "schema-1 view: an append still lands in the run, not in unattributed.jsonl"
+fi
+
+# --- 17. The shared lib/ is imported from the script's real path ---
+INSTALL="$TMP_ROOT/install"
+mkdir -p "$INSTALL/scripts" "$TMP_ROOT/bin"
+cp "$JOURNAL" "$INSTALL/scripts/loop-journal"
+ln -s "$LIB" "$INSTALL/lib"
+run_cmd lib-symlink "$INSTALL/scripts/loop-journal" --help
+expect_status 5 "lib: a symlinked lib/ is refused (exit 5)"
+expect_output stderr "refusing shared library path" "lib: the refusal names the shared library path"
+rm "$INSTALL/lib"
+cp -R "$LIB" "$INSTALL/lib"
+run_cmd lib-copy "$INSTALL/scripts/loop-journal" --help
+expect_status 0 "lib: a real sibling lib/ is imported"
+rm "$INSTALL/lib/loopauth/canonical.py"
+ln -s "$LIB/loopauth/canonical.py" "$INSTALL/lib/loopauth/canonical.py"
+run_cmd lib-module-symlink "$INSTALL/scripts/loop-journal" --help
+expect_status 5 "lib: a symlinked module inside lib/loopauth is refused"
+ln -s "$JOURNAL" "$TMP_ROOT/bin/loop-journal"
+run_cmd lib-script-symlink "$TMP_ROOT/bin/loop-journal" --help
+expect_status 0 "lib: a symlinked script resolves lib/ from its real path"
 
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' "$FAILED_CHECKS" "$CHECKS" >&2
