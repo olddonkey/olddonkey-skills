@@ -774,6 +774,21 @@ gpt-6-sol / max), to be confirmed with 0a.2's next specification review:
   exercise the one shared frame writer, run as real crashes at **every** byte
   of genesis frame 1 and of a rotation frame, and at sampled bytes (with the
   classifier over every byte) for revocation and re-genesis frames.
+- **What "every byte" proves when frame lengths vary.** A frame's length
+  varies by a few bytes between runs because the operator principal's pid,
+  tty, and start-time fields have variable digit width (all inside the
+  payload). The matrix therefore proves, for each of the two frame kinds:
+  every torn prefix length n from 1 to N_plan − 2 (N_plan the planned length)
+  by a real crash at exactly offset n of a frame of length ≥ n + 2 (so the
+  prefix is torn, never the final byte); the true final byte of a real frame
+  (the unterminated case) by a real crash at its own length − 1; and, for
+  every distinct actual frame length a run produced, the tail classifier over
+  **every** prefix of that exact frame. Torn positions that only a longer
+  frame has lie in the same payload region already crashed, and are covered
+  by that classifier sweep rather than by a real crash. `N_plan` is fixed
+  once per frame kind, before any shard is assigned (the plan job), and every
+  real-crash result reports its offset and actual frame length, so the union
+  check cannot silently shrink the range.
 - **The full crash matrix is a required check on the exact candidate
   commit.** It runs in CI on every pull request as parallel shards whose union
   is the whole matrix (a shard failing, or the union missing a cut, fails the
