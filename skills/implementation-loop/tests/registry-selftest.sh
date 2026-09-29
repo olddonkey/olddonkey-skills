@@ -27,7 +27,13 @@
 # - every ceremony refuses with exit 11 naming the failed read, never a
 #   traceback, when os.ttyname, a start-token read, or the challenge's
 #   terminal I/O raises OSError, and mutates nothing (the terminal simulated
-#   in-process).
+#   in-process);
+# - 0a.3: the read-only verification modules (refs.py, eligibility.py,
+#   journal_read.py) pass direct read-only rules, which refuse any module
+#   alias outright, and reach no sink through a transitive call graph, with
+#   planted negative controls; and the full
+#   request-kind x source-state cross-product is refused as a dormant row by
+#   every request row, with no store or anchor mutation.
 #
 # Fixture stores are made in-process by the ceremony core with the TTY
 # challenge stubbed (this suite tests the registry and tokens, not the
@@ -99,6 +105,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -562,6 +569,395 @@ PLANTS = {
 }
 
 
+# ===========================================================================
+# 0a.3: the read-only verification modules reach no sink
+# ===========================================================================
+
+READ_ONLY_MODULES = ("refs", "eligibility", "journal_read")
+# The only imports each may make (eligibility.py is pure).
+READ_ONLY_IMPORTS = {
+    "refs": {"__future__", "eligibility", "journal_read", "recover", "reduce", "vocabulary"},
+    "eligibility": {"__future__"},
+    "journal_read": {"__future__", "hashlib", "json", "os", "stat", "vocabulary"},
+}
+# The authority store's modules, and the one name of them a read-only module
+# may use: 0a.2's read-only classification (what `loop-authority status` runs).
+STORE_MODULES = {"store", "tools", "ceremony", "registry", "anchor", "keys", "records", "frame", "recover"}
+READ_ONLY_STORE_NAMES = {"recover": {"classify"}}
+# The os names a read-only module may use: reads only (os.open's flags are
+# the general scan's READ_FLAGS rule).
+READ_ONLY_OS = {"path", "environ", "getuid", "lstat", "fstat", "stat_result", "open", "read", "close", "sep",
+                "O_RDONLY", "O_NOFOLLOW"}
+LOCK_NAMES = {"fcntl", "flock", "lockf", "WriterLock", "ReaderLock"}
+# Module aliases are refused outright (fail closed), so the rules above and
+# the call graph only ever see a module by its own name: a name an import
+# binds to a module may appear only as the receiver of a read `module.name`,
+# never as a value (assigned, passed -- getattr included -- stored in a
+# container or an attribute, returned); no import renames (`as`) or star
+# import; `from .sibling import name` must resolve to a name the sibling
+# defines, not one it imports; no absolute from-import (it binds a library
+# name bare); no attribute chain through a module may yield a module (os.path
+# excepted, and os.path, a module, is itself receiver-only like a module
+# name); for a sibling `module.name` is a name it defines; no route to a
+# module namespace (globals() and the like, a dunder attribute, a frame); and
+# no dynamic attribute access at all (getattr and its kin, any arguments).
+NAMESPACE_NAMES = {"globals", "locals", "vars", "eval", "exec", "compile"}
+FRAME_ATTRIBUTES = {"f_globals", "f_locals", "f_builtins", "f_back", "gi_frame", "cr_frame", "ag_frame",
+                    "tb_frame"}
+DYNAMIC_ATTRIBUTE = {"getattr", "setattr", "delattr", "hasattr", "attrgetter", "methodcaller", "__getattribute__"}
+SUBMODULES_ALLOWED = {"os.path"}
+MISSING = object()
+
+
+def namespaces(lib):
+    """Per lib/loopauth module: (the names it defines at top level, the names
+    it binds by an import anywhere)."""
+    package = os.path.join(lib, "loopauth")
+    spaces = {}
+    for filename in sorted(os.listdir(package)):
+        if not filename.endswith(".py"):
+            continue
+        with open(os.path.join(package, filename), encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename)
+        defined, imported = set(), set()
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                defined.add(node.name)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                    defined |= {n.id for n in ast.walk(target) if isinstance(n, ast.Name)
+                                and isinstance(n.ctx, ast.Store)}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                imported |= {alias.asname or alias.name.split(".")[0] for alias in node.names}
+        spaces[filename[:-3]] = (defined, imported)
+    return spaces
+
+
+def dunder(name):
+    return name.startswith("__") and name.endswith("__")
+
+
+class ReadOnlyScanner(ast.NodeVisitor):
+    """The direct rules for refs.py, eligibility.py, and journal_read.py."""
+
+    def __init__(self, module, tree, spaces):
+        self.module = module
+        self.findings = []
+        self.spaces = spaces
+        # every name an import binds to a module, resolved: a sibling's name,
+        # or an allowed library module imported here to walk its attributes
+        self.modules, self.siblings, self.libraries, self.receivers = set(), {}, {}, set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    name, target = (alias.asname, alias.name) if alias.asname else (root, root)
+                    self.modules.add(name)
+                    if root in READ_ONLY_IMPORTS[module] and root != "__future__" and root not in spaces:
+                        try:
+                            self.libraries[name] = (target, importlib.import_module(target))
+                        except ImportError:
+                            self.libraries[name] = (target, MISSING)
+            elif isinstance(node, ast.ImportFrom) and node.level and node.module is None:
+                for alias in node.names:
+                    self.modules.add(alias.asname or alias.name)
+                    if node.level == 1 and alias.name in spaces:
+                        self.siblings[alias.asname or alias.name] = alias.name
+
+    def flag(self, node, what):
+        self.findings.append((self.module, node.lineno, what))
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            if alias.name.split(".")[0] not in READ_ONLY_IMPORTS[self.module]:
+                self.flag(node, f"import {alias.name}")
+            if alias.asname:
+                self.flag(node, f"module alias: import {alias.name} as {alias.asname}")
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+        if node.level and node.module is None:
+            names = [alias.name for alias in node.names]
+        else:
+            names = [(node.module or "").split(".")[0]]
+        for name in names:
+            if name not in READ_ONLY_IMPORTS[self.module]:
+                self.flag(node, f"import of {name}")
+        source = "." * node.level + (node.module or "")
+        for alias in node.names:
+            if alias.asname or alias.name == "*":
+                self.flag(node, f"module alias: from {source} import {alias.name}"
+                                + (f" as {alias.asname}" if alias.asname else ""))
+        if node.level and node.module is not None:
+            space = self.spaces.get(node.module) if node.level == 1 else None
+            for alias in node.names:
+                if space is None or alias.name in space[1] or alias.name not in space[0]:
+                    self.flag(node, f"module alias: from {source} import {alias.name} does not resolve to a name "
+                                    f"{node.module}.py defines")
+                elif node.module in STORE_MODULES and alias.name not in READ_ONLY_STORE_NAMES.get(node.module, ()):
+                    self.flag(node, f"{node.module}.{alias.name}")
+        elif not node.level and node.module != "__future__":
+            self.flag(node, f"module alias: from {source} import binds a library name bare")
+        self.generic_visit(node)
+
+    def module_attribute(self, node, root, chain):
+        name = root.id
+        if root is node.value:
+            self.receivers.add(id(root))
+            if not isinstance(node.ctx, ast.Load):
+                self.flag(node, f"module alias: a store into module {name}")
+            sibling = self.siblings.get(name)
+            if sibling is not None:
+                defined, imported = self.spaces[sibling]
+                if node.attr in imported or node.attr not in defined:
+                    self.flag(node, f"module alias: {name}.{node.attr} is not a name {sibling}.py defines")
+        if name in self.libraries:
+            dotted, value = self.libraries[name]
+            for attr in chain:
+                dotted = f"{dotted}.{attr}"
+                value = MISSING if value is MISSING else getattr(value, attr, MISSING)
+            if value is MISSING:
+                self.flag(node, f"module alias: {dotted} does not resolve")
+            elif isinstance(value, type(os)) and dotted not in SUBMODULES_ALLOWED:
+                self.flag(node, f"module alias: {dotted} is a module reached through another module")
+            elif isinstance(value, type(os)) and id(node) not in self.receivers:
+                self.flag(node, f"module alias: module {dotted} used as a value, not as {dotted}.<name>")
+
+    def visit_Attribute(self, node):
+        self.receivers.add(id(node.value))
+        chain, root = [node.attr], node.value
+        while isinstance(root, ast.Attribute):
+            chain.insert(0, root.attr)
+            root = root.value
+        if isinstance(root, ast.Name) and root.id in self.modules:
+            self.module_attribute(node, root, chain)
+        if isinstance(node.value, ast.Name):
+            base = node.value.id
+            if base in STORE_MODULES and node.attr not in READ_ONLY_STORE_NAMES.get(base, set()):
+                self.flag(node, f"{base}.{node.attr}")
+            if base == "os" and node.attr not in READ_ONLY_OS:
+                self.flag(node, f"os.{node.attr}")
+        if node.attr in LOCK_NAMES:
+            self.flag(node, f"a lock: {node.attr}")
+        if (dunder(node.attr) and node.attr != "__init__") or node.attr in FRAME_ATTRIBUTES:
+            self.flag(node, f"module alias: .{node.attr} reaches a namespace")
+        if node.attr in DYNAMIC_ATTRIBUTE:
+            self.flag(node, f"dynamic attribute access: .{node.attr}")
+        self.generic_visit(node)
+
+    def visit_Name(self, node):
+        if node.id in LOCK_NAMES:
+            self.flag(node, f"a lock: {node.id}")
+        if node.id in DYNAMIC_ATTRIBUTE:
+            self.flag(node, f"dynamic attribute access: {node.id}")
+        if node.id in self.modules and id(node) not in self.receivers:
+            self.flag(node, f"module alias: module {node.id} used as a value, not as {node.id}.<name>")
+        if node.id in NAMESPACE_NAMES or dunder(node.id):
+            self.flag(node, f"module alias: {node.id} reaches a namespace")
+        self.generic_visit(node)
+
+
+def call_graph(lib):
+    """A conservative call graph of lib/loopauth: an edge for every
+    reference (called or passed as a value) that resolves by name -- a bare
+    name defined in the same module or imported from a sibling, a sibling
+    module's attribute, and, for any other attribute (the receiver's type is
+    unknown), every method of that name on any class. A reference to a class
+    reaches all its methods (constructor, context manager, __call__)."""
+    package = os.path.join(lib, "loopauth")
+    trees = {}
+    for filename in sorted(os.listdir(package)):
+        if filename.endswith(".py"):
+            with open(os.path.join(package, filename), encoding="utf-8") as handle:
+                trees[filename[:-3]] = ast.parse(handle.read(), filename)
+    functions, classes, methods = {}, {}, {}
+    for module, tree in trees.items():
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions.setdefault(f"{module}.{node.name}", []).append(node)
+            elif isinstance(node, ast.ClassDef):
+                owner = classes.setdefault(f"{module}.{node.name}", [])
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        qual = f"{module}.{node.name}.{item.name}"
+                        functions.setdefault(qual, []).append(item)
+                        owner.append(qual)
+                        methods.setdefault(item.name, set()).add(qual)
+
+    def resolve(qual):
+        return {qual} if qual in functions else set(classes.get(qual, ()))
+
+    edges = {}
+    for module, tree in trees.items():
+        siblings, imported = {}, {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level:
+                for alias in node.names:
+                    if node.module is None:
+                        siblings[alias.asname or alias.name] = alias.name
+                    else:
+                        imported[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+        for qual, nodes in functions.items():
+            if qual.split(".")[0] != module:
+                continue
+            targets = set()
+            for function in nodes:
+                for node in ast.walk(function):
+                    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                        targets |= resolve(f"{module}.{node.id}") | resolve(imported.get(node.id, ""))
+                    elif isinstance(node, ast.Attribute):
+                        if isinstance(node.value, ast.Name) and node.value.id in siblings:
+                            targets |= resolve(f"{siblings[node.value.id]}.{node.attr}")
+                        else:
+                            targets |= methods.get(node.attr, set())
+            edges[qual] = targets
+    return functions, edges
+
+
+def sink_targets(functions):
+    """Every function that writes authority state or can reach the remote
+    with a write: the sinks and their helpers, the token minters, the
+    low-level writes, the layout and writer lock, and every function that
+    runs a sink command."""
+    targets = {f"store.{name}" for name in SINK_FUNCTIONS + SINK_HELPERS + tuple(TOKEN_MINTERS)}
+    targets |= {"store._grant", "store.ensure_layout", "store.WriterLock.__enter__"}
+    targets |= {qual for qual in functions if qual.startswith("store._fs_")}
+    for qual, nodes in functions.items():
+        module = qual.split(".")[0]
+        for function in nodes:
+            for node in ast.walk(function):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else None
+                dotted = (f"{func.value.id}.{func.attr}" if isinstance(func, ast.Attribute)
+                          and isinstance(func.value, ast.Name) else None)
+                if not (dotted == "tools.run" or (module == "tools" and name == "run")
+                        or (module == "store" and name == "_run_sink") or (module == "anchor" and name == "_git")):
+                    continue
+                index = 1 if (module == "store" and name == "_run_sink") else 0
+                argument = node.args[index] if len(node.args) > index else None
+                if isinstance(argument, ast.Constant) and COMMANDS.get(argument.value, (None, None, None))[2] == "sink":
+                    targets.add(qual)
+    return targets
+
+
+def read_only_scan(lib):
+    """(direct findings, call paths from a read-only module to a sink target,
+    every function reached)."""
+    direct = []
+    package = os.path.join(lib, "loopauth")
+    spaces = namespaces(lib)
+    for module in READ_ONLY_MODULES:
+        path = os.path.join(package, f"{module}.py")
+        if not os.path.exists(path):
+            direct.append((module, 0, "missing"))
+            continue
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), path)
+        scanner = ReadOnlyScanner(module, tree, spaces)
+        scanner.visit(tree)
+        direct += scanner.findings
+    functions, edges = call_graph(lib)
+    targets = sink_targets(functions)
+    parent = {qual: None for qual in functions if qual.split(".")[0] in READ_ONLY_MODULES}
+    queue = sorted(parent)
+    paths = []
+    while queue:
+        qual = queue.pop(0)
+        if qual in targets:
+            path, step = [], qual
+            while step is not None:
+                path.append(step)
+                step = parent[step]
+            paths.append(" <- ".join(path))
+            continue
+        for following in sorted(edges.get(qual, ())):
+            if following not in parent:
+                parent[following] = qual
+                queue.append(following)
+    return direct, paths, set(parent)
+
+
+READ_ONLY_PLANTS = {
+    "refs.py calls a store sink (write_quarantine)": (
+        "refs.py", "def _bypass_marker(token, store_id):\n"
+                   "    return store.write_quarantine(token, store_id=store_id, data=b\"x\")\n"),
+    "refs.py runs recovery (recover.recover)": (
+        "refs.py", "def _bypass_recover():\n    return recover.recover()\n"),
+    "refs.py takes the authority reader lock": (
+        "refs.py", "def _bypass_lock():\n    with store.ReaderLock():\n        return recover.classify()\n"),
+    "journal_read.py runs the anchor push": (
+        "journal_read.py", "def _bypass_push(scratch, url, commit):\n"
+                           "    return tools.run(\"git.push-anchor\", scratch=scratch, remote=url, commit=commit)\n"),
+    "journal_read.py flocks the journal's meta.lock": (
+        "journal_read.py", "import fcntl\n\n\ndef _bypass_flock(fd):\n    fcntl.flock(fd, fcntl.LOCK_SH)\n"),
+    "journal_read.py truncates the segment (a repair)": (
+        "journal_read.py", "def _bypass_repair(fd, size):\n    os.ftruncate(fd, size)\n"),
+    "eligibility.py mints a recovery token": (
+        "eligibility.py", "from . import store\n\n\ndef _bypass_mint(plan):\n    return store.begin_recovery(plan)\n"),
+}
+# Each hides a module under another name; the direct rules refuse the alias
+# itself, whatever the call graph can follow.
+ALIAS_PLANTS = {
+    "refs.py assigns a module to another name (alias = recover; alias.recover())": (
+        "refs.py", "def _bypass_alias():\n    alias = recover\n    return alias.recover()\n"),
+    "refs.py imports a module under another name (from . import recover as r)": (
+        "refs.py", "from . import recover as r\n\n\ndef _bypass_as():\n    return r.recover()\n"),
+    "journal_read.py imports os under another name (import os as o)": (
+        "journal_read.py", "import os as o\n\n\ndef _bypass_as(fd, size):\n    o.ftruncate(fd, size)\n"),
+    "refs.py takes a module's attribute with getattr (getattr(recover, \"recover\"))": (
+        "refs.py", "def _bypass_getattr():\n    return getattr(recover, \"recover\")()\n"),
+    "refs.py stores a module in a dict": (
+        "refs.py", "_MODULES = {\"r\": recover}\n\n\ndef _bypass_dict():\n    return _MODULES[\"r\"].recover()\n"),
+    "journal_read.py stores os in a list": (
+        "journal_read.py", "_MODULES = [os]\n\n\ndef _bypass_list(fd, size):\n    _MODULES[0].ftruncate(fd, size)\n"),
+    "refs.py stores a module in an attribute": (
+        "refs.py", "class _Holder:\n    pass\n\n\n_Holder.module = recover\n\n\n"
+                   "def _bypass_attribute():\n    return _Holder.module.recover()\n"),
+    "refs.py reaches a module through a sibling's attribute (journal_read.os)": (
+        "refs.py", "def _bypass_sibling(fd, size):\n    journal_read.os.ftruncate(fd, size)\n"),
+    "refs.py from-imports a module a sibling imports (from .reduce import v)": (
+        "refs.py", "from .reduce import v\n\n\ndef _bypass_reexport():\n    return v.select_row(None, None)\n"),
+    "journal_read.py reaches a module through a library module's attribute (json.codecs)": (
+        "journal_read.py", "def _bypass_codecs(path):\n    return json.codecs.open(path, \"w\")\n"),
+    "refs.py reads a module out of globals()": (
+        "refs.py", "def _bypass_globals():\n    return globals()[\"recover\"].recover()\n"),
+    "refs.py reads a module out of a function's __globals__": (
+        "refs.py", "def _bypass_dunder():\n    return classify_field.__globals__[\"recover\"].recover()\n"),
+    "refs.py reads a module out of a frame (gi_frame.f_globals)": (
+        "refs.py", "def _bypass_frame():\n    caller = (lambda: (yield))().gi_frame\n"
+                   "    return caller.f_globals[\"recover\"].recover()\n"),
+    "eligibility.py imports a module with __import__": (
+        "eligibility.py", "def _bypass_import(plan):\n"
+                          "    return __import__(\"loopauth.store\").store.begin_recovery(plan)\n"),
+}
+# Each reaches an attribute no static rule sees (os.path.os is os): refused
+# outright by the finding named, whatever the arguments.
+DYNAMIC_PLANTS = {
+    "journal_read.py reaches os.unlink through getattr (getattr(os.path, \"os\").unlink(p))": (
+        "journal_read.py", "def _bypass_getattr(path):\n    getattr(os.path, \"os\").unlink(path)\n",
+        "dynamic attribute access"),
+    "journal_read.py reaches os.unlink through os.path (os.path.os.unlink(p))": (
+        "journal_read.py", "def _bypass_chain(path):\n    os.path.os.unlink(path)\n",
+        "module alias: os.path.os is a module reached through another module"),
+    "journal_read.py holds os.path as a value (p = os.path; p.os.unlink(path))": (
+        "journal_read.py", "def _bypass_value(path):\n    p = os.path\n    p.os.unlink(path)\n",
+        "module alias: module os.path used as a value"),
+    "eligibility.py calls setattr on its own arguments (setattr(target, name, value))": (
+        "eligibility.py", "def _bypass_setattr(target, name, value):\n    setattr(target, name, value)\n",
+        "dynamic attribute access"),
+    "journal_read.py reaches os.unlink through operator.attrgetter (operator.attrgetter(\"unlink\")(os))": (
+        "journal_read.py", "import operator\n\n\ndef _bypass_attrgetter(path):\n"
+                           "    operator.attrgetter(\"unlink\")(os)(path)\n",
+        "dynamic attribute access"),
+    "journal_read.py probes os with hasattr (hasattr(os, \"unlink\"))": (
+        "journal_read.py", "def _bypass_hasattr():\n    return hasattr(os, \"unlink\")\n",
+        "dynamic attribute access"),
+}
+
+
 def main_static():
     sys.path.insert(0, LIB)
     sys.dont_write_bytecode = True
@@ -641,6 +1037,38 @@ def main_static():
         copy = plant(re.sub(r"[^a-z]+", "-", label)[:30], filename, code)
         planted = scan(copy)
         emit(f"reachability negative control: {label} makes the scan fail", bool(planted), planted[:3])
+    # --- 0a.3: refs.py, eligibility.py, and journal_read.py are read-only
+    direct, paths, reached = read_only_scan(LIB)
+    emit("reachability (0a.3): refs.py, eligibility.py, and journal_read.py exist and pass the direct read-only "
+         "rules (import allowlists; of the store's code only recover.classify; os reads only; no lock; no module "
+         "alias; no dynamic attribute access)", not direct, direct[:6])
+    emit("reachability (0a.3): no call path from refs.py, eligibility.py, or journal_read.py reaches a store sink, a "
+         "sink helper, a token minter, a low-level write, the layout or writer lock, or a sink command (transitive "
+         "AST call graph)", not paths, paths[:3])
+    traced = {"recover.classify", "recover.observe", "recover._read_remote", "anchor.ls_remote", "tools.run"}
+    emit("reachability (0a.3): the call graph is not vacuous -- it follows refs into 0a.2's read-only classification "
+         "and the read commands it runs", traced <= reached, sorted(traced - reached))
+    for label, (filename, code) in READ_ONLY_PLANTS.items():
+        copy = plant("ro-" + re.sub(r"[^a-z]+", "-", label)[:30], filename, code)
+        planted_direct, planted_paths, _reached = read_only_scan(copy)
+        emit(f"reachability negative control (0a.3): {label} makes the read-only scan fail",
+             bool(planted_direct or planted_paths), (planted_direct[:2], planted_paths[:1]))
+    for index, (label, (filename, code)) in enumerate(ALIAS_PLANTS.items()):
+        copy = plant(f"ro-alias-{index}", filename, code)
+        planted_direct, _paths, _reached = read_only_scan(copy)
+        aliases = [finding for finding in planted_direct if finding[2].startswith("module alias")]
+        emit(f"reachability negative control (0a.3): {label} makes the read-only scan fail (a module alias, "
+             "refused outright)", bool(aliases), planted_direct[:3])
+    for index, (label, (filename, code, finding)) in enumerate(DYNAMIC_PLANTS.items()):
+        copy = plant(f"ro-dynamic-{index}", filename, code)
+        planted_direct, _paths, _reached = read_only_scan(copy)
+        emit(f"reachability negative control (0a.3): {label} makes the read-only scan fail ({finding}, refused "
+             "outright)", any(what.startswith(finding) for _m, _l, what in planted_direct), planted_direct[:3])
+    copy = plant("ro-classify-recovers", "recover.py", "def classify() -> Plan:\n    return recover()\n")
+    planted_direct, planted_paths, _reached = read_only_scan(copy)
+    emit("reachability negative control (0a.3): a recover.classify that runs recovery is caught by the transitive "
+         "scan alone (the direct rules still pass)", not planted_direct and bool(planted_paths),
+         (planted_direct[:2], planted_paths[:1]))
 
 
 # ===========================================================================
@@ -722,6 +1150,27 @@ def main_tokens():
                 "request-opening", request_kind=kind, source_state=state), "dormant-row:request-opening")[1])
         emit(f"dormant: request opening of kind {kind} is refused from every source state (kind x source "
              "state cross-product, negative while dormant)", codes == {"dormant-row:request-opening"}, codes)
+    # A2.1 / 0a.3: the full request-kind x source-state cross-product (tg:862-869), one check per combination,
+    # each refused as a dormant row -- naming the kind and the source it was offered -- by every request row;
+    # the positive half arrives with each kind's activating unit.
+    request_rows = (("request-opening", None), ("capability-issuance", None), ("request-cancellation", "gesture"),
+                    ("request-cancellation", "source-invalidated"), ("request-expiry", None),
+                    ("capability-redemption", None))
+    for kind, own in SOURCE_STATE.items():
+        for state in ("node state", "mechanism state", "accumulator state", "candidate-release state"):
+            outcomes = []
+            for row, branch in request_rows:
+                try:
+                    registry.admit(row, branch=branch, request_kind=kind, source_state=state)
+                    outcomes.append((row, branch, "admitted"))
+                except registry.RowRefused as error:
+                    named = f"(kind {kind})" in error.message and f"(source {state})" in error.message
+                    outcomes.append((row, branch, error.code if error.dormant and named else f"other:{error.code}"))
+            emit(f"cross-product: {kind} x {state}{' (its own source state)' if state == own else ''} is refused as a "
+                 "dormant row by request opening, capability issuance, both cancellation branches, expiry, and "
+                 "redemption", all(code == f"dormant-row:{row}" for row, _branch, code in outcomes),
+                 [item for item in outcomes if item[2] != f"dormant-row:{item[0]}"])
+    unchanged("the request-kind x source-state cross-product")
     ok, code = refused(lambda: store.begin("approval.consume", PRINCIPAL), "approval-consume-refused")
     emit("dormant: approval.consume is refused with its own error", ok, code)
     ok, code = refused(lambda: registry.admit("approval.consume"), "approval-consume-refused")

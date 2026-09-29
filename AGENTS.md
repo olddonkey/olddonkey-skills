@@ -26,7 +26,9 @@ Components:
   digests, the task-graph-v1 schema-2 vocabulary, the pure reducer, and the
   0a.2 authority store: records, framing, keys and seals, the git anchor,
   recovery, the operator-TTY ceremonies, the admission registry, and
-  `tools.py`, the one subprocess wrapper with its closed command table); each
+  `tools.py`, the one subprocess wrapper with its closed command table; and
+  0a.3's read-only verification of claimed references, `refs.py`,
+  `eligibility.py`, and `journal_read.py`, behind `loop-authority refs`); each
   imports it only from the `lib/` beside its real `scripts/` directory and
   refuses a symlinked `lib/`. `scripts/loop-authority-verify` is the
   independent authority verifier and imports nothing from `lib/loopauth`.
@@ -170,13 +172,24 @@ run):
    makes the same check over its own list. Then
    `bash skills/implementation-loop/tests/registry-selftest.sh` (the frozen
    admission-registry oracle, the AST reachability scan with planted-bypass
-   negative controls, the closed command table, token and stage refusals at
-   every sink, recovery and finish tokens against real crash states --
-   minted only from an issued plan, once, re-proved by a fresh observation,
-   so forged, altered, and replayed plans and caller-built bindings mint
-   nothing -- abandonment that removes only the intent, missing intent-named
-   directories, and the revocation's quarantine child) — expect
-   `selftest: PASS (467 checks)`.
+   negative controls -- including 0a.3's read-only rules and transitive call
+   graph for `refs.py`, `eligibility.py`, and `journal_read.py` -- the closed
+   command table, token and stage refusals at every sink, the full request-kind
+   × source-state cross-product refused as dormant by every request row,
+   recovery and finish tokens against real crash states -- minted only from an
+   issued plan, once, re-proved by a fresh observation, so forged, altered,
+   and replayed plans and caller-built bindings mint nothing -- abandonment
+   that removes only the intent, missing intent-named directories, and the
+   revocation's quarantine child) — expect `selftest: PASS (547 checks)`.
+   Then `bash skills/implementation-loop/tests/refs-selftest.sh` (0a.3: the
+   closed reference map against a frozen oracle and the live 0a.1
+   vocabulary, claim classification and the eligibility gate in-process, and
+   the real `loop-authority refs` over journals written by `loop-journal
+   append --schema 2` against fixture stores that are current, absent,
+   pending, quarantined, and in each bootstrap terminal state, with the
+   journal store, the authority directory, and the remote byte-identical
+   afterwards; needs `ssh-keygen` with `-Y` and `git`) — expect
+   `selftest: PASS (136 checks)`.
 11. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
 12. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.

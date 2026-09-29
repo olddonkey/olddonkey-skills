@@ -54,6 +54,7 @@ jobs:
           bash -n skills/implementation-loop/tests/evidence-selftest.sh
           bash -n skills/implementation-loop/tests/authority-selftest.sh
           bash -n skills/implementation-loop/tests/registry-selftest.sh
+          bash -n skills/implementation-loop/tests/refs-selftest.sh
           bash -n skills/implementation-loop/tests/shim-selftest.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
@@ -110,6 +111,8 @@ jobs:
         run: bash skills/implementation-loop/tests/authority-selftest.sh
       - name: Authority registry selftest
         run: bash skills/implementation-loop/tests/registry-selftest.sh
+      - name: Claimed-reference verification selftest
+        run: bash skills/implementation-loop/tests/refs-selftest.sh
       - name: Console selftest
         run: bash skills/implementation-loop/tests/console-selftest.sh
       - name: Calibration selftest
