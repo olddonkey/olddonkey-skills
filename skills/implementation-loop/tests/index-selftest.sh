@@ -1765,6 +1765,133 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Schema dispatch: mixed schema-1/schema-2 runs and unknown schema values
+# ---------------------------------------------------------------------------
+LIB="$(CDPATH= cd -- "$SCRIPT_DIR/../lib" && pwd -P)"
+WS_MIX="$(workspace mixed-schema)"
+run_cmd mix-begin "$RUN" begin --workspace "$WS_MIX"
+expect_status 0 "schema dispatch: begin succeeds"
+RUN_MIX="$(field_from "$CASE_STDOUT" run)"
+SEG_MIX="$(store_dir "$WS_MIX")/runs/${RUN_MIX}.jsonl"
+MIX_STATUSES=""
+run_cmd mix-unit "$RUN" unit-begin --unit u-mix --workspace "$WS_MIX"
+MIX_STATUSES+="$CASE_STATUS"
+run_cmd mix-gate "$JOURNAL" append --workspace "$WS_MIX" --event gate.result --field policy=strict \
+  --field purpose=unit-final --field binding=clean --field totals=exit=0 --field verdict=green --field gate_exit=0
+MIX_STATUSES+="$CASE_STATUS"
+mkdir -p "$TMP_ROOT/mix"
+PYTHONDONTWRITEBYTECODE=1 python3 - "$LIB" "$RUN_MIX" "$TMP_ROOT/mix" <<'PY'
+import json, os, sys
+sys.dont_write_bytecode = True
+lib, run_id, out = sys.argv[1:4]
+sys.path.insert(0, lib)
+from loopauth import canonical, vocabulary
+
+D = canonical.digest
+content = {"kind": "git", "head": "c" * 40, "tree_oid": "d" * 40}
+invocation = {"argv": ["/usr/bin/env", "true"], "cwd": "/work", "env_digest": D("env"), "executor_version": "1"}
+producer = {"tool": "index-selftest", "tool_digest": D("index-selftest")}
+base = {
+    "vocabulary": "tg-v1.0a1", "run_id": run_id, "run_snapshot_digest": D("snapshot"),
+    "node_id": "u-mix", "node_spec_digest": D("spec"), "attempt_id": "a1",
+}
+records = [
+    ("attempt.begin", dict(base, node_type="unit", stop_point="pr", input_content=content,
+                           dispatch={"backend": "codex", "model": "m", "effort": "high", "prompt_digest": D("p")})),
+    ("node.transition", dict(base, content=content, node_type="unit", stop_point="pr",
+                             evidence={"request_ref": {"kind": "request", "digest": D("r"), "node_id": "u-mix",
+                                                       "attempt_id": "a1", "content": None}},
+                             **{"from": "ready", "to": "blocked"})),
+    ("gate.result", dict(base, content=content, policy="strict", purpose="unit-final", binding="clean",
+                         verdict="red", gate_exit=1, suite_exit=1, suite_invocation=invocation,
+                         input_content=content, producer=producer, log_digest=D("log"), output_content=content,
+                         unit="u-mix")),
+    ("review.recorded", dict(base, content=content, reviewer="reviewer-1", request_id="req-1",
+                             reviewed_content_digest=D(content), verdict="pass", findings_digest=D("f"))),
+    ("publish.recorded", dict(base, content=content, stop_point="pr", branch="topic", outcome="published",
+                              sha="c" * 40, pr="https://example.invalid/pr/1", head_sha="c" * 40)),
+]
+for index, (event, payload) in enumerate(records, 1):
+    with open(os.path.join(out, f"{index}.{event}.json"), "w", encoding="utf-8") as handle:
+        json.dump(vocabulary.seal(event, payload), handle)
+PY
+for file in "$TMP_ROOT"/mix/*.json; do
+  name="$(basename "$file" .json)"
+  run_cmd "mix-$name" "$JOURNAL" append --schema 2 --workspace "$WS_MIX" --event "${name#*.}" --json "$(cat "$file")"
+  MIX_STATUSES+="$CASE_STATUS"
+done
+if [[ "$MIX_STATUSES" == 0000000 ]]; then
+  pass "schema dispatch: schema-1 and schema-2 records share one segment"
+else
+  fail "schema dispatch: schema-1 and schema-2 records share one segment (statuses $MIX_STATUSES)"
+fi
+run_cmd mix-index "$INDEX" --workspace "$WS_MIX"
+expect_status 0 "schema dispatch: a mixed run indexes with exit 0"
+if python3 - "$CASE_STDOUT" "$RUN_MIX" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+if doc["journal"]["status"] != "ok" or run["status"] != "active":
+    raise SystemExit(f"status {doc['journal']} {run['status']}")
+if run["schema_2_events"] != 5 or run["unknown_schema_lines"] != 0 or run["counts_complete"] is not True:
+    raise SystemExit(f"counts {run['schema_2_events']} {run['unknown_schema_lines']} {run['counts_complete']}")
+if [gate["verdict"] for gate in run["gates"]] != ["green"]:
+    raise SystemExit(f"schema-2 gate projected into schema-1 gates: {run['gates']}")
+if run["counts"]["all"]["reviews"] != {"iterate": 0, "pass": 0} or run["counts"]["all"]["publishes"] != 0:
+    raise SystemExit(f"schema-2 review/publish counted: {run['counts']['all']}")
+if [unit["unit"] for unit in run["units"]] != ["u-mix"] or run["units"][0]["status"] != "active":
+    raise SystemExit(f"units {run['units']}")
+events = [item["event"] for item in run["timeline"]]
+if "node.transition" in events or "attempt.begin" in events or events.count("gate.result") != 1:
+    raise SystemExit(f"timeline {events}")
+PY
+then
+  pass "schema dispatch: schema-1 views are unchanged and schema-2 lines are counted, not projected"
+else
+  fail "schema dispatch: schema-1 views are unchanged and schema-2 lines are counted, not projected"
+fi
+
+python3 - "$SEG_MIX" "$RUN_MIX" <<'PY'
+import sys
+path, run_id = sys.argv[1], sys.argv[2]
+with open(path, "ab") as handle:
+    handle.write(('{"schema":3,"seq":90,"ts":"2026-09-28T12:00:00Z","event":"checkpoint","run":"%s"}\n' % run_id).encode())
+    handle.write(('{"schema":"2","seq":91,"ts":"2026-09-28T12:00:01Z","event":"review.recorded","run":"%s"}\n' % run_id).encode())
+    handle.write(('{"seq":92,"ts":"2026-09-28T12:00:02Z","event":"publish.recorded","run":"%s"}\n' % run_id).encode())
+PY
+run_cmd unknown-index "$INDEX" --workspace "$WS_MIX"
+expect_status 0 "schema dispatch: unknown schema values never crash the index"
+if python3 - "$CASE_STDOUT" "$RUN_MIX" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+if doc["journal"]["status"] != "degraded" or run["status"] != "degraded":
+    raise SystemExit(f"status {doc['journal']} {run['status']}")
+if run["unknown_schema_lines"] != 3 or run["schema_2_events"] != 5 or run["counts_complete"] is not False:
+    raise SystemExit(f"counts {run['unknown_schema_lines']} {run['schema_2_events']} {run['counts_complete']}")
+if run["units"][0]["status"] != "unknown" or run["checkpoint"] != {"state": "unknown"}:
+    raise SystemExit(f"degraded axes {run['units']} {run['checkpoint']}")
+if run["counts"]["all"]["reviews"] != {"iterate": 0, "pass": 0} or run["counts"]["all"]["publishes"] != 0:
+    raise SystemExit(f"an unknown-schema line was interpreted: {run['counts']['all']}")
+PY
+then
+  pass "schema dispatch: unknown schema lines degrade the run, are reported, and are never interpreted"
+else
+  fail "schema dispatch: unknown schema lines degrade the run, are reported, and are never interpreted"
+fi
+
+INDEX_INSTALL="$TMP_ROOT/index-install"
+mkdir -p "$INDEX_INSTALL/scripts"
+cp "$INDEX" "$INDEX_INSTALL/scripts/loop-index"
+ln -s "$LIB" "$INDEX_INSTALL/lib"
+run_cmd index-lib-symlink "$INDEX_INSTALL/scripts/loop-index" --workspace "$WS_MIX"
+expect_status 6 "schema dispatch: loop-index refuses a symlinked lib/ (exit 6)"
+rm "$INDEX_INSTALL/lib"
+cp -R "$LIB" "$INDEX_INSTALL/lib"
+run_cmd index-lib-copy "$INDEX_INSTALL/scripts/loop-index" --workspace "$WS_MIX"
+expect_status 0 "schema dispatch: loop-index imports a real sibling lib/"
+
+# ---------------------------------------------------------------------------
 # CLI / contract extras
 # ---------------------------------------------------------------------------
 run_cmd help-index "$INDEX" --help
