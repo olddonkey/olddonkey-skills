@@ -114,8 +114,7 @@ run):
    Ed25519 keys from the host `ssh-keygen`, crash injection at every protocol
    cut, and the independent verifier; needs `ssh-keygen` with `-Y`, `git`,
    `ssh`, and `openssl`, and runs its cases in parallel) — expect
-   `selftest: PASS (1358 checks)` (computed, not yet measured: the measured
-   1355 plus three coverage self-test checks), the first 11 of them a
+   `selftest: PASS (1363 checks)`, the first 11 of them a
    self-test of the crash matrix's coverage check. Then the crash matrix,
    `bash skills/implementation-loop/tests/authority-selftest.sh --crash-matrix`
    (the real writer crashed at every frame-byte cut of genesis frame 1 and of
@@ -123,10 +122,9 @@ run):
    the classifier sweep below; slow, parallel) — expect `selftest: PASS`,
    with one check per cut, one classifier-sweep check per frame kind, and
    four coverage checks: (G − 1) + (R − 1) + 2 + 4 = G + R + 4 for planned
-   lengths G and R, which is 6354 checks for the frame lengths of the
-   implementer's machine (computed from the previous rule's measured 6354 =
-   G + R + 4 on that machine; that run took about an hour and a half on 10
-   workers). The count follows the two frames' planned lengths N, which
+   lengths G and R, which is 6466 checks measured on the judge's macOS host
+   (6460 cuts: genesis frame 1 and a rotation frame). The count follows the
+   two frames' planned lengths N, which
    include the temporary directory's path (the pinned `file://` remote) and
    the ceremony's pid, tty, and start-time digits, and so vary by machine;
    every run prints the enumerated cut list's count and digest
@@ -175,7 +173,7 @@ run):
    so forged, altered, and replayed plans and caller-built bindings mint
    nothing -- abandonment that removes only the intent, missing intent-named
    directories, and the revocation's quarantine child) — expect
-   `selftest: PASS (447 checks)`.
+   `selftest: PASS (467 checks)`.
 11. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
 12. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
