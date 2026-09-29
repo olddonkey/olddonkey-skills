@@ -1,10 +1,6 @@
 # task-graph-v1
 
-**Status: ACCEPTED** — Codex read-only adversarial review, 11 rounds, 2026-08-18.
-**Amended by A1** (`plans/task-graph-v1-amendment-a1.md`, accepted 2026-09-29):
-the trusted writer's operator principal, anchor, added operations, row
-admissibility, typed entry points, framing, keys, and start tokens. Where the
-two differ, A1 wins.
+**Status: ACCEPTED** — Codex read-only adversarial review, 11 rounds, 2026-08-18. **Amended by A1** (`plans/task-graph-v1-amendment-a1.md`, accepted 2026-09-29; where the two differ, A1 wins).
 See §12 for the acceptance record and the falsifier carried into implementation.
 
 Round 1 (12 findings, 9 BLOCKER) reversed two decisions settled at kickoff and
