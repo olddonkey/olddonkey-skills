@@ -127,12 +127,19 @@ claim fails.
   or its frame), and `ssh-keygen.sign`/`sign-pointer` is never invoked by
   recovery (a `tools.run` recording fixture).
 
-**F6 — compound transitions never come apart.** The safe outcomes of every
-cut are: **both** parts, **neither** part (the prior state intact), or
-**pending** — a durable frame the remote has not yet anchored, which A1.2
-treats as giving **no current authorization at all** (asserted through
-`status`, the verifier, and 0a.3's store state). Never one part accepted as
-current without the other.
+**F6 — compound transitions never come apart**, checked in two phases at
+every cut. **Immediately after the crash**, the store is either whole —
+**both** parts (for an active-epoch revocation: the record anchored, which by
+A1.2 commits the compound, so writer, verifier, and 0a.3 classify the store
+quarantined with the revocation's rule and position and nothing authorizes)
+or **neither** (the prior state intact) — or it is **not current**: the
+writer and the verifier report it pending or needing recovery (a durable frame
+not yet anchored, or an anchored frame whose intent recovery has not yet
+cleared) and **nothing authorizes** (asserted through `status`, the verifier,
+and 0a.3's store state). **After `recover` has run to completion** from that
+cut, the store is exactly **both** (with every local artifact of the
+compound, e.g. the quarantine marker's exact bytes) or exactly **neither**.
+Never one part accepted as current without the other, at either phase.
 - The two compounds 0a admits, crashed at every named crash point and at
   every frame byte in the sense of 0a2 §25 (real crashes at every planned torn
   byte and the final byte of genesis frame 1, a rotation frame, and an
