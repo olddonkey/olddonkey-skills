@@ -487,6 +487,12 @@ Recorded so the writer's specification cannot drop them:
 - everything amendment A1 settles for the writer (principals, anchor, rows,
   admissibility, typed entry points, framing, keys, start tokens).
 
+**Amended by A2.1** (`plans/task-graph-v1-amendment-a2.md`, accepted
+2026-09-29): the request rows stay dormant through 0a, so 0a.3 verifies these
+claims only to the extent 0a can (every authority claim is rejected); the
+approval grant arrives with unit 8, and upgrading guards to `verified` moves
+to the units that activate each request kind.
+
 ## 5. Dispositions
 
 ### Round 1 (thread `01a0ebb0`)

@@ -1,115 +1,142 @@
-# task-graph-v1 — amendment A2 (derived request rows, per-kind admissibility, genesis recovery)
+# task-graph-v1 — amendment A2 (request rows dormant through 0a; genesis recovery)
 
 **Status: A2.3–A2.4 ACCEPTED** at Codex read-only review round 15 (2026-09-29,
 gpt-6-sol / max, thread `01a0ebb0`) together with the 0a.2 specification.
-**A2.1–A2.2 DRAFT** — for review together with
-`plans/task-graph-v1-phase-a-0a3.md`. Amends `plans/task-graph-v1.md`
+**A2.1 ACCEPTED** at round 4 (thread `01a0ec41`) together with
+`plans/task-graph-v1-phase-a-0a3.md`; A2.2 withdrawn. Amends `plans/task-graph-v1.md`
 (ACCEPTED round 11) as already amended by A1
 (`plans/task-graph-v1-amendment-a1.md`, ACCEPTED round 9). Where A2 differs
 from either, A2 wins. `tg:NN` and `A1:NN` cite lines.
 
 Specifying sub-units 0a.2 and 0a.3 surfaced four plan-level gaps. None can
 be settled inside a sub-unit specification without silently changing an
-accepted rule, so they are stated here. A2.3 and A2.4 are reviewed with 0a.2
-(which depends on them); A2.1 and A2.2 with 0a.3.
+accepted rule, so they are stated here. A2.3 and A2.4 were reviewed with
+0a.2 (which depends on them); A2.1 with 0a.3.
 
 ---
 
-## A2.1 The derivation routine is a token source (amends A1.5)
+## A2.1 Request rows stay dormant through 0a (amends A1.4)
 
-**Accepted text.** Tokens have exactly three sources: an external row's
-authenticated principal, the recovery routine (for the four recovery rows), and
-a compound parent (for the child rows it names) (`A1:244-251`). Request
-opening, derived request cancellation, and request expiry are **derived** rows
-(`tg:811-813`) with no external entry point (`tg:901`), and derived operations
-may never be requested directly (X7, `tg:879-880`).
+**Accepted text.** A1.4 admits request opening + capability issuance,
+cancellation, expiry, and redemption in 0a, with their positive tests in 0a
+(`A1:223`); the 0a.1 hand-off asks 0a.3 to verify claimed authority references
+(`plans/task-graph-v1-phase-a.md` §4).
 
-**The gap.** None of the three sources can mint a token for those three rows,
-so as written they could never be admitted — or an implementer would invent a
-fourth source, which is exactly the generic hatch the falsifier forbids
-(`tg:1405-1406`).
+**The gap** (0a.3 specification review, round 1). In 0a **no request kind has
+a principal the writer can authenticate or a channel to reach it**:
 
-**Amended.** A fourth source, the **derivation routine**, mints tokens for
-exactly three rows: request opening (with its capability issuance, A1.9),
-derived request cancellation, and request expiry. It mirrors the recovery
-routine (`A1:255-258`):
+- agent-session kinds (`review`, `triage`, `tg:1034-1035`) need the adapter
+  identity handshake that turns a live process into a known session (unit 9,
+  `tg:1161-1163`), and `review` needs a dispatch bound to its attempt (the
+  adapter bindings, `tg:1220`); a live pid with a matching start token proves
+  neither;
+- human kinds exist only inside the authenticated console's answer path
+  (`tg:1064`, `A1:46-48`; unit 8, `tg:1156-1160`);
+- **targeted delivery** bound to the recorded PID and start token
+  (`tg:1059-1064`) is unit 7's (`tg:1153-1155`); handing the secret to
+  whatever descriptor a caller supplies does not target anyone;
+- a journal claim cannot choose the kind, target, or emitter: the journal is
+  unauthenticated (`tg:1082-1084`), so a derived opening triggered by a
+  journal line would let any journal writer route a capability to its own
+  process — the indirect request X7 forbids (`tg:879-880`).
 
-- Its only input is **observed state**: the journal, reduced by the 0a.1
-  reducer, and the authority store itself. No caller supplies a kind, subject,
-  target, scope, expiry, or binding; the routine takes none as a parameter.
-- **Opening's trigger** is the coordinator's "emit requests" (`tg:724-725`)
-  made concrete: a journal event `request.emitted` (a **claim**, like every
-  journal event) naming the kind, subject, and proposed target. The reducer
-  folds it into the source state; the routine opens the request only if
-  `V-request-open` accepts that source state as reduced by the routine itself.
-  An emission is a claim that a request is wanted, never a request of the
-  writer: the writer is not asked, it observes.
-- A derivation token binds the digest of the observed state that triggered
-  the row (for opening and derived cancellation, the reduced source state and
-  the journal position read; for expiry, the request's sealed records and the
-  clock reading) and is refused if the row's validator, re-run under the
-  writer lock at commit, observes a different state.
-- The routine has one external entry point (`loop-authority derive`), exactly
-  as recovery has `loop-authority recover`; neither accepts row-selecting
-  parameters. The registry invariant "derived-only rows have no external
-  entry point" is read as: no entry point that selects the row or supplies
-  its evidence.
-- Tests (added to A1.5's list): each derivation-sourced row invoked without a
-  derivation token, with a recovery or external token, or with a derivation
-  token bound to a different observed state, is refused; `derive` has no
-  parameter that names a kind, subject, target, request id, or expiry.
+Admitting the rows in 0a would therefore seal capabilities that no principal
+can be proven to receive or redeem.
 
-**What this does not change.** The console-gesture branch of request
-cancellation (`tg:812`) keeps an external, authenticated-human principal.
-Capability redemption stays the sole external entry point for answers
-(`tg:841-842`).
+**Amended.** The five request rows (opening + issuance, cancellation in both
+branches, expiry, redemption) stay **dormant through 0a**: registered with all
+six columns, refused with their distinct errors, covered by the reachability
+invariants (0a.2). Each request kind — and each derived row that can arise only
+from its redemption — becomes admissible only in the unit that supplies
+**all** of its source state, its target principal, and targeted delivery:
 
-## A2.2 A request kind is admissible only when its source state and target principal exist (amends A1.4)
+| request kinds (and derived rows) | needs | admissible from |
+| --- | --- | --- |
+| `scope-change`, `approval`, `observation`, `design-decision`, `ceiling`, `safety-boundary` | targeted delivery (unit 7), the console answer path (unit 8) | unit 8 |
+| `segment-discharge`, with the **segment discharge** row and its compound `T-segment-reset` | the accumulator (unit 3), delivery (unit 7), the console (unit 8) | unit 8 (the accumulator itself stays unit 3's; A1.4's unit-3 placement of the row is replaced) |
+| `review`, `triage` | delivery (unit 7), the agent-session identity handshake and dispatch binding (unit 9) | unit 9 |
+| `attestation` | the console (unit 8), and child identity, loss, and reconciliation (unit 9), so that `unknown-outcome` is established independently rather than asserted by the journal | unit 9 |
+| `mechanism-closure`, `release-acceptance`, with the mechanism-closure and release-acceptance rows | their states and principals (unit 12) | unit 12 |
 
-**Accepted text.** A1.4 made request opening, issuance, cancellation, expiry,
-and redemption admissible in 0a with positive tests in 0a (`A1:223`), while
-the compound consequence rows stay dormant until units 3 and 12
-(`A1:225-227`).
+**A durable activation boundary.** Admission is decided by the record, never
+by the verifier's version, so a record sealed before its kind was admitted can
+never become valid later.
 
-**The gap.** A1.4 grants admissibility per **row**, but whether a request can
-be opened and answered depends on its **kind**: each kind has a source state
-(`tg:862-867`) and a target principal (`tg:1032-1045`), and several of those
-do not exist in 0a. Human capabilities exist only inside the authenticated
-console (`tg:1064`, `A1:46-48`), whose answer path is unit 8
-(`tg:1156-1160`); the mechanism, accumulator, and candidate-release states are
-units 3 and 12. Opening such a request in 0a would seal an artifact no
-principal can ever answer — or tempt an implementer to let some non-console
-process answer as the human.
+- **Epoch introducers.** Every record that introduces an epoch —
+  `store.genesis`, `epoch.rotated`, and `store.regenesis` (the first epoch of
+  a new generation) — carries `registry_version` (the registry that sealed
+  it) and `admitted_protocols` (the request-protocol versions, each with the
+  kinds it admits, that records sealed **in that epoch** may use). Both are
+  part of the canonical envelope the ceremony displays.
+- **A closed transition table.** `ALLOWED[registry_version]` fixes which
+  protocols a registry version may list; for Phase A 0a,
+  `ALLOWED["tg-v1.0a"] = []`. The writer and the independent verifier refuse
+  an introducer whose `registry_version` is unknown to them or lower than its
+  predecessor epoch's, or whose list is not a subset of
+  `ALLOWED[registry_version]`, or — within a generation — does not include
+  every protocol its predecessor listed (lists only grow). So in 0a every
+  introducer carries `tg-v1.0a` and the empty list, and a premature listing is
+  refused by both, never merely ignored.
+- **Request records.** A request record is valid only if its `protocol` is
+  listed by the introducer of the epoch it was sealed in and that protocol
+  admits its kind; every terminal record (`redeemed`, `cancelled`, `expired`)
+  carries its opening's `protocol` and kind unchanged. Because lists only
+  grow within a generation, a request opened in one epoch stays answerable
+  after a rotation, its terminal record sealed with the new epoch's subkey
+  (the old epoch's key is verify-only, A1.7); linked re-genesis makes every
+  open request historical, like every other authorization of the old store
+  (A1.3).
+- **Activation** of a unit's kinds is therefore an operator-TTY epoch
+  rotation by a writer whose registry version's `ALLOWED` entry lists the new
+  protocol; records of earlier epochs, and records of kinds a protocol does
+  not list, stay invalid under every later verifier.
 
-**Amended.** The five request rows stay admissible from 0a, and each **request
-kind** is additionally admissible only once both its source-state predicate
-and its target principal exist. Until then `V-request-open` refuses that kind
-with a distinct error and no store or anchor mutation; nothing of that kind is
-ever sealed.
+**Gates reassigned, so none is lost.**
+- **Unit 7** delivers the closed policy lattice, the `execution-disabled`
+  marking, the targeted delivery channel bound to PID and start token, and
+  the transactional redemption machinery, each with its own tests; with no
+  admissible kind yet, its end-to-end positive redemption tests move to the
+  first activating unit (unit 8).
+- **The named falsifier** (`tg:1397-1407`) runs in 0a over every compound
+  0a admits (epoch revocation with quarantine, delimiter completion with
+  anchor replay-forward) and over the reachability invariants; its
+  compound-**redemption** crash property moves to units 8 (answer; segment
+  reset), 9 (review, triage, attestation), and 12 (closure, acceptance), each
+  for its own kinds.
+- **0a keeps** every request row's refusal, the full kind × source-state
+  cross-product as **negative** tests (every combination refused while
+  dormant), and 0a.3's reference verification. Each activating unit adds its
+  kinds' positive half of the cross-product (`tg:869`) and the positive
+  verification rules for the records it admits.
+- **Replaced allocations:** 0a.2's §1 row for 0a.3 ("request opening +
+  capability issuance …, those five") becomes "verification of claimed
+  authority references; no row admitted", and the 0a.1 hand-off's "upgrading
+  those guards from `claimed` to `verified`" (pa §4) moves to the activating
+  units.
 
-| request kinds | source state | target principal | kind admissible from | positive tests land in |
-| --- | --- | --- | --- | --- |
-| `review`, `triage` | node state (0a.1 reducer) | agent session (start token, A1.8) | 0a (0a.3) | 0a.3 |
-| `scope-change`, `approval`, `attestation`, `observation`, `design-decision`, `ceiling`, `safety-boundary` | node state | the authenticated console | unit 8 | unit 8 |
-| `segment-discharge` | accumulator state (unit 3) | the authenticated console | unit 8 (after unit 3) | unit 8 |
-| `mechanism-closure` | mechanism state | the independent verifier session | unit 12 | unit 12 |
-| `release-acceptance` | candidate-release state | a separately authenticated human or independent reviewer | unit 12 | unit 12 |
+**Carried forward so they cannot be dropped.** The activating unit must also
+specify how the **derived** request rows (opening, derived cancellation,
+expiry) obtain transaction tokens — A1.5 names no source for them — with a
+trigger decided from independently verifiable state, never from a journal
+claim alone; that a request stays valid while its node waits in `blocked`
+for it (`tg:291`); its `ALLOWED` entry and activation rotation, tested for
+rotation between opening and each terminal outcome; and the binding of reviewed content and reviewer identity
+into the request and its answer (`tg:183-198`, `tg:222-224`). The approval
+grant (`tg:529-548`) is the redeemed answer of an `approval` request and
+arrives with unit 8; `approval.consume` stays refused (A1.9).
 
-**Consequences carried forward.**
-- The full kind × source-state cross-product test (`tg:869`) runs in 0a.3 for
-  every **negative** combination and for the positive combinations of the
-  admissible kinds; each activating unit adds its kinds' positive half.
-- The falsifier's compound-redemption crash property (`tg:1400-1403`) is
-  exercised in 0a.3 on the only compound 0a can seal — the answer with its
-  authority-head advance — and on the structural rule that a consequence
-  exists only nested in its redemption frame; units 8 and 12 repeat it with
-  real consequences.
-- The approval grant (`tg:529-548`) is the redeemed answer of an `approval`
-  request; it cannot exist before unit 8, and `approval.consume` stays refused
-  (A1.9).
-- The console-gesture branch of request cancellation (`tg:812`) has the same
-  missing principal: it is refused with a distinct error until unit 8, while
-  the derived branch is admissible from 0a.
+**What 0a keeps.** Because every request row is dormant, **no journaled
+answer, request, or expiry can be backed by a redeemed capability in 0a**, so
+0a.3 marks each such claim **rejected** — whatever the store's availability,
+which it reports separately. That enforces "a response event without a
+redeemed capability is **rejected**, not merely unattributed"
+(`tg:1071-1072`) from 0a on; no guard is upgraded until an activating unit
+adds positive verification rules with positive tests.
+
+## A2.2 (withdrawn)
+
+Per-kind admissibility with `review` and `triage` in 0a was withdrawn at the
+0a.3 review's round 1 and folded into A2.1.
 
 ## A2.3 Genesis has a crash protocol and a bootstrap recovery rule (amends A1.2, A1.3)
 
@@ -271,10 +298,6 @@ and the verifier (row 4).
 
 ## Open questions for review
 
-1. Is A2.1's reading of "no external entry point" (no entry point that
-   selects the row or supplies its evidence) sound, given that recovery
-   already has one?
-2. Is the `request.emitted` journal claim the right trigger, or should the
-   trigger be a pure function of node state with no emission at all (which
-   would require the demand rules of unit 10 now)?
-3. Is any kind's placement in the A2.2 table wrong?
+1. Is any request kind placed in the wrong activating unit?
+2. Is anything in the 0a.1 hand-off (`plans/task-graph-v1-phase-a.md` §4)
+   lost by keeping the request rows dormant through 0a?

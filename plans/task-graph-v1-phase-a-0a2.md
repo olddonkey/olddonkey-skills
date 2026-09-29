@@ -1,6 +1,7 @@
 # task-graph-v1 Phase A — sub-unit 0a.2 (the authority store and its ceremonies)
 
-**Status: ACCEPTED** at Codex read-only review round 15 (2026-09-29, gpt-6-sol / max, thread `01a0ebb0`), together with amendment A2.3–A2.4; the two round-15 minors are applied (§23). The contract is amendment A1
+**Status: ACCEPTED** at Codex read-only review round 15 (2026-09-29, gpt-6-sol / max, thread `01a0ebb0`), together with amendment A2.3–A2.4; the two round-15 minors are applied (§23). Its post-acceptance delta under
+A2.1 (§24) was accepted at round 5 of thread `01a0ec41`. The contract is amendment A1
 (`plans/task-graph-v1-amendment-a1.md`, ACCEPTED round 9) on top of
 `plans/task-graph-v1.md` (ACCEPTED round 11). This document **implements** A1;
 it decides only what A1 leaves to implementation (file layout, encodings,
@@ -18,7 +19,7 @@ lines at `d28e796` under `skills/implementation-loop/`. 0a.2 builds on 0a.1
 | sub-unit | delivers | rows made **admissible** |
 | --- | --- | --- |
 | **0a.2** (this document) | the authority store, framing and write intent, per-type subkeys and seals, the anchor, recovery, the operator-TTY ceremony, the **complete** registry (every row, most dormant), transaction tokens on every sink, the reachability invariants, the independent verifier | authority genesis, epoch rotation, epoch revocation (with its compound quarantine), authority-head advance, torn-frame truncation, anchor replay-forward, recovery tidy, store quarantine, linked re-genesis |
-| 0a.3 | request opening + capability issuance (one transaction, A1.9), cancellation, expiry, compound redemption, verification of 0a.1's claimed authority references | those five |
+| 0a.3 | verification of 0a.1's claimed authority references (the request rows stay dormant through 0a — A2.1, which replaced this row's original allocation) | none |
 | 0a.4 | gesture-nonce issuance (console session), the falsifier end to end (`approval.consume` is already refused from 0a.2, below) | nonce issuance |
 
 **Admissibility in 0a.2, row by row.** Admissible: authority genesis, epoch
@@ -26,10 +27,10 @@ rotation, epoch revocation (with its compound quarantine), authority-head
 advance, torn-frame truncation, anchor replay-forward, recovery tidy, store
 quarantine, linked re-genesis. **Dormant from the first store write:** request
 opening + capability issuance, request cancellation, request expiry,
-capability redemption (until 0a.3); gesture-nonce issuance (until 0a.4);
+capability redemption (through 0a, A2.1); gesture-nonce issuance (until 0a.4);
 repository registration, rebind, execution-root registration (unit 2);
-standing authorization, standing revocation, segment discharge (unit 3);
-enrollment, enrollment revocation (unit 4); mechanism closure,
+standing authorization, standing revocation (unit 3); segment discharge
+(unit 8, A2.1); enrollment, enrollment revocation (unit 4); mechanism closure,
 acceptance-platform designation, release acceptance (unit 12). Every dormant
 row is refused with its distinct error and zero store or anchor mutation, and
 0a.2 tests each. `approval.consume` is refused by the writer from 0a.2 on (no
@@ -123,7 +124,22 @@ the genesis record, never in a config file.
   kind, `approval` included, has only `T-request-answered` (`tg:846`): an
   approval's answer **is** its grant — it carries the approved envelope's
   digest (`tg:529-532`) — and has no separate part. No compound part has a type or frame of its own, so none can
-  come apart from its parent; 0a.3 carries the crash tests.
+  come apart from its parent; the activating units of A2.1 (8, 9, 12) carry
+  the compound-redemption crash tests.
+- **The activation boundary (A2.1, a post-acceptance addition reviewed with
+  0a.3).** Every epoch introducer — `store.genesis`, `epoch.rotated`, and
+  `store.regenesis` — carries `registry_version` and `admitted_protocols`,
+  both part of the canonical envelope its ceremony displays. The writer and
+  the independent verifier each implement A2.1's checks on every introducer:
+  `registry_version` must be known to them and not lower than the predecessor
+  epoch's; `admitted_protocols` must be a subset of
+  `ALLOWED[registry_version]` and, within a generation, include every
+  protocol the predecessor listed. 0a knows one version, `"tg-v1.0a"`, with
+  `ALLOWED["tg-v1.0a"] = []`, so every 0a introducer carries that version and
+  the empty list. Both also refuse a record of a request type
+  (`request.opened`, `.cancelled`, `.expired`, `.redeemed`) unless its
+  epoch's introducer admits its `protocol` and kind — so in 0a, always; a
+  store holding such a record is invalid (quarantine, A1.6).
 - **The closed type list for Phase A**, fixed in `lib/loopauth/records.py`, so
   genesis and rotation can certify one subkey per type up front:
   `store.genesis`, `epoch.rotated`, `epoch.revoked`, `store.regenesis`,
@@ -496,6 +512,11 @@ temp directory, subprocess writer):
   per-type certificates with the host `ssh-keygen` (in CI too);
 - no standalone signing type exists for segment reset, mechanism closure, or
   release acceptance; sealing a record of those names is refused;
+- the activation boundary (A2.1): genesis and rotation records carry
+  `admitted_protocols: []`; a validly sealed `request.opened` (and each other
+  request type) planted in the log by the test with the store's own subkey is
+  refused by the writer's log validation and by the independent verifier,
+  and the store quarantines;
 - start tokens: the comparison function, given two tokens with equal
   `boot_id`, `pid`, and whole second but different microseconds, treats them
   as different processes (a deterministic fixture — no skip); the reader
@@ -508,8 +529,24 @@ temp directory, subprocess writer):
   and an out-of-frame `frame-byte-<n>` refused; with `LOOP_AUTHORITY_TEST=1`
   and a crash point set, a ceremony without a TTY is still refused (the seam
   never suppresses validation);
-- dormant rows and `approval.consume`: each 0a.3/0a.4/unit-2–4/12 row and
-  `approval.consume` refused with its distinct error and no mutation;
+- dormant rows and `approval.consume`, named explicitly in the test's oracle:
+  request opening + capability issuance, request cancellation (both
+  branches), request expiry, capability redemption, gesture-nonce issuance,
+  repository registration, rebind, execution-root registration, standing
+  authorization, standing revocation, segment discharge, enrollment,
+  enrollment revocation, mechanism closure, acceptance-platform designation,
+  and release acceptance — each refused with its distinct error and no
+  mutation — and `approval.consume` refused likewise;
+- the activation boundary: every introducer (genesis, rotation, re-genesis,
+  at each re-genesis recovery cut) carries `registry_version: "tg-v1.0a"`
+  and `admitted_protocols: []`; an introducer with a nonempty list (a
+  premature future protocol) or an unknown registry version is refused by
+  the writer and by the independent verifier; for genesis, rotation, and
+  re-genesis, the fields shown in the PTY-captured ceremony display equal the
+  sealed introducer's. The **lower-version** and **dropped-protocol** checks
+  cannot be isolated while 0a knows a single version with an empty list, so
+  their positive and negative tests are a gate of the first activating unit
+  (unit 8), which introduces a second version with a nonempty list;
 
 **T** — `registry-selftest.sh`:
 - the registry holds every row of `tg:809-829` and A1.3 with its six columns
@@ -693,4 +730,14 @@ new suites.
 | --- | --- | --- |
 | 1 | MINOR: two key publication procedures | **applied** — one sequence: temp, `fsync`, `os.link` without replacement, directory `fsync`, unlink, directory `fsync`; a leftover `.tmp-*` is never read |
 | 2 | MINOR: intent length and digest subjects | **applied** (in A2.3) — `length` and `digest` keep A1.6's meaning; `frame_length` and `frame_b64` cover the whole frame; validity checks the header against them |
+
+## 24. Post-acceptance delta under A2.1 (reviewed with 0a.3, thread `01a0ec41`)
+
+The 0a.3 review moved the request rows out of 0a (A2.1) and added a durable
+activation boundary. This document changed accordingly: §1's allocation row
+for 0a.3 and the dormant-row list (segment discharge → unit 8); §3's
+compound-redemption crash tests → units 8, 9, 12; §3's activation boundary
+on every epoch introducer; §7's explicit dormant-row oracle and
+activation-boundary tests, with the lower-version and dropped-protocol tests
+gated to unit 8 and a display-versus-sealed ceremony check.
 
