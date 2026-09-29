@@ -696,3 +696,244 @@ Both `fresh` and `stale` carry `ts`.
 `note` is taken from the newest `checkpoint` event that has a note, if
 any, even when a later non-checkpoint agent event is the freshness
 evidence.
+
+---
+
+## 6. Authority store (task-graph-v1 sub-unit 0a.2)
+
+Authority is `scripts/loop-authority` (the writer) over `lib/loopauth/`
+(`records.py`, `keys.py`, `frame.py`, `store.py`, `anchor.py`, `recover.py`,
+`ceremony.py`, `registry.py`, `tools.py`). `scripts/loop-authority-verify` is
+an independent verifier that imports nothing from `lib/loopauth`. Both are
+stdlib-only python3: each bash wrapper writes nothing (no directory, no
+heredoc temporary file) and only runs `python3 -I -B` on the entry file beside
+its real path (`scripts/loop-authority.py`, `scripts/loop-authority-verify.py`),
+whose first act -- after refusals that need no file -- is to create its
+scratch directory with `O_NOFOLLOW` on every component (a symlinked
+`$HOME/.cache` component is refused, exit 9). The writer imports `lib/loopauth`
+only from the `lib/` beside its real `scripts/` directory and refuses a
+symlinked `lib/` (exit 9).
+
+### Layout
+
+```
+$HOME/.config/olddonkey-loop/authority/        0700
+  lock                       the writer's exclusive flock
+  active                     canonical {store_id, generation}
+  genesis.intent             only during authority genesis (A2.3)
+  regenesis.intent           only during linked re-genesis (A1.3)
+  stores/<store_id>/
+    log/segment-000001.olf   framed records
+    keys/epoch-<n>-<16 hex>/ root, root.pub, and per type <type>,
+                             <type>.pub, <type>-cert.pub
+    intent                   the durable write intent (frame 2 on)
+    cursor                   recovery hint only
+    quarantine               canonical {store_id, rule, position, detail}
+  archive/<store_id>/        an archived generation: dirs 0500, files 0400
+```
+
+Every file is 0600, owned by the current uid, `nlink == 1`, and opened with
+`O_NOFOLLOW`; no path component below `$HOME` may be a symlink. Scratch space
+is outside it: `$HOME/.cache/olddonkey-loop/tmp/<pid>-<16 hex>` (the process
+`TMPDIR`; the inherited `TMPDIR` is never used) and a fresh
+`$HOME/.cache/olddonkey-loop/anchor-scratch/<pid>-<16 hex>.git` per
+transaction, whose `config` must hold only `[core]`. The verifier uses
+`$HOME/.cache/olddonkey-loop/verify/<pid>-<16 hex>` and deletes it. A2.4
+abandonment deletes nothing: it removes the intent, and the intent-named
+store directory stays, permanently unpublished -- named by neither `active`
+nor any intent, never read as authority, reported by `status` under
+`unpublished.stores`, and never renamed or removed.
+
+### Records and frames
+
+A payload is canonical JSON `{type, v: 1, store_id, generation, seq, epoch,
+key_id, prev, body}`: `epoch` is the epoch whose subkey sealed it, `key_id`
+that subkey's `SHA256:` fingerprint, `prev` the previous record digest (null
+at seq 1). A frame is `OLF1 <seq> <type> <length> <digest>\n` + content +
+`\n`, content = canonical `{payload, sig}`, `<digest>` = `sha256:` over
+`OLF1 <seq> <type> <length>` then the content. That digest is the record
+digest (`prev`, the pointer's `record_digest`, the intent's `digest`).
+
+The closed type list (`records.TYPES`): `store.genesis`, `epoch.rotated`,
+`epoch.revoked`, `store.regenesis`, `request.opened`, `request.cancelled`,
+`request.expired`, `request.redeemed`, `nonce.issued`, `repo.registered`,
+`repo.rebound`, `exec-root.registered`, `standing.granted`,
+`standing.revoked`, `entry.enrolled`, `entry.revoked`, `platform.designated`.
+Segment reset, mechanism closure, and release acceptance are never types.
+Bodies:
+
+| type | body |
+| --- | --- |
+| `store.genesis` (seq 1, generation 1) | `ceremony`, `envelope_digest`, `principal`, `remote`, `anchor_ref`, `anchor_class`, `commit_identity`, `epoch: 1`, `key_dir`, `root_pub`, `root_key_id`, `subkeys` (one key_id per type), `registry_version`, `admitted_protocols` |
+| `store.regenesis` (seq 1, generation > 1) | the genesis fields plus `prev_generation` (the parent pointer's `{store_id, generation, last_seq, last_record_digest}`), `prev_commit`, `quarantined {last_seq, last_record_digest}` (the archived store's valid prefix), `archive` |
+| `epoch.rotated` | `ceremony`, `envelope_digest`, `principal`, `remote`, `from_epoch`, `epoch`, `key_dir`, `root_pub`, `root_key_id`, `subkeys`, `registry_version`, `admitted_protocols`; sealed by the active (old) epoch |
+| `epoch.revoked` | `ceremony`, `envelope_digest`, `principal`, `epoch`, `prior_state` (`active` or `verify-only`); sealed by the active epoch |
+
+**The activation boundary** (A2.1, A2.6). Every epoch introducer
+(`store.genesis`, `epoch.rotated`, `store.regenesis`) carries
+`registry_version` and `admitted_protocols`, both in the canonical envelope
+its ceremony displays (and whose digest is `envelope_digest`).
+`ALLOWED["tg-v1.0a"] = {types: [store.genesis, epoch.rotated, epoch.revoked,
+store.regenesis], protocols: []}` is the only version 0a knows, so every 0a
+introducer carries `tg-v1.0a` and `[]`; another version (`introducer-version`)
+or a nonempty list (`introducer-protocols`) is refused. A version is never
+lower than its predecessor epoch's; within a generation the protocols and the
+admitted type set only grow (`introducer-types`). A record of any type is
+valid only if its epoch introducer's version admits the type, decided from
+the envelope before any body schema (`type-not-admitted`): a validly sealed
+record of any other certified type makes the store invalid (quarantine). The
+writer and the verifier each implement these checks with their own code.
+
+`principal = {kind: operator-tty, tty, start_token: {boot_id, pid,
+start_time}}` (A1.1, A1.8) is evidence of a terminal session, never of human
+approval. `remote` is the genesis-pinned URL, copied unchanged by every
+rotation and re-genesis. `anchor_class` (`production` for `git@host:path.git`
+and `https://host[:port]/path.git`; `test` for `file:///path`, accepted only
+with `LOOP_AUTHORITY_TEST=1`) is derived from that remote and checked against
+it; a test lineage never gives current authorization.
+
+### Keys and seals
+
+Each epoch has an Ed25519 root and one Ed25519 subkey per type, certified by
+the root with key identity `<type>@e<epoch>`, principal `<type>`, validity
+`always:forever`. A seal is `ssh-keygen -Y sign -f <type>-cert.pub -n
+olddonkey-loop.authority.<type>.v1` (the certificate path makes ssh-keygen
+embed the certificate; the private half beside it signs). Verification
+requires ssh-keygen to accept the line `<type>
+cert-authority,namespaces="olddonkey-loop.authority.<type>.v1" <root.pub>`
+and, parsed from the signature itself, a user certificate signed by exactly
+the pinned root, identity `<type>@e<epoch>`, principals `[<type>]`, no
+critical options, and a subject fingerprint equal to the payload `key_id` and
+to the epoch's `subkeys[type]`. Roots are pinned only from the genesis,
+re-genesis, and rotation records. Key files are created in a key directory
+with a random suffix and published without replacement (temp, fsync, link,
+dir fsync, unlink temp, dir fsync); a directory no epoch record names is
+unpublished and never read. Every published directory must hold exactly the
+root and the per-type files, matching its record, or the store is
+quarantined. Key states: `active -> verify-only` (rotation), `active ->
+revoked`, `verify-only -> revoked`.
+
+### The anchor
+
+One ref, `refs/olddonkey-loop/anchor`, in the pinned remote. Each commit
+carries one file, `anchor.json` = canonical `{active, prev_generation, sig}`
+with `active = {store_id, generation, genesis_digest, seq, record_digest,
+epoch, key_id}`. `active.epoch` and `key_id` name the root that signs the
+pointer: the epoch active after the record (the new root for genesis,
+re-genesis, and rotation), or, for the revocation of the active epoch, the
+revoked root itself (its last act). The signature is by that root over
+canonical `{active, prev_generation}` under `olddonkey-loop.anchor.pointer.v1`.
+`prev_generation` is non-null only on a generation's first pointer. The
+commit is deterministic: tree = one entry `100644 anchor.json`, author and
+committer `olddonkey-loop <anchor@olddonkey-loop.invalid>` at `@<seq> +0000`,
+message `anchor <store_id> g<generation> s<seq>`. Every git run has an
+allowlisted environment and `-c core.hooksPath=/dev/null -c
+core.fsmonitor=false`, plus the pinned transport's options where the remote
+is contacted (0a.2 section 4).
+
+### Write intents and the write protocol
+
+The store intent (`stores/<id>/intent`) is canonical `{seq, offset, length,
+digest, expected_parent, anchor_json, anchor_commit, frame_length,
+frame_b64}`: A1.6's fields plus the exact frame bytes (as A2.3 gives
+`genesis.intent`), so a torn tail is compared byte for byte. `anchor_commit`
+is the commit id rebuilt from `anchor_json` and `expected_parent`.
+`genesis.intent` adds `store_id`, `key_dir`, `remote`; `regenesis.intent`
+adds `old` (the linked old pointer), `old_commit`, `new_store_id`, `key_dir`,
+`archive`, `remote`.
+
+Write protocol (lag 0): seal the record and its pointer and build the commit
+(stages 1-3 bound); write and fsync the intent; append and fsync the frame;
+push, fast-forward from `expected_parent` only; read back by content; remove
+the intent; write the cursor. Genesis: store and key directories, keys,
+`genesis.intent`, frame 1, push, readback, `active`, remove the intent.
+Linked re-genesis: new store and keys (inert), `regenesis.intent`, the new
+frame 1, push (the commit point), archive the old store read-only, `active`,
+remove the intent. An archived generation verifies as history: its valid
+prefix (up to the invalid frame or nonconforming tail that quarantined it,
+which stays as evidence) and its quarantine marker; the re-genesis record's
+link and `quarantined` must name that prefix.
+
+In A2.3's frame-1 classes, a missing intent-named store directory is never
+`none`: the ceremony creates it before its intent and nothing removes it,
+so without it nothing shows that frame 1 never became durable (it may have
+been pushed and then deleted with the ref). It is A2.3 row 1
+(`genesis-invalid`; for re-genesis, `regenesis-invalid`): fail closed,
+nothing mutated, in the writer and the independent verifier alike. A2.3 row
+6's only sink removes `genesis.intent` (re-genesis abandonment:
+`regenesis.intent`).
+
+### States
+
+`loop-authority status` and `verify`, and the verifier, print one JSON
+object: `state`, `table` (the A1.2 / A1.6 / A2.3 row), `row` (the recovery or
+finish row that applies next), `rule` (the rule a quarantine names, e.g.
+`type-not-admitted`), `authorizing_state` (the state itself would
+authorize), `current_authorization` (and the lineage is production and no
+test binaries are in use), `test_only`, `unpublished` (`key_dirs`,
+`stores`), and for terminal states `evidence`. `recover` adds `steps`: each
+row it ran, with the state and table that triggered it (the first is its
+classification of the state it found).
+
+| state | meaning |
+| --- | --- |
+| `none` | no active store and no intent |
+| `committed` | `R.active = ptr(L)`; a stale cursor alone never changes it |
+| `needs-recovery` | a torn tail (truncation) or a residual intent (tidy) |
+| `pending` | remote unreachable, or replay-forward needed |
+| `quarantined` | a marker, or a quarantine row of A1.2 / A1.6 / A1.7 / A2.3 |
+| `genesis-pending` | A2.3 rows 4, 6, 7, 8, 9 |
+| `genesis-invalid`, `anchor-mismatch`, `genesis-quarantined` | A2.3 rows 1, 2, and 3/10/11 with `active` absent: terminal |
+| `regenesis-pending` | remote unreachable, or abandon/complete on exact state |
+| `regenesis-invalid`, `regenesis-quarantined` | the intent does not validate (or its new store directory is missing), or the remote is neither the recorded old commit nor the intent's exact new one: fail closed, both stores untouched |
+| `active-invalid` | the active marker or the lineage does not load |
+
+Writer exit codes: 0 ok, 2 usage, 3 lock busy, 4 refused, 5 pending or needs
+recovery, 6 quarantined, 7 terminal, 8 dormant row, 9 environment, 10
+`approval.consume`, 11 TTY or challenge, 12 invalid, 137 test crash point.
+The verifier uses 0, 5, 6, 7, 9, and 12 with the same meanings.
+
+### Rows and tokens
+
+`registry.py` holds all 26 rows (tg:809-829 and A1.3) with their six columns
+as the accepted matrix writes them, and the exclusions X1-X7 of tg:874-880 in
+their written order (X7 on every derived row). 0a.2 admits genesis,
+rotation, revocation, head advance, torn-frame truncation, replay-forward,
+tidy, quarantine, and re-genesis; the other 17 rows are dormant.
+`loop-authority submit <row>` refuses every dormant row with
+`dormant-row:<row>` (exit 8) and `approval.consume` (exit 10) before touching
+anything. Tokens come only from `store.begin` (ceremonies), `store.child`
+(compound children), and `store.begin_recovery` / `store.begin_finish`
+(only `recover._mint` calls them), whose one input is a plan object
+`observe()` issued: no path accepts a caller-built binding. Minting spends
+the plan (a replayed plan is refused), requires the local state it
+observed, and observes the files and the remote afresh; only when that
+observation decides the same row, parameters, and remote evidence is the
+binding derived -- the row, the observed local state, the remote tip
+verified by content (or that the remote was not read, which only a
+quarantine decided from local files alone may carry), and the row's exact
+sink parameters (a finish token's targets come from the validated intent).
+Every destructive sink re-proves it from the files and the remote; the
+quarantine marker is written only after one more fresh observation names
+its offending position and rule. The revocation of an epoch binds that
+epoch's prior state as observed in the store's own log, the active epoch,
+and its record's sequence and offset; its `store-quarantine` child opens
+only when that state was `active`, and writes only the marker
+`{store_id, rule: active-epoch-revoked, position: {seq}}` of that record,
+after checking that the log holds the bound, read-back revocation record
+revoking its own sealing epoch from `active`. Every token-checked sink is
+in `store.SINK_FUNCTIONS`; each grants itself a one-shot permit that the
+low-level write or `tools.run` consumes.
+
+### Test seams (`LOOP_AUTHORITY_TEST=1` only)
+
+`file://` remotes; `LOOP_AUTHORITY_CRASH_AT=<point>` (`after-intent-fsync`,
+`frame-byte-<n>`, `after-frame-fsync`, `after-push`, `after-readback`,
+`after-intent-remove`, `genesis-step-<1..5>`, `genesis-step-6a`,
+`genesis-step-6b`, `regenesis-step-<1..5>`, for genesis and rotation
+`after-store-dir` and `key-step-<1..53>`, and in recovery
+`recovery-after-delimiter`), whose only effect is `os._exit(137)`; and `LOOP_AUTHORITY_TEST_BIN_DIR` (wrapper fixtures searched
+before the binary allowlist; refused for every mutation of a production
+lineage -- genesis before it creates a key or an intent, recovery, and every
+ceremony -- so a lineage a test seam touched is test forever; read-only
+classification may use it and then reports `test_only`).
