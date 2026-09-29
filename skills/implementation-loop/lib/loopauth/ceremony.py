@@ -13,7 +13,9 @@ sysctl kern.bootsessionuuid and start_time the process's p_starttime in
 microseconds (sysctl CTL_KERN, KERN_PROC, KERN_PROC_PID via ctypes); on
 Linux /proc/sys/kernel/random/boot_id and field 22 of /proc/<pid>/stat
 (clock ticks since boot). Either unreadable refuses the ceremony; there is
-no coarser fallback, and no environment variable skips the TTY check.
+no coarser fallback, and no environment variable skips the TTY check. An
+unreadable ttyname(0), or a terminal read or write that fails during the
+challenge, refuses the same way (exit 11, naming the failed read or write).
 """
 
 from __future__ import annotations
@@ -156,12 +158,23 @@ def challenge(envelope: dict) -> None:
     exact echo."""
     require_tty()
     code = secrets.token_hex(CHALLENGE_HEX // 2)
-    _write("olddonkey-loop authority ceremony (operator-TTY session; this is not human "
-           "approval)\n")
-    _write("envelope: " + canonical.canonical(envelope).decode("utf-8") + "\n")
-    _write(f"challenge: {code}\n")
-    _write("type the challenge to proceed: ")
-    answer = _read_line()
+    # The terminal can fail mid-exchange (EIO on a hung-up pty): the TTY-class
+    # refusal naming the failed read or write, never a traceback. Nothing has
+    # been begun yet.
+    try:
+        _write("olddonkey-loop authority ceremony (operator-TTY session; this is not human "
+               "approval)\n")
+        _write("envelope: " + canonical.canonical(envelope).decode("utf-8") + "\n")
+        _write(f"challenge: {code}\n")
+        _write("type the challenge to proceed: ")
+    except OSError as error:
+        raise store.AuthorityError("tty-write", f"cannot write the challenge to the terminal "
+                                   f"(fd 1): {error}", store.EXIT_TTY) from error
+    try:
+        answer = _read_line()
+    except OSError as error:
+        raise store.AuthorityError("tty-read", f"cannot read the challenge echo from the terminal "
+                                   f"(fd 0): {error}", store.EXIT_TTY) from error
     if answer.rstrip(b"\r\n") != code.encode("ascii") or not answer.endswith(b"\n"):
         raise store.AuthorityError("challenge", "the challenge was not echoed exactly",
                                    store.EXIT_TTY)
@@ -204,12 +217,20 @@ def run(kind: str, options: dict) -> dict:
         raise store.AuthorityError("usage", f"unknown ceremony {kind!r}", store.EXIT_USAGE)
     require_tty()
     store.configure_crash(kind)
+    # Either principal read failing (an OSError included: macOS's ttyname
+    # returns ERANGE under heavy pty allocation) is the TTY-class refusal
+    # naming the failed read, before the lock, any key, intent, frame, or
+    # push.
     try:
         token = start_token()
-    except StartTokenError as error:
+    except (StartTokenError, OSError) as error:
         raise store.AuthorityError("start-token", f"cannot read the session start token: {error}",
                                    store.EXIT_TTY) from error
-    tty = os.ttyname(0)
+    try:
+        tty = os.ttyname(0)
+    except OSError as error:
+        raise store.AuthorityError("tty-name", f"cannot read the terminal's name (ttyname(0)): "
+                                   f"{error}", store.EXIT_TTY) from error
     principal = principal_for(tty, token)
     with store.WriterLock():
         if kind == "genesis":

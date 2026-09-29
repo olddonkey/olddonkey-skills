@@ -23,7 +23,11 @@
 #   epoch it observed;
 # - every dormant row and approval.consume is refused with its distinct
 #   error; every admissible row's validator, exclusion, and transition is
-#   driven positively and negatively.
+#   driven positively and negatively;
+# - every ceremony refuses with exit 11 naming the failed read, never a
+#   traceback, when os.ttyname, a start-token read, or the challenge's
+#   terminal I/O raises OSError, and mutates nothing (the terminal simulated
+#   in-process).
 #
 # Fixture stores are made in-process by the ceremony core with the TTY
 # challenge stubbed (this suite tests the registry and tokens, not the
@@ -1672,6 +1676,132 @@ def main_revocation():
     tools.cleanup()
 
 
+def main_principal_reads():
+    """Every ceremony fails closed when a principal field or the terminal
+    cannot be read: an OSError from os.ttyname (macOS returns ERANGE under
+    heavy pty allocation), from a start-token read, or from the challenge's
+    terminal read or write is the TTY-class refusal (exit 11) naming the
+    failed read, never a traceback, before any key, intent, frame, or push:
+    the store, the remote, and the authority directory stay byte-identical.
+    The terminal is simulated in this process only (isatty, the start-token
+    reads, ttyname, and fd 0 / fd 1 I/O replaced here); the real ceremony.run
+    and challenge run."""
+    import errno
+    import importlib
+
+    m, remote, url = fresh_store("principal-reads")
+    store, tools = m["store"], m["tools"]
+    ceremony = importlib.reload(m["ceremony"])  # the real challenge (fresh_store stubs it)
+    real = {"isatty": os.isatty, "ttyname": os.ttyname, "read": os.read, "write": os.write}
+    fixture_home = os.environ["HOME"]
+    begun = []
+    real_begin = store.begin
+
+    def tree(root):
+        """Every entry below root (and root itself): path, mode, and bytes."""
+        if not os.path.lexists(root):
+            return None
+        entries = []
+        for current, dirs, files in os.walk(root):
+            dirs.sort()
+            for name in sorted(dirs + files):
+                full = os.path.join(current, name)
+                info = os.lstat(full)
+                data = open(full, "rb").read() if os.path.isfile(full) and info.st_mode & 0o400 else b""
+                entries.append((os.path.relpath(full, root), oct(info.st_mode), hashlib.sha256(data).hexdigest()))
+        return oct(os.lstat(root).st_mode), entries
+
+    def state(remote_path):
+        return tree(store.root()), tree(remote_path), remote_ref(remote_path)
+
+    def attempt(kind, options):
+        """ceremony.run as the entry point sees it: (code, exit, message) of
+        its refusal, or the class of anything else (a traceback there)."""
+        try:
+            ceremony.run(kind, options)
+        except store.AuthorityError as error:
+            return error.code, error.exit_code, error.message
+        except Exception as error:  # noqa: BLE001
+            return type(error).__name__, None, str(error)
+        return "not refused", None, ""
+
+    def failing(number):
+        def fail(*_args):
+            raise OSError(number, os.strerror(number))
+        return fail
+
+    def on_fd(fd, replacement, original):
+        return lambda target, *args: replacement(target, *args) if target == fd else original(target, *args)
+
+    os.isatty = lambda fd: fd in (0, 1) or real["isatty"](fd)
+    ceremony.read_boot_id = lambda: "TESTBOOT-0000"
+    ceremony.read_start_time = lambda pid: 1
+    store.begin = lambda *args, **kw: begun.append(args[0]) or real_begin(*args, **kw)
+    options = {"genesis": {"remote": url, "epoch": None}, "rotate": {"remote": None, "epoch": None},
+               "revoke": {"remote": None, "epoch": 1}, "regenesis": {"remote": None, "epoch": None}}
+    try:
+        before = state(remote)
+        emit("principal reads: the committed fixture has an authority directory and a remote anchor",
+             before[0] is not None and before[2].strip() != b"", before[2])
+        os.ttyname = failing(errno.ERANGE)
+        for kind in ceremony.CEREMONY_ROWS:
+            got = attempt(kind, options[kind])
+            emit(f"principal reads: {kind} refuses with exit 11 naming the failed read when os.ttyname raises "
+                 "OSError(ERANGE), not a traceback",
+                 got[:2] == ("tty-name", 11) and "cannot read the terminal's name (ttyname(0))" in got[2]
+                 and os.strerror(errno.ERANGE) in got[2], got)
+            emit(f"principal reads: the refused {kind} began no ceremony token, and the store, the remote, and the "
+                 "authority directory are byte-identical", not begun and state(remote) == before, begun)
+        os.ttyname = lambda fd: "/dev/ttys000"
+        for label, name in (("boot id", "read_boot_id"), ("start time", "read_start_time")):
+            stub = getattr(ceremony, name)
+            setattr(ceremony, name, failing(errno.EIO))
+            try:
+                got = attempt("rotate", options["rotate"])
+            finally:
+                setattr(ceremony, name, stub)
+            emit(f"principal reads: an OSError from the {label} read refuses with exit 11 naming the failed read, not "
+                 "a traceback", got[:2] == ("start-token", 11) and "cannot read the session start token" in got[2],
+                 got)
+            emit(f"principal reads: the {label} refusal began nothing and changed nothing",
+                 not begun and state(remote) == before, begun)
+        shown = []
+        for label, code, read, write in (
+                ("read of the echo", "tty-read", on_fd(0, failing(errno.EIO), real["read"]),
+                 on_fd(1, lambda fd, data: shown.append(bytes(data)) or len(data), real["write"])),
+                ("write of the challenge", "tty-write", real["read"], on_fd(1, failing(errno.EIO), real["write"]))):
+            os.read, os.write = read, write
+            try:
+                got = attempt("rotate", options["rotate"])
+            finally:
+                os.read, os.write = real["read"], real["write"]
+            emit(f"terminal I/O: an OSError on the challenge's {label} refuses with exit 11 naming it, not a traceback",
+                 got[:2] == (code, 11) and os.strerror(errno.EIO) in got[2], got)
+            emit(f"terminal I/O: the refused {label} began nothing and changed nothing",
+                 not begun and state(remote) == before, begun)
+        emit("terminal I/O: the read failure came after the challenge was shown",
+             any(b"challenge: " in chunk for chunk in shown), shown[-2:])
+        # genesis in a HOME with no authority directory yet: the principal
+        # refusal comes before the writer lock creates the layout
+        base = os.path.join(TMP, "principal-reads-empty")
+        os.makedirs(os.path.join(base, "home"))
+        empty = os.path.join(base, "remote.git")
+        git("init", "--bare", "-q", empty)
+        os.environ["HOME"] = os.path.join(base, "home")
+        before_empty = state(empty)
+        os.ttyname = failing(errno.ERANGE)
+        got = attempt("genesis", {"remote": "file://" + empty, "epoch": None})
+        emit("principal reads: genesis into an empty HOME refuses with exit 11 when os.ttyname raises OSError(ERANGE)",
+             got[:2] == ("tty-name", 11), got)
+        emit("principal reads: the refused genesis created no authority directory and left the remote unchanged",
+             not begun and before_empty[0] is None and state(empty) == before_empty, (begun, state(empty)[0]))
+    finally:
+        os.isatty, os.ttyname, os.read, os.write = real["isatty"], real["ttyname"], real["read"], real["write"]
+        store.begin = real_begin
+        os.environ["HOME"] = fixture_home  # the scratch space cleanup() removes is the fixture's
+    tools.cleanup()
+
+
 def base64_frame(intent):
     import base64
     return base64.b64decode(intent["frame_b64"])
@@ -1807,10 +1937,10 @@ def run(function):
 {"static": lambda: run(main_static), "tokens": lambda: run(main_tokens),
  "planted-run": lambda: run(main_planted_run), "validators": lambda: run(main_validators),
  "recovery": lambda: run(main_recovery), "revocation": lambda: run(main_revocation),
- "child": child_ceremony}[MODE]()
+ "principal-reads": lambda: run(main_principal_reads), "child": child_ceremony}[MODE]()
 PY
 
-for mode in static validators tokens planted-run recovery revocation; do
+for mode in static validators tokens planted-run recovery revocation principal-reads; do
   python3 "$TMP_ROOT/rs.py" "$mode" "$LIB" "$TMP_ROOT" > "$TMP_ROOT/$mode.tsv" 2> "$TMP_ROOT/$mode.stderr"
   status=$?
   tally "$TMP_ROOT/$mode.tsv" "$TMP_ROOT/$mode.stderr" "$status" "registry $mode checks"

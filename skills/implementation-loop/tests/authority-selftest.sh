@@ -28,6 +28,9 @@
 # or exactly n + 1 bytes (n its final byte), is discarded and retried, up to
 # 50 runs, and no other offset is ever tried or credited. "last" is credited
 # only to a real crash at its own frame's final byte, whatever its length.
+# A run that refused on a principal read (exit 11 naming ttyname(0) or the
+# start token, nothing written) is an environment failure: discarded and
+# retried within the same 50, never credited; any other exit fails the cut.
 # Every distinct real frame the runs wrote (by length, per kind) is then
 # swept by the offline classifier over every prefix 1 .. length - 1, and the
 # run prints each kind's planned range, "last", and the lengths swept.
@@ -3625,14 +3628,19 @@ def matrix_cut(slot, kind, cut, size, base_log, base_tip, produced):
     frame's final byte: each run aims at the final byte of the last length
     seen (the plan's size first), and a run whose frame had another length
     is discarded unchecked and the next aims at its length, up to
-    MATRIX_ATTEMPTS. produced(intent) is called with every crashed run's
-    intent, checked or discarded, for the classifier sweep.
+    MATRIX_ATTEMPTS. A run that ended in the TTY-class refusal of a
+    principal read (rc 11, MATRIX_PRINCIPAL_READ, no intent) is an
+    environment failure: discarded unchecked and retried within the same
+    MATRIX_ATTEMPTS, never credited; any other exit fails the cut at once.
+    produced(intent) is called with every crashed run's intent, checked or
+    discarded, for the classifier sweep.
     Returns (ok, detail, the checked run's evidence (kind, frame length,
     crash offset measured on disk), or None when no run was checked)."""
     case = slot.case
     args = ("genesis", "--remote", case.url) if kind == "genesis" else ("rotate",)
     n = size - 1 if cut == "last" else cut
     seen = {}
+    refusals = 0
     for _attempt in range(MATRIX_ATTEMPTS):
         slot.restore()
         result = case.ceremony(*args, env={"LOOP_AUTHORITY_CRASH_AT": f"frame-byte-{n}"})
@@ -3647,6 +3655,13 @@ def matrix_cut(slot, kind, cut, size, base_log, base_tip, produced):
                 break
             # "last": byte n of a longer frame, not its final byte; byte n: this
             # run's final byte (unterminated), not a torn prefix
+        elif result.rc == 11 and intent is None and MATRIX_PRINCIPAL_READ.fullmatch(result.out.strip()):
+            # the ceremony could not read its terminal's name or start token
+            # (macOS's ttyname returns ERANGE under heavy pty allocation) and
+            # refused before writing: an environment failure of this run,
+            # discarded unchecked and retried, never credited
+            refusals += 1
+            continue
         else:
             outside = MATRIX_OUTSIDE.search(result.out) if result.rc == 4 else None
             if outside is None or int(outside.group(1)) != n:
@@ -3658,9 +3673,11 @@ def matrix_cut(slot, kind, cut, size, base_log, base_tip, produced):
     else:
         if cut == "last":
             return False, (f"not credited: no run in {MATRIX_ATTEMPTS} crashed at its own frame's final byte "
-                           f"(other frame lengths seen: {seen})"), None
-        return False, (f"not credited: every one of {MATRIX_ATTEMPTS} runs had a frame too short for a torn "
-                       f"byte {n} (under {n + 2} bytes; frame lengths seen: {seen})"), None
+                           f"(other frame lengths seen: {seen}; runs refused on a principal read: "
+                           f"{refusals})"), None
+        return False, (f"not credited: no run in {MATRIX_ATTEMPTS} had a frame long enough for a torn byte {n} "
+                       f"(at least {n + 2} bytes; frame lengths seen: {seen}; runs refused on a principal read: "
+                       f"{refusals})"), None
     last = n == len(frame_bytes) - 1
     frames, _end = parse_frames(frame_bytes)
     frame_type = frames[0]["type"] if frames else None
@@ -3716,6 +3733,10 @@ MATRIX_KIND_OF = {frame_type: kind for kind, frame_type in MATRIX_FRAME_TYPES.it
 MATRIX_ATTEMPTS = 50
 # The seam's refusal of a frame-byte-<n> not strictly inside the frame (rc 4).
 MATRIX_OUTSIDE = re.compile(r"frame-byte-([0-9]+) is not strictly inside a ([0-9]+)-byte frame")
+# The ceremony's TTY-class refusal (rc 11) naming a principal read that failed,
+# as the whole of a run's output: an environment failure of that run.
+MATRIX_PRINCIPAL_READ = re.compile(r"error: (?:tty-name: cannot read the terminal's name \(ttyname\(0\)\)"
+                                   r"|start-token: cannot read the session start token): [^\n]*")
 SHARD_FILE = re.compile(r"cut-ids-([1-9][0-9]*)-of-([1-9][0-9]*)\.txt")
 # One credited cut per line of a cut-ids file: the planned id, then the
 # checked run's actual frame kind, frame length, and crash offset.
@@ -4066,7 +4087,8 @@ def s_matrix_coverage_selftest():
     frames are the planned length or longer; one cut credited with evidence
     that does not credit it (a numeric id at its frame's final byte
     included), one cut missing, or a numeric id for the planned final byte,
-    fails."""
+    fails. A scripted run that exits 11 refusing a principal read is retried
+    within the bound and never credited; any other exit fails the cut."""
     sizes = {"genesis": 6, "rotation": 5}
     ids = matrix_cut_ids(sizes)
     emit("crash matrix coverage check: the enumerator plans bytes 1 .. N - 2 of each frame (torn prefixes), then "
@@ -4118,6 +4140,52 @@ def s_matrix_coverage_selftest():
     failed = verdict(longer=2)
     emit("crash matrix coverage check: 3 shard lists whose every run had a frame 2 bytes longer than planned (byte "
          "n at offset n, last at the longer frame's final byte) pass", not failed, failed)
+
+    class Scripted:
+        """A matrix slot whose ceremony runs return scripted results in turn,
+        cycling (no process, nothing written: no intent)."""
+
+        def __init__(self, *results):
+            self.results, self.calls = results, 0
+            self.case, self.url = self, "file:///matrix-coverage-check.git"
+
+        def restore(self):
+            pass
+
+        def ceremony(self, *_args, env=None):
+            self.calls += 1
+            return self.results[(self.calls - 1) % len(self.results)]
+
+        def genesis_intent(self):
+            return None
+
+        def intent(self):
+            return None
+
+    tty_name = Res(11, "error: tty-name: cannot read the terminal's name (ttyname(0)): [Errno 34] Result too large\n",
+                   "")
+    start = Res(11, "error: start-token: cannot read the session start token: sysctl KERN_PROC_PID failed\n", "")
+    traceback_run = Res(1, "Traceback (most recent call last):\nOSError: [Errno 5] Input/output error\n", "")
+    challenge = Res(11, "error: challenge: the challenge was not echoed exactly\n", "")
+    for kind, cut in (("rotation", "last"), ("genesis", 3)):
+        slot = Scripted(tty_name, start)
+        ok, detail, evidence = matrix_cut(slot, kind, cut, sizes[kind], b"", None, lambda intent: None)
+        emit(f"crash matrix retry: {kind} frame-byte-{cut} runs that each exit 11 refusing a principal read (the "
+             f"terminal's name, the start token) are discarded and retried up to {MATRIX_ATTEMPTS} runs, never "
+             "credited", not ok and evidence is None and slot.calls == MATRIX_ATTEMPTS
+             and detail.startswith("not credited") and f"principal read: {MATRIX_ATTEMPTS})" in detail,
+             (slot.calls, detail))
+    for label, results, calls in (
+            ("an exit-11 terminal-name refusal, then a traceback (exit 1): retried once, then the traceback fails "
+             "the cut", (tty_name, traceback_run), 2),
+            ("an exit-11 refusal that names no principal read (the challenge): fails the cut at once",
+             (challenge,), 1),
+            ("an exit-11 terminal-name refusal followed by a traceback in the same run: fails the cut at once",
+             (Res(11, tty_name.out + traceback_run.out, ""),), 1)):
+        slot = Scripted(*results)
+        ok, detail, evidence = matrix_cut(slot, "rotation", "last", sizes["rotation"], b"", None, lambda intent: None)
+        emit(f"crash matrix retry: {label}", not ok and evidence is None and slot.calls == calls
+             and detail.startswith("the crashed ceremony exited"), (slot.calls, detail))
 
 
 MATRIX = {}
