@@ -443,8 +443,9 @@ temp directory, subprocess writer):
   `frame-byte-<n>`), each landing on its A2.3 row: before `genesis.intent` is
   durable only an inert directory remains; with the intent, `active` absent,
   and frame 1 **none or torn** and the ref absent, recovery abandons (the
-  intent-named directory discarded, the intent removed, a new genesis
-  succeeds); frame 1 **unterminated** with the ref absent is completed by
+  intent removed; the intent-named directory byte-identical and reported
+  unpublished; a new genesis succeeds with a fresh store id); a **missing**
+  intent-named directory is row 1 (`genesis-invalid`, nothing mutated); frame 1 **unterminated** with the ref absent is completed by
   delimiter completion plus replay-forward, and with the exact ref is
   quarantine; frame 1 **valid** with the ref absent is replayed and completed,
   and with the exact ref is completed; every other case and vector listed in
@@ -452,8 +453,7 @@ temp directory, subprocess writer):
   6a–6b cut, unreachable remote, unrelated or badly signed pointers, a ref
   deleted after success) lands on its row with its exact status; with an otherwise valid same-row token, a key
   sink given another `key_dir` or an existing key file, the `active` sink
-  given another target, and the discard sink given another directory are
-  refused; A2.4's ceremony token is refused on any other sink;
+  given another target are refused; A2.4's ceremony token is refused on any other sink;
 - bootstrap terminal states: after each of `genesis-invalid`,
   `anchor-mismatch`, and `genesis-quarantined`, every ceremony and every row
   is refused with no mutation, `status` names the state and its evidence,
@@ -758,4 +758,24 @@ accepted at round 3 of thread `01a0ec41`): gesture-nonce issuance dormant
 until unit 4, the activation boundary on every record type with
 `type-not-admitted` decided before body schema, and the crash point
 `recovery-after-delimiter`.
+
+## 25. Clarifications from implementation review (2026-09-29)
+
+Settled by the judge during the 0a.2 implementation's cross-review (Codex
+gpt-6-sol / max), to be confirmed with 0a.2's next specification review:
+
+- **Abandonment deletes nothing.** A2.3 row 6's only sink is the intent's
+  removal; the abandoned directory stays, permanently unpublished (A2.3,
+  A2.4). A missing intent-named directory is unexplained and therefore
+  A2.3 row 1 (`genesis-invalid`, fail closed): nothing in the protocol
+  removes one, so its absence cannot show that frame 1 was never durable.
+- **"Every cut" for revocation and re-genesis** means every named crash point
+  of those protocols, each run as a real crash. The **frame-byte** cuts, which
+  exercise the one shared frame writer, run as real crashes at **every** byte
+  of genesis frame 1 and of a rotation frame, and at sampled bytes (with the
+  classifier over every byte) for revocation and re-genesis frames.
+- **The full crash matrix is a required check on the exact candidate
+  commit.** It runs in CI on every pull request as parallel shards whose union
+  is the whole matrix (a shard failing, or the union missing a cut, fails the
+  check); the judge also runs it whole on the host before publishing.
 

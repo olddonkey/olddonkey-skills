@@ -179,7 +179,9 @@ such a genesis would hide a push that succeeded and was then deleted.
   validates the log first. Frame 1 is classified against the intent's
   offset, length, and digest, as A1.6 classifies a tail:
 
-  - **none** — the log is empty;
+  - **none** — the log is empty (a **missing** intent-named directory is not
+    "none": nothing in the protocol removes it, so its absence is
+    unexplained and the state is row 1);
   - **torn** — the log is a strict prefix of the intent's frame bytes;
   - **unterminated** — the log equals the intent's frame bytes minus only the
     final delimiter, and the header and payload validate;
@@ -211,7 +213,7 @@ such a genesis would hide a push that succeeded and was then deleted.
   | 3 | `active` absent or the intent's store | nonconforming | — | **quarantine** (A1.6) of the intent-named store |
   | 4 | as row 3 | none, torn, unterminated, or valid | unreachable | **pending**: no mutation, no token; retried when reachable |
   | 5 | `active` = the intent's store | any | ref absent | **quarantine**: the readback had verified the push before 6a, so an absent ref is a rollback of the remote |
-  | 6 | `active` absent | none or torn | ref absent | **abandon**: discard the intent-named directory, remove the intent |
+  | 6 | `active` absent | none or torn | ref absent | **abandon**: remove the intent — the one sink; the intent-named directory is thereby **discarded**, i.e. left permanently unpublished (named by neither `active` nor any intent, never read as authority, reported by `status`), and nothing is deleted or renamed |
   | 7 | `active` absent | unterminated | ref absent | **pending**; validate, then **delimiter completion + anchor replay-forward** (A1.6's compound) of the intent's exact commit; then steps 5–6 |
   | 8 | `active` absent | valid | ref absent | **pending**; **anchor replay-forward** of the intent's exact commit — the absent ref plays `ptr(L − 1)` for `L = 1` **only** in rows 7–8 — then steps 5–6 |
   | 9 | `active` absent or the intent's store | valid | exactly the intent's `anchor_commit`, whose `anchor.json` is byte-equal to the intent's and verifies under the root introduced by that store's genesis record | **complete**: step 5, then 6a if `active` is absent, then 6b |
@@ -272,12 +274,16 @@ nothing and fails closed.
 
 The token authorizes **only** that protocol's completion or abandonment sinks
 — the active marker, the old store's archive move and read-only change,
-intent removal, and discarding exactly the intent-named unpublished directory
-— never a key, a seal, a frame, or a push (A2.3's re-push is the ordinary
+and intent removal — never a key, a seal, a frame, or a push. **Discarding**
+an abandoned ceremony's directory (A1.3's "the new directory is discarded",
+A2.3 row 6) needs no sink of its own: once the intent that named it is gone,
+the directory is permanently unpublished and never read; nothing deletes or
+renames it (A2.3's re-push is the ordinary
 anchor replay-forward row with its own recovery token).
 
-**Tests** (added to A1.5's list): a ceremony token on any other sink, bound to
-another observed state, or for another directory, refused; no token minted
+**Tests** (added to A1.5's list): a ceremony token on any other sink or bound
+to another observed state refused; after abandonment the directory is
+byte-identical and reported unpublished; no token minted
 for a valid-but-unrelated pointer or an advanced old-generation pointer;
 completion with the pre-ceremony ref, and abandonment after the commit point,
 refused; a genesis ref deleted after a successful push and a crash is
