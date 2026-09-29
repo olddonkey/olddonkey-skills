@@ -55,6 +55,7 @@ jobs:
           bash -n skills/implementation-loop/tests/authority-selftest.sh
           bash -n skills/implementation-loop/tests/registry-selftest.sh
           bash -n skills/implementation-loop/tests/refs-selftest.sh
+          bash -n skills/implementation-loop/tests/falsifier-selftest.sh
           bash -n skills/implementation-loop/tests/shim-selftest.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
@@ -115,6 +116,8 @@ jobs:
         run: python3 skills/implementation-loop/tests/refs-review-selftest.py
       - name: Claimed-reference verification selftest
         run: bash skills/implementation-loop/tests/refs-selftest.sh
+      - name: Falsifier
+        run: bash skills/implementation-loop/tests/falsifier-selftest.sh
       - name: Console selftest
         run: bash skills/implementation-loop/tests/console-selftest.sh
       - name: Calibration selftest
@@ -249,19 +252,23 @@ jobs:
           print(f"relative-links: PASS ({checked} links across {len(paths)} files)")
           PY
 
-  # The authority crash matrix: every frame-byte cut of genesis frame 1 and of
-  # an epoch-rotation frame. A frame's length follows the ceremony's pid, tty,
-  # and start-time digits, so one plan job probes the two planned sizes N and
-  # every shard enumerates the same cut list from them: <kind>:frame-byte-n
-  # for n from 1 to N - 2 (torn prefixes), then <kind>:frame-byte-last. A
-  # run's frame need not be N bytes long. A shard credits byte n only to a
-  # real crash of that kind at exactly offset n of a frame of at least n + 2
-  # bytes, so n is never the final byte, and "last" only to a crash at its
-  # own frame's final byte; other runs are discarded and retried (up to 50),
-  # then the cut fails. Each shard records every credited cut's evidence
-  # (kind, frame length, crash offset), which the coverage job checks against
-  # the plan, and prints a classifier sweep over every prefix of each real
-  # frame its runs wrote, which the coverage job does not need.
+  # The authority crash matrix: every frame-byte cut of genesis frame 1, of
+  # an epoch-rotation frame, and of the active epoch's revocation frame (the
+  # compound with its quarantine: each cut must recover to the record and the
+  # exact quarantine marker, or neither with the old epoch still active). A
+  # frame's length follows the ceremony's pid, tty, and start-time digits, so
+  # one plan job probes the three planned sizes N and every shard enumerates
+  # the same cut list from them: <kind>:frame-byte-n for n from 1 to N - 2
+  # (torn prefixes), then <kind>:frame-byte-last. A run's frame need not be N
+  # bytes long. A shard credits byte n only to a real crash of that kind at
+  # exactly offset n of a frame of at least n + 2 bytes, so n is never the
+  # final byte, and "last" only to a crash at its own frame's final byte;
+  # other runs are discarded and retried (up to 50), then the cut fails. Each
+  # shard records every credited cut's evidence (kind, frame length, crash
+  # offset), which the coverage job checks against the plan, and prints a
+  # classifier sweep over every prefix of each real frame its runs wrote,
+  # which the coverage job does not need. Re-genesis frames keep sampled real
+  # bytes and the full classifier sweep in the default authority selftest.
   crash-matrix-plan:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -269,13 +276,13 @@ jobs:
       sizes: ${{ steps.plan.outputs.sizes }}
     steps:
       - uses: actions/checkout@v4
-      - name: Probe the two frames the crash matrix enumerates
+      - name: Probe the three frames the crash matrix enumerates
         id: plan
         run: |
           set -o pipefail
           bash skills/implementation-loop/tests/authority-selftest.sh --crash-matrix --plan | tee plan.log
           sizes="$(sed -n 's/^# crash matrix sizes=//p' plan.log)"
-          [[ "$sizes" =~ ^[1-9][0-9]*,[1-9][0-9]*$ ]]
+          [[ "$sizes" =~ ^[1-9][0-9]*,[1-9][0-9]*,[1-9][0-9]*$ ]]
           echo "sizes=$sizes" >> "$GITHUB_OUTPUT"
 
   crash-matrix:

@@ -1066,3 +1066,88 @@ space. Invalid input leaves no new cache directory. Valid observations may leave
 the parent `$HOME/.cache/olddonkey-loop/tmp` directory after their scratch entries
 are cleaned; “read-only” refers to authority, journal and remote contents. The
 canonical report is written as UTF-8 bytes, independent of stdout's locale codec.
+
+### The named falsifier (sub-unit 0a.4)
+
+`tests/falsifier-selftest.sh` states the Phase A falsifier over the final 0a
+tree as six claims, each its own set of checks, and fails if any fails. It
+adds nothing to the writer.
+
+- **F1** every mutation sink is reachable only through an admitted row: the
+  registry suite's AST scan re-run, an exact map from each sink in
+  `store.SINK_FUNCTIONS` to the row transaction drivers that call it (every
+  `lib/loopauth` module and `loop-authority.py`), the independent verifier's
+  five argv forms and its writes (confined to its own temporary directory),
+  its complete fetch argv and git environment for `file://`, SSH, and HTTPS
+  remotes (its transport plan, against frozen forms), the journal scripts'
+  imports, and six planted bypasses that must each fail. The scans of
+  `loop-authority.py` and the verifier resolve every import and attribute
+  chain against the real modules, so a primitive is caught however it is
+  spelled (`import os as o; o.system`, `os.path.os.system`, `posix.system`,
+  or taken as a value and called later), and refuse import renames, modules
+  used as values, and dynamic attribute access outright; planted aliases in
+  each must fail. The entry's loopauth accesses are frozen: every attribute
+  of every loopauth module `loop-authority.py` reads, followed through each
+  alias (`mods["store"]`, a local name, a local function's parameter),
+  equals a frozen table that names no private helper, token constructor or
+  minter, sink, or validator, and under any receiver it names no private
+  attribute, no loopauth module, and nothing else a loopauth module defines
+  outside that table. Planted bypasses must fail, among them the complete one
+  (`s = mods["store"]` forging an open token through `s._new(s.Token(...))`,
+  `s._grant`, and `s._fs_create`), which is also run through the planted
+  entry to show it writes `authority/active`. The verifier's `Runner.run` is
+  its single frozen `subprocess.run(argv, ...)` statement, and an extra
+  process start planted inside it must fail.
+- **F2** every external entry point maps to exactly one row: a frozen table
+  equal to the real parser's subcommands and ceremony names; `recover` maps
+  to the recovery routine, and for every case of the crash matrix its
+  ordered token trace equals a frozen one; `status`, `verify`, `refs`,
+  `submit`, and the verifier change nothing in any state.
+- **F3** derived-only rows have no external entry point, and each compound
+  child (the revocation's quarantine, replay-forward's delimiter completion,
+  the head advance) refuses no token, its parent's own token, another
+  parent's token, and a spent parent token.
+- **F4** no generic sealing or append hatch: sealing and the frame append
+  only from the row's driver, the record type fixed by the row and validated
+  first -- the row's `registry.validate` dominates `prepare_record`: it runs
+  on every path to the record, unconditionally and with its refusal
+  propagating (a validator under `if False:`, in a try that swallows it, in a
+  with, or in a nested function must fail), and that validator is the
+  registry module's (a stand-in bound to `registry` in `lib/loopauth`, or
+  the entry replacing `mods["registry"].validate` through any alias or
+  rebinding another module's `registry`, must fail); every dormant row,
+  `approval.consume`, and every type
+  `ALLOWED["tg-v1.0a"]` does not admit are refused (`type-not-admitted`).
+  The suite prints `escape-hatch: none` only when no check needs an
+  exception.
+- **F5** no recovery invents authority: after recovery every record and
+  anchor pointer is byte-equal to one durable before it (the log, or the
+  interrupted transaction's intent), no key file changes, and recovery never
+  signs.
+- **F6** compound transitions never come apart: every cut of revocation +
+  quarantine, delimiter completion + replay-forward (including the
+  `recovery-after-delimiter` crash point and a failed push there), genesis
+  completion, and re-genesis completion with its archive move is both parts,
+  neither, or pending -- and pending authorizes nothing (`status`, the
+  verifier, and `refs` agree). Both parts of the active epoch's revocation
+  means the record anchored -- A1.2's compound commits when that pointer is
+  anchored -- with the writer, the verifier, and `refs` classifying the
+  store quarantined by the revocation's rule (`active-epoch-revoked`) at its
+  position and nothing authorizing; the local quarantine marker is only its
+  materialization, so once `recover` has run to completion from every cut
+  the marker must exist with its writer's exact bytes (the ceremony's
+  quarantine child, or recovery's store-quarantine row). Neither means no
+  revocation anchored and the old epoch still active; pending means the
+  writer itself classifies a pending state (its transaction's durable frame
+  or intent not yet resolved by recovery) with nothing authorizing -- never
+  the anchored revocation the writer classifies quarantined. Re-genesis is
+  abandoned only while the
+  remote tip is the recorded old pointer. Planted half-transitions of each
+  must be refused. The every-byte crash matrix
+  (`tests/authority-selftest.sh --crash-matrix`) must enumerate genesis,
+  rotation, and active-epoch revocation frames, checked from its own
+  enumerator. The request compounds are refused in 0a.
+
+The token trace comes from an in-test fixture that runs the real
+`loop-authority.py` with `store._new`, the sinks, `tools.run`, and the crash
+seam wrapped; it is not a writer feature.
