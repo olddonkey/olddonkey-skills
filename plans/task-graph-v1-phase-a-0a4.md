@@ -133,7 +133,12 @@ cut are: **both** parts, **neither** part (the prior state intact), or
 treats as giving **no current authorization at all** (asserted through
 `status`, the verifier, and 0a.3's store state). Never one part accepted as
 current without the other.
-- The two compounds 0a admits, crashed at every cut and every frame byte:
+- The two compounds 0a admits, crashed at every named crash point and at
+  every frame byte in the sense of 0a2 §25 (real crashes at every planned torn
+  byte and the final byte of genesis frame 1, a rotation frame, and an
+  active-epoch revocation frame, in the required crash-matrix job, which F6
+  checks enumerates all three kinds; sampled real bytes plus the classifier
+  over every prefix elsewhere):
   **epoch revocation + quarantine** — both hold, or neither does and the old
   epoch is still active, or the store is pending; **delimiter completion +
   anchor replay-forward** — the completed frame anchored, or the store

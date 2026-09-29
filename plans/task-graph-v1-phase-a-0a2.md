@@ -772,8 +772,9 @@ gpt-6-sol / max), to be confirmed with 0a.2's next specification review:
 - **"Every cut" for revocation and re-genesis** means every named crash point
   of those protocols, each run as a real crash. The **frame-byte** cuts, which
   exercise the one shared frame writer, run as real crashes at **every** byte
-  of genesis frame 1 and of a rotation frame, and at sampled bytes (with the
-  classifier over every byte) for revocation and re-genesis frames.
+  of genesis frame 1, of a rotation frame, and of an active-epoch revocation
+  frame (the compound with quarantine; added with 0a.4's F6), and at sampled
+  bytes (with the classifier over every byte) for re-genesis frames.
 - **What "every byte" proves when frame lengths vary.** A frame's length
   varies by a few bytes between runs because the operator principal's pid,
   tty, and start-time fields have variable digit width (all inside the
