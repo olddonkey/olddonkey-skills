@@ -78,7 +78,9 @@ readback by content, recovery classification without mutation) and reports
 `current` (anchored; not pending, quarantined, or in a bootstrap terminal
 state, A2.3) or `unavailable` with its reason (`absent`, `pending`,
 `remote-unreachable`, `quarantined`, `genesis-invalid`, `anchor-mismatch`,
-`genesis-quarantined`), plus the lineage class (p2 §4). The store state is
+`genesis-quarantined`, and 0a.2's other fail-closed states `active-invalid`
+and `regenesis-invalid`; any classification the map does not list is an
+error), plus the lineage class (p2 §4). The store state is
 context: it never turns a rejected claim into anything else, and in 0a it
 never makes a claim valid. A request-type record cannot be valid in any 0a
 store — A2.1's activation boundary, enforced by 0a.2's writer and verifier
