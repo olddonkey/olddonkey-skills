@@ -586,8 +586,9 @@ append to; nothing here meets task-graph-v1 §3's proof bar."
 
 **Escaping, defined.** Every journal-sourced string is rendered through one
 function, in this order: CR, LF, and tab become a space; `&`, `<`, `>`, `"`,
-`'` become `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&#39;`; then each of
-`` \ ` * _ { } [ ] ( ) # + - . ! | ~ `` is backslash-escaped. No
+`'` become `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;` (Unit 5; originally
+`&#39;`); then each of `` \ ` * _ { } [ ] ( ) # + - . ! | ~ : `` is
+backslash-escaped (`:` added in Unit 5). No
 journal-sourced string is ever emitted as a link, image, or raw HTML; the PR
 URL is printed as escaped text. `--format json` emits the same data as JSON
 with no escaping beyond JSON's own. Output is deterministic. Exit 2 on usage
@@ -733,6 +734,45 @@ selftest never renders a page, and loop-console-v1 shipped an unopenable
 page for that reason — commit `f612848`).
 G: none.
 Gate: full CI plus the browser render.
+
+
+### Unit 5 — record card follow-ups (added 2026-09-28 after Unit 3 shipped)
+
+*Implementer: Opus 5.5 (sandboxed dispatch).*
+
+**Why.** Two defects in Unit 3's card, recorded as follow-ups on its PR:
+
+1. The escaping order this plan specified turns `'` into `&#39;` and then
+   backslash-escapes the `#`, so GitHub shows the literal text `&#39;` where
+   an apostrophe belongs. And `:` is not in the escaped set, so a bare
+   `https://…` value can still be autolinked by GitHub, contradicting "no
+   journal-sourced string is ever emitted as a link".
+2. With no final gate, the "later adverse gates" row reads "no final gate
+   recorded" but carries `strength: recorded` and `attribution: declared`,
+   while the final-gate row in the same state carries `unknown` / `none`.
+
+**Change.**
+- `'` becomes `&apos;` (an HTML5 named reference, which CommonMark decodes to
+  an apostrophe and which contains no escaped punctuation); the rest of the
+  entity step and its order are unchanged.
+- `:` joins the backslash-escaped set, so neither a scheme autolink
+  (`https\://…`) nor a `www.` autolink (the `.` is already escaped) can form.
+- With no final gate, the later-adverse-gates row carries `strength:
+  unknown` and `attribution: none` in both formats.
+- `SKILL.md` and `state-schema.md` wording about the card stays accurate.
+
+C: none.
+M: `skills/implementation-loop/scripts/loop-evidence`,
+`skills/implementation-loop/tests/evidence-selftest.sh`, and this plan's Unit 3
+escaping sentence.
+T: exact-output assertions updated for `'` and `:`; a new exact-output case
+for `https://example.com/a` and `www.example.com`; the no-final-gate case
+asserts `unknown` / `none` on both gate rows in markdown and JSON. **Plus a
+judge-side render check:** the judge sends a card containing those strings to
+GitHub's Markdown API (`gh api markdown`, mode `gfm`) and confirms the HTML
+has no `<a` and shows an apostrophe.
+G: none.
+Gate: full CI.
 
 ---
 
