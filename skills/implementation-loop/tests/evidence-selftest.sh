@@ -531,7 +531,7 @@ Run @RUN@ (status active; journal record complete)
 | final gate | verdict green; policy strict; purpose unit\-final; binding clean; post head 0123456789abcdef0123456789abcdef01234567; round 1 | recorded | declared |
 | later adverse gates | none recorded after the final gate | recorded | declared |
 | recorded SHAs | values match: gate post head 0123456789abcdef0123456789abcdef01234567, publish sha 0123456789abcdef0123456789abcdef01234567 | values match | not applicable |
-| publication | branch feat/u\-green; PR https://example\.invalid/pr/1; sha 0123456789abcdef0123456789abcdef01234567 | recorded | not applicable |
+| publication | branch feat/u\-green; PR https\://example\.invalid/pr/1; sha 0123456789abcdef0123456789abcdef01234567 | recorded | not applicable |
 
 Attribution unclear (counted for no unit): none recorded.
 
@@ -598,16 +598,19 @@ make_card nofinal "$WS_MAIN" --unit u-nofinal
 expect_line nofinal "final gate" '| final gate | no final gate recorded | unknown | none |' \
   "no final gate: the row reads no final gate recorded, strength unknown, attribution none"
 expect_line nofinal "later adverse gates" \
-  '| later adverse gates | no final gate recorded | recorded | declared |' \
-  "no final gate: later adverse gates has nothing to follow"
+  '| later adverse gates | no final gate recorded | unknown | none |' \
+  "no final gate: later adverse gates has nothing to follow, strength unknown, attribution none"
 expect_line nofinal "recorded SHAs" \
   '| recorded SHAs | cannot compare: gate post head not recorded, publish sha 0123456789abcdef0123456789abcdef01234567 | unknown | not applicable |' \
   "no final gate: a focused gate's post head is never compared"
-expect_rows nofinal "$(rows_of "$R_DISPATCHES" "$R_REVIEW" "$R_NO_FINAL" "$R_LATER" \
+expect_rows nofinal "$(rows_of "$R_DISPATCHES" "$R_REVIEW" "$R_NO_FINAL" "$R_NO_FINAL" \
   "$R_SHAS_UNKNOWN" "$R_PUBLISHED")" "no final gate: every row's strength and attribution"
 expect_get nofinal rows.2 \
   '{"row": "final_gate", "strength": "unknown", "attribution": "none", "gate": null}' \
   "no final gate: json final gate row is unknown/none with a null gate"
+expect_get nofinal rows.3 \
+  '{"row": "later_adverse_gates", "strength": "unknown", "attribution": "none", "gates": []}' \
+  "no final gate: json later adverse gates row is unknown/none with no gates"
 
 SHA_ROWS="$(rows_of "$R_DISPATCHES" "$R_REVIEW" "$R_FINAL" "$R_LATER" "$R_SHAS_UNKNOWN" \
   "$R_PUBLISHED")"
@@ -752,11 +755,13 @@ ESC_CASES=(
   "e-script|<script>alert(1)</script>|&lt;script&gt;alert\\(1\\)&lt;/script&gt;"
   "e-amp|a&b&amp;c|a&amp;b&amp;amp;c"
   "e-bslash|back\\slash\\\\|back\\\\slash\\\\\\\\"
-  "e-link|[x](http://e)|\\[x\\]\\(http://e\\)"
-  "e-image|![i](http://e)|\\!\\[i\\]\\(http://e\\)"
+  "e-link|[x](http://e)|\\[x\\]\\(http\\://e\\)"
+  "e-image|![i](http://e)|\\!\\[i\\]\\(http\\://e\\)"
   "e-tick|\`code\`|\\\`code\\\`"
-  "e-quote|\"q\" 'q'|&quot;q&quot; &\\#39;q&\\#39;"
+  "e-quote|\"q\" 'q'|&quot;q&quot; &apos;q&apos;"
   "e-punct|*_{}#+-.!~|\\*\\_\\{\\}\\#\\+\\-\\.\\!\\~"
+  "e-url|https://example.com/a|https\\://example\\.com/a"
+  "e-www|www.example.com|www\\.example\\.com"
 )
 for entry in "${ESC_CASES[@]}"; do
   IFS='|' read -r esc_unit esc_raw _ <<< "$entry"
@@ -812,6 +817,19 @@ then
   pass "escaping: no escaping card contains raw HTML, link or image syntax, CR, or tab"
 else
   fail "escaping: no escaping card contains raw HTML, link or image syntax, CR, or tab"
+fi
+if python3 - "$CARDS" <<'PY'
+import glob, os, re, sys
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "e-*.md"))):
+    text = open(path, encoding="utf-8", newline="").read()
+    match = re.search(r"(?<!\\)://|www\.", text)
+    if match:
+        raise SystemExit(f"{os.path.basename(path)} contains {match.group(0)!r}")
+PY
+then
+  pass "escaping: no escaping card contains an unescaped scheme or www autolink"
+else
+  fail "escaping: no escaping card contains an unescaped scheme or www autolink"
 fi
 
 # ---------------------------------------------------------------------------

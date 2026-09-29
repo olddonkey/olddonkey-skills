@@ -76,7 +76,7 @@ run):
    `bash skills/implementation-loop/tests/contract-negative.sh`, and
    `bash skills/implementation-loop/tests/shim-selftest.sh` — expect all green.
 8. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
-   `scripts/loop-evidence` record card) — expect `selftest: PASS (143 checks)`.
+   `scripts/loop-evidence` record card) — expect `selftest: PASS (149 checks)`.
 9. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
 10. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
