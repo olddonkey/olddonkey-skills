@@ -20,14 +20,14 @@ lines at `d28e796` under `skills/implementation-loop/`. 0a.2 builds on 0a.1
 | --- | --- | --- |
 | **0a.2** (this document) | the authority store, framing and write intent, per-type subkeys and seals, the anchor, recovery, the operator-TTY ceremony, the **complete** registry (every row, most dormant), transaction tokens on every sink, the reachability invariants, the independent verifier | authority genesis, epoch rotation, epoch revocation (with its compound quarantine), authority-head advance, torn-frame truncation, anchor replay-forward, recovery tidy, store quarantine, linked re-genesis |
 | 0a.3 | verification of 0a.1's claimed authority references (the request rows stay dormant through 0a — A2.1, which replaced this row's original allocation) | none |
-| 0a.4 | gesture-nonce issuance (console session), the falsifier end to end (`approval.consume` is already refused from 0a.2, below) | nonce issuance |
+| 0a.4 | the falsifier end to end over the rows 0a admits (gesture-nonce issuance stays dormant until unit 4 — A2.6, which replaced this row's original allocation; `approval.consume` is already refused from 0a.2, below) | none |
 
 **Admissibility in 0a.2, row by row.** Admissible: authority genesis, epoch
 rotation, epoch revocation (with its compound quarantine), authority-head
 advance, torn-frame truncation, anchor replay-forward, recovery tidy, store
 quarantine, linked re-genesis. **Dormant from the first store write:** request
 opening + capability issuance, request cancellation, request expiry,
-capability redemption (through 0a, A2.1); gesture-nonce issuance (until 0a.4);
+capability redemption (through 0a, A2.1); gesture-nonce issuance (unit 4, A2.6);
 repository registration, rebind, execution-root registration (unit 2);
 standing authorization, standing revocation (unit 3); segment discharge
 (unit 8, A2.1); enrollment, enrollment revocation (unit 4); mechanism closure,
@@ -139,7 +139,11 @@ the genesis record, never in a config file.
   the empty list. Both also refuse a record of a request type
   (`request.opened`, `.cancelled`, `.expired`, `.redeemed`) unless its
   epoch's introducer admits its `protocol` and kind — so in 0a, always; a
-  store holding such a record is invalid (quarantine, A1.6).
+  store holding such a record is invalid (quarantine, A1.6). Under A2.6 the
+  same holds for **every** record type: `ALLOWED["tg-v1.0a"]` admits only
+  `store.genesis`, `epoch.rotated`, `epoch.revoked`, and `store.regenesis`, so
+  a validly sealed record of any other certified type (`nonce.issued` and
+  each later row's type) is refused by the writer and the verifier.
 - **The closed type list for Phase A**, fixed in `lib/loopauth/records.py`, so
   genesis and rotation can certify one subkey per type up front:
   `store.genesis`, `epoch.rotated`, `epoch.revoked`, `store.regenesis`,
@@ -359,7 +363,9 @@ the named point — it cannot skip a check, change a value, or write anything.
 The closed point list: `after-intent-fsync`, `frame-byte-<n>`,
 `after-frame-fsync`, `after-push`, `after-readback`, `after-intent-remove`,
 `regenesis-step-<1..5>`, `genesis-step-<1..5>`, `genesis-step-6a`,
-`genesis-step-6b`, and for genesis and rotation
+`genesis-step-6b`, `recovery-after-delimiter` (inside recovery, after the
+completed delimiter is durable and before the replay-forward push; added by
+the 0a.4 specification), and for genesis and rotation
 `after-store-dir` and `key-step-<n>` (after the `n`-th durable key or
 certificate link of that ceremony). An unknown point, a `frame-byte-<n>` with `n`
 not strictly inside the frame being written, or a `key-step-<n>` beyond the
@@ -541,12 +547,19 @@ temp directory, subprocess writer):
   at each re-genesis recovery cut) carries `registry_version: "tg-v1.0a"`
   and `admitted_protocols: []`; an introducer with a nonempty list (a
   premature future protocol) or an unknown registry version is refused by
-  the writer and by the independent verifier; for genesis, rotation, and
+  the writer and by the independent verifier; a validly sealed record of each
+  certified type other than the four 0a introducer/revocation types
+  (`nonce.issued`, every request type, and every later row's type), planted
+  by the test with the store's own subkey, is refused by both with the
+  distinct result `type-not-admitted`, decided **before** any body-schema
+  validation (A2.6) — each planted record carries a body that would fail
+  schema validation too, and the test asserts the admission result wins; for genesis, rotation, and
   re-genesis, the fields shown in the PTY-captured ceremony display equal the
-  sealed introducer's. The **lower-version** and **dropped-protocol** checks
-  cannot be isolated while 0a knows a single version with an empty list, so
-  their positive and negative tests are a gate of the first activating unit
-  (unit 8), which introduces a second version with a nonempty list;
+  sealed introducer's. The **lower-version** and **shrinking-type-set**
+  checks cannot be isolated while 0a knows a single version, so their tests
+  are a gate of **unit 2** (the first unit with a second registry version,
+  A2.6); the **dropped-protocol** check needs a nonempty protocol list and is
+  a gate of **unit 8**;
 
 **T** — `registry-selftest.sh`:
 - the registry holds every row of `tg:809-829` and A1.3 with its six columns
@@ -738,6 +751,11 @@ activation boundary. This document changed accordingly: §1's allocation row
 for 0a.3 and the dormant-row list (segment discharge → unit 8); §3's
 compound-redemption crash tests → units 8, 9, 12; §3's activation boundary
 on every epoch introducer; §7's explicit dormant-row oracle and
-activation-boundary tests, with the lower-version and dropped-protocol tests
-gated to unit 8 and a display-versus-sealed ceremony check.
+activation-boundary tests, with the lower-version and shrinking-type-set
+tests gated to unit 2, the dropped-protocol test to unit 8, and a
+display-versus-sealed ceremony check. Under A2.6 (reviewed with 0a.4,
+accepted at round 3 of thread `01a0ec41`): gesture-nonce issuance dormant
+until unit 4, the activation boundary on every record type with
+`type-not-admitted` decided before body schema, and the crash point
+`recovery-after-delimiter`.
 

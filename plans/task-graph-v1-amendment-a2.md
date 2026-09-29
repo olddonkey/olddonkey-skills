@@ -3,12 +3,13 @@
 **Status: A2.3–A2.4 ACCEPTED** at Codex read-only review round 15 (2026-09-29,
 gpt-6-sol / max, thread `01a0ebb0`) together with the 0a.2 specification.
 **A2.1 ACCEPTED** at round 4 (thread `01a0ec41`) together with
-`plans/task-graph-v1-phase-a-0a3.md`; A2.2 withdrawn. Amends `plans/task-graph-v1.md`
+`plans/task-graph-v1-phase-a-0a3.md`; A2.2 withdrawn. **A2.6 ACCEPTED** at round 3
+of the 0a.4 review (thread `01a0ec41`), with `plans/task-graph-v1-phase-a-0a4.md`. Amends `plans/task-graph-v1.md`
 (ACCEPTED round 11) as already amended by A1
 (`plans/task-graph-v1-amendment-a1.md`, ACCEPTED round 9). Where A2 differs
 from either, A2 wins. `tg:NN` and `A1:NN` cite lines.
 
-Specifying sub-units 0a.2 and 0a.3 surfaced four plan-level gaps. None can
+Specifying sub-units 0a.2 and 0a.3 surfaced these plan-level gaps. None can
 be settled inside a sub-unit specification without silently changing an
 accepted rule, so they are stated here. A2.3 and A2.4 were reviewed with
 0a.2 (which depends on them); A2.1 with 0a.3.
@@ -295,6 +296,78 @@ crash prefix of frame 1 (row 6) versus an altered prefix of the same length
 reachable and unreachable (row 2); the 6a–6b cut with the exact ref (row 9) and with the ref
 deleted (row 5); and an unreachable remote at each clean cut for the writer
 and the verifier (row 4).
+
+## A2.6 Gesture-nonce issuance stays dormant through 0a (amends A1.4)
+
+(A2.5 was a withdrawn draft during the 0a.2 review; the number is not reused.)
+
+**Accepted text.** A1.3 adds gesture-nonce issuance as an external row whose
+principal is the console session through "one typed display API" (`A1:177`),
+and A1.4 admits the A1.3 rows in 0a with positive tests in 0a (`A1:223`);
+the 0a.2 specification leaves it dormant "until 0a.4".
+
+**The gap** (0a.4 preparation, the same test A2.1 applied to requests):
+
+- **no consumer in 0a** — a nonce is consumed by enrollment
+  (`tg:374-383`, `tg:816`; unit 4) and by approval consumption
+  (`tg:541-548`), which stays refused through Phase A (A1.9); no other
+  console-gesture row names a nonce as evidence;
+- **no closed artifact set** — the artifacts a nonce is issued for (catalog
+  entries, registrations, envelopes) do not exist in 0a, so a display API
+  that seals any caller-supplied digest would be the generic sealing hatch
+  the falsifier forbids (`tg:1405-1406`);
+- **no authenticable principal or channel** — the console's handshake
+  (`plans/loop-console-v1.md`, D7) proves only possession of the token the
+  console printed, the writer cannot authenticate a caller claiming to be the
+  console, and the authenticated console-to-writer path is units 7–8's
+  (`tg:1153-1160`).
+
+**Amended.** Gesture-nonce issuance stays **dormant through 0a**, refused
+with its distinct error, and becomes admissible in **unit 4** with its first
+consumer (enrollment), on the console-to-writer channel below, which must
+also specify: the closed artifact types, the expiry clock, the `execution-disabled` domain (`tg:1075-1078`), how a spent
+nonce is recorded within the closed type list, and positive tests. **One activation boundary for every row.** A2.1's rule is generalized: a
+record of **any** type is valid only if its row is admitted by the registry
+version of its epoch's introducer. `ALLOWED[registry_version]` therefore
+names both the admitted request protocols and the admitted record types; for
+0a, `ALLOWED["tg-v1.0a"]` admits exactly the record types of the rows 0a
+admits — `store.genesis`, `epoch.rotated`, `epoch.revoked`, and
+`store.regenesis` — and no request protocol. Admitted **type sets only grow**,
+like protocol lists: the writer and the verifier refuse an introducer whose
+registry version's type set does not contain every type its predecessor
+epoch's version admitted (within a generation), so no later version can
+disable a row — `epoch.revoked` included — that an earlier one admitted; unit
+2 tests the rejection of a shrinking set. The writer and the independent
+verifier refuse, as invalid (quarantine, A1.6), a `nonce.issued` record and a
+record of every other later row's type (`repo.registered`, `repo.rebound`,
+`exec-root.registered`, `standing.granted`, `standing.revoked`,
+`entry.enrolled`, `entry.revoked`, `platform.designated`, and the request
+types) in any 0a epoch; each activating unit (2, 3, 4, 8, 9, 12) extends
+`ALLOWED` with its registry version.
+
+**The console-to-writer channel comes first.** Every console-gesture row —
+repository registration and rebind (unit 2), standing authorization and
+revocation (unit 3), enrollment and its revocation and nonce issuance
+(unit 4), and the human request kinds (unit 8) — needs the writer to
+authenticate that a call comes from the console session, which the D7
+handshake does not do (it authenticates a browser to the console; the
+console's current writes pass a claimed `--set-by console`). So the **first
+unit that activates any console-gesture row (unit 2 in `tg`'s order) must
+first deliver and test an authenticated console-to-writer channel**, and
+units 3, 4, 7, and 8 reuse it; if unit 2 cannot, its gesture rows and their
+positive tests move until the channel exists. Nonce issuance activates at
+unit 4 only with both its consumer and that channel present.
+
+**Order of validation.** A record's type admission under its epoch's
+introducer is checked **before** its body schema, with a distinct result
+(`type-not-admitted`), so a refusal of a not-yet-admitted type is proved to
+come from the boundary and not from a missing body schema. The first unit to
+admit a second type set (unit 2) carries a corpus mixing epochs of both
+registry versions, in which the verifier accepts each record only under its
+own epoch's set.
+
+**0a.4** therefore delivers the falsifier end to end over the rows 0a admits
+(A2.1's reassignment of the compound-redemption property stands).
 
 ## Open questions for review
 
