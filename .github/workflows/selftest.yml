@@ -12,6 +12,9 @@ jobs:
         run: |
           bash -n build.sh
           bash -n tests/build-selftest.sh
+          bash -n skills/implementation-loop/backends/claude/dispatch.sh
+          bash -n skills/implementation-loop/backends/claude/fixture-driver.sh
+          bash -n skills/implementation-loop/backends/claude/selftest.sh
           bash -n skills/implementation-loop/backends/codex/dispatch.sh
           bash -n skills/implementation-loop/backends/codex/fixture-driver.sh
           bash -n skills/implementation-loop/backends/codex/selftest.sh
@@ -82,6 +85,8 @@ jobs:
         run: bash skills/implementation-loop/backends/grok/selftest.sh
       - name: Cursor-agent backend selftest
         run: bash skills/implementation-loop/backends/cursor/selftest.sh
+      - name: Claude backend selftest
+        run: bash skills/implementation-loop/backends/claude/selftest.sh
       - name: Dispatch contract conformance
         run: bash skills/implementation-loop/tests/contract-core.sh
       - name: Dispatch contract negative controls

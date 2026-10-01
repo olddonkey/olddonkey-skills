@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contract-suite execution wrapper for the Codex adapter.
+# Contract-suite execution wrapper for the claude adapter.
 
 set -euo pipefail
 umask 077
@@ -90,10 +90,10 @@ unset CURSOR_LOOP_MODEL CURSOR_LOOP_EFFORT CURSOR_LOOP_EXTRA_ARGS
 unset CLAUDE_LOOP_MODEL CLAUDE_LOOP_EFFORT CLAUDE_LOOP_EXTRA_ARGS
 
 case "$CASE_NAME" in
-  env-own) export CODEX_LOOP_MODEL="contract-own-model" ;;
+  env-own) export CLAUDE_LOOP_MODEL="contract-own-model" ;;
   env-foreign)
-    export CLAUDE_LOOP_MODEL="foreign-poison-model"
-    export CLAUDE_LOOP_EXTRA_ARGS="--foreign-poison"
+    export CODEX_LOOP_MODEL="foreign-poison-model"
+    export CODEX_LOOP_EXTRA_ARGS="--foreign-poison"
     export GROK_LOOP_MODEL="foreign-poison-model"
     export GROK_LOOP_EXTRA_ARGS="--foreign-poison"
     export CURSOR_LOOP_MODEL="foreign-poison-model"
@@ -112,65 +112,74 @@ CASE_ROOT="$TMPDIR_ABS/$CASE_NAME"
 BIN_DIR="$CASE_ROOT/bin"
 HOME_DIR="$CASE_ROOT/home"
 WORKSPACE="$CASE_ROOT/workspace"
-mkdir -p "$BIN_DIR" "$HOME_DIR/.codex" "$WORKSPACE"
+mkdir -p "$BIN_DIR" "$HOME_DIR"
 
-CODEX_STUB="$BIN_DIR/codex"
-cat > "$CODEX_STUB" <<'STUB'
+git init -q --template= --separate-git-dir="$CASE_ROOT/workspace.gitadmin" "$WORKSPACE"
+git -C "$WORKSPACE" config user.email contract@example.invalid
+git -C "$WORKSPACE" config user.name contract
+printf 'contract fixture\n' > "$WORKSPACE/tracked.txt"
+git -C "$WORKSPACE" add tracked.txt
+git -C "$WORKSPACE" commit -qm base
+
+CLAUDE_STUB="$BIN_DIR/claude"
+cat > "$CLAUDE_STUB" <<'STUB'
 #!/usr/bin/env bash
 set -u
 if [[ "${1:-}" == "--version" ]]; then
-  printf 'codex-contract 1.0.0\n'
+  printf 'claude contract-1.0.0\n'
   exit 0
 fi
 
-: "${CODEX_STUB_LOG:?}"
+: "${CLAUDE_STUB_LOG:?}"
 : "${CONTRACT_TMPDIR:?}"
 : "${CONTRACT_CASE:?}"
-printf '%s\0' "$@" > "$CODEX_STUB_LOG"
+printf '%s\0' "$@" > "$CLAUDE_STUB_LOG"
 
-output=""
-mode=""
-model="<none>"
-effort="<none>"
+model=""
+mode="implement"
 previous=""
 last=""
+in_tools=0
+tools=()
 for argument in "$@"; do
-  [[ "$previous" != "-o" ]] || output="$argument"
-  [[ "$previous" != "-s" ]] || mode="$argument"
-  [[ "$previous" != "-m" ]] || model="$argument"
-  case "$argument" in
-    sandbox_mode=\"workspace-write\") mode="workspace-write" ;;
-    sandbox_mode=\"read-only\") mode="read-only" ;;
-    model_reasoning_effort=*) effort="${argument#model_reasoning_effort=}" ;;
-  esac
+  if [[ "$previous" == "--model" ]]; then model="$argument"; fi
+  if [[ "$argument" == "--tools" ]]; then
+    in_tools=1
+  elif [[ "$argument" == "--permission-mode" ]]; then
+    in_tools=0
+  elif [[ $in_tools -eq 1 ]]; then
+    tools+=("$argument")
+  fi
   previous="$argument"
   last="$argument"
 done
-
+if [[ "${tools[*]}" == "Read Glob Grep" ]]; then mode="read-only"; fi
+case "$last" in
+  *$'\n\n'*) last="${last#*$'\n\n'}" ;;
+esac
 printf '%s' "$last" > "$CONTRACT_TMPDIR/$CONTRACT_CASE.observed-prompt"
 printf '%s\n' "$model" > "$CONTRACT_TMPDIR/$CONTRACT_CASE.observed-model"
 printf '%s\n' "$mode" > "$CONTRACT_TMPDIR/$CONTRACT_CASE.observed-mode"
-: "${output:?Codex stub did not receive -o}"
-printf 'contract final message\n' > "$output"
-printf '%s\n' '--------'
-printf 'approval: never\n'
-printf 'sandbox: %s [workdir, /tmp, TMPDIR]\n' "$mode"
-printf 'session id: 019c0000-0000-7000-8000-000000000123\n'
-printf '%s\n' '--------'
 
 case "$CONTRACT_CASE" in
   exit-status) exit 7 ;;
   signal-status) kill -TERM "$$" ;;
 esac
+python3 - "${tools[@]}" <<'PY_STREAM'
+import json, sys
+session = "session-contract-123"
+print(json.dumps({"type": "system", "subtype": "init", "tools": sys.argv[1:], "mcp_servers": [], "session_id": session}))
+print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "contract final message", "session_id": session}))
+PY_STREAM
 exit 0
 STUB
-chmod 755 "$CODEX_STUB"
+chmod 755 "$CLAUDE_STUB"
 
 setup_loop_journal_fixture
 cd "$WORKSPACE"
 exec env \
   HOME="$HOME_DIR" \
-  CODEX_HOME="$HOME_DIR/.codex" \
+  GIT_CEILING_DIRECTORIES="$CASE_ROOT" \
   PATH="$BIN_DIR:$PATH" \
-  CODEX_STUB_LOG="$TMPDIR_ABS/$CASE_NAME.cli.log" \
+  CLAUDE_STUB_LOG="$TMPDIR_ABS/$CASE_NAME.cli.log" \
   "$ADAPTER" "$@"

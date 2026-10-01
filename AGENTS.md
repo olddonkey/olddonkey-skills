@@ -13,7 +13,7 @@ update script has nothing to install.
 Components:
 
 - `skills/implementation-loop/` — the backend-neutral implementation loop skill.
-  Uniform backend modules live under `backends/{codex,grok,cursor}/`, each with
+  Uniform backend modules live under `backends/{claude,codex,grok,cursor}/`, each with
   `dispatch.sh`, `runtime.md`, `selftest.sh`, and `fixture-driver.sh`; grok also
   has `verify-worktree.sh`. `backends/backends.tsv` registers their capabilities.
   Shared suites and the opt-in real-backend gate live under `tests/`; the frozen
@@ -46,7 +46,7 @@ Components:
 
 `.github/workflows/selftest.yml` runs two jobs. Reproduce locally from the repo
 root in this order — all suites are self-contained, need no network, and the
-Codex/Cursor CLIs are **not** required (they are only needed to dispatch a live
+backend CLIs are **not** required (they are only needed to dispatch a live
 run):
 
 1. `bash -n` syntax checks on every shipped shell script: the builder and its
@@ -72,19 +72,26 @@ run):
    `selftest: PASS (276 checks)`.
 6. `bash skills/implementation-loop/backends/cursor/selftest.sh` — expect
    `selftest: PASS (97 checks)`.
-7. `bash skills/implementation-loop/tests/contract-core.sh`,
+   `bash skills/implementation-loop/backends/claude/selftest.sh` — expect
+   `selftest: PASS (280 checks)`.
+7. `bash skills/implementation-loop/tests/journal-selftest.sh` — expect
+   `selftest: PASS (170 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
+   — expect `selftest: PASS (99 checks)`; and
+   `bash skills/implementation-loop/tests/console-selftest.sh` — expect
+   `selftest: PASS (151 checks)`.
+8. `bash skills/implementation-loop/tests/contract-core.sh`,
    `bash skills/implementation-loop/tests/contract-negative.sh`, and
    `bash skills/implementation-loop/tests/shim-selftest.sh` — expect all green.
-8. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
+9. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
    `scripts/loop-evidence` record card) — expect `selftest: PASS (149 checks)`.
-9. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
+10. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
-10. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
-11. Packaging checks: both marketplace JSON manifests must parse; every
+11. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
+12. Packaging checks: both marketplace JSON manifests must parse; every
    `SKILL.md` (under `skills/` and `cursor-implementation-loop/skills/`) must
    have non-empty `name:` and `description:` frontmatter; engineering-mode and
    Codex-loop Markdown must have no dangling relative links.
-12. `tree-oid` job (runs on ubuntu **and** macos):
+13. `tree-oid` job (runs on ubuntu **and** macos):
    `bash skills/engineering-mode/scripts/tree-oid-selftest.sh` and the
    Cursor copy — expect `selftest: PASS (202 checks)` each. Keep these scripts
    portable across GNU and BSD userlands.
@@ -92,12 +99,13 @@ run):
 ## Manual backend integration gate
 
 `skills/implementation-loop/tests/integration-test.sh` is the manual,
-opt-in pre-release gate for backend changes. It exercises the real codex, grok,
+opt-in pre-release gate for backend changes. It exercises the real claude, codex, grok,
 and cursor-agent sandboxes, needs authenticated CLIs, and makes real API calls.
-`--backend grok|cursor|codex|all` is repeatable and deduplicated; `--require
+`--backend claude|grok|cursor|codex|all` is repeatable and deduplicated; `--require
 codex` implies codex and fails unless every frozen non-managed Codex case runs
 exactly once with no skip/failure and complete provenance. Unavailable or
-logged-out backends otherwise remain skips. CI only runs `bash -n` on this
+logged-out backends otherwise remain skips. `--require claude` implies claude and
+fails if any Claude case is skipped. CI only runs `bash -n` on this
 script and never executes it.
 
 ## Running the web-slides app (non-obvious gotchas)

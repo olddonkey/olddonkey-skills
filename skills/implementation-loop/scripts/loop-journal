@@ -85,7 +85,7 @@ EVENT_SPECS = {
     "dispatch.start": {
         "required": {
             "dispatch_id": str,
-            "backend": ("codex", "grok", "cursor"),
+            "backend": ("claude", "codex", "grok", "cursor"),
             "mode": ("implement", "read-only"),
         },
         "optional": {"unit": str, "round": int},

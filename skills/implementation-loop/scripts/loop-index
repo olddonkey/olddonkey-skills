@@ -49,12 +49,13 @@ meta.lock, and never rebuilds runs.tsv. Repair belongs to writers.
 
 Sources:
   journal   $HOME/.config/olddonkey-loop/journal/<workspace-key>/
+  claude    <git-common-dir>/olddonkey-loop/claude/<dispatch-id>/
   codex     $HOME/.config/olddonkey-loop/codex/<workspace-key>/<dispatch-id>/
   grok      <git-common-dir>/olddonkey-loop/grok/<dispatch-id>/
   cursor    <git-common-dir>/olddonkey-loop/cursor/<dispatch-id>/
 
 git common dir is `git -C <workspace> rev-parse --git-common-dir`. If git
-or that directory is unavailable, grok and cursor state reads as
+or that directory is unavailable, claude, grok, and cursor state read as
 unavailable (not an error). Correlation is exact dispatch_id == state
 directory basename only.
 
@@ -65,7 +66,7 @@ Liveness (open dispatches only; evidence words, never process inspection):
   unknown           state_dir missing or unreadable
 
   Codex activity artifact: transcript.log (size/mtime).
-  Grok and cursor: any regular file in the dispatch state directory.
+  Claude, Grok, and Cursor: any regular file in the dispatch state directory.
 
 Checkpoint (every run object, including terminal; degraded is unknown):
   {state: fresh|stale|unknown, ts?: str, age_minutes?: int, note?: str}
@@ -513,7 +514,7 @@ def build_dispatches(events: list[dict], *, degraded: bool) -> list[dict]:
             labels[dispatch_id].append(declared_label(event))
         if kind == "dispatch.start":
             started.add(dispatch_id)
-            if event.get("backend") in {"codex", "grok", "cursor"}:
+            if event.get("backend") in {"claude", "codex", "grok", "cursor"}:
                 record["backend"] = event.get("backend")
             if event.get("mode") in {"implement", "read-only"}:
                 record["mode"] = event.get("mode")
@@ -533,7 +534,7 @@ def build_dispatches(events: list[dict], *, degraded: bool) -> list[dict]:
     result = []
     for dispatch_id in order:
         record = dispatches[dispatch_id]
-        if record.get("backend") not in {"codex", "grok", "cursor"}:
+        if record.get("backend") not in {"claude", "codex", "grok", "cursor"}:
             record["backend"] = "unknown"
         if record.get("mode") not in {"implement", "read-only"}:
             record["mode"] = "unknown"
@@ -892,7 +893,7 @@ def attach_state(
     for record in dispatches:
         backend = record.get("backend")
         dispatch_id = record["dispatch_id"]
-        if backend in {"codex", "grok", "cursor"}:
+        if backend in {"claude", "codex", "grok", "cursor"}:
             attributed.add(f"{backend}:{dispatch_id}")
             expected = expected_state_dir(backend, dispatch_id, roots)
             record["state_dir"] = resolve_state_dir(expected)
@@ -900,7 +901,7 @@ def attach_state(
             record["state_dir"] = "missing"
         if record.get("state") == "open":
             record["liveness"] = compute_liveness(
-                backend if backend in {"codex", "grok", "cursor"} else "",
+                backend if backend in {"claude", "codex", "grok", "cursor"} else "",
                 record["state_dir"],
                 now,
             )
@@ -908,7 +909,7 @@ def attach_state(
 
 def unattributed_state(roots: dict, attributed: set[str]) -> dict:
     result: dict[str, object] = {}
-    for backend in ("codex", "grok", "cursor"):
+    for backend in ("claude", "codex", "grok", "cursor"):
         root = roots.get(backend)
         if root == "unavailable" or root is None:
             result[backend] = "unavailable"
@@ -1021,9 +1022,11 @@ def main(argv: list[str]) -> int:
     }
     common = git_common_dir(canonical)
     if common is None:
+        roots["claude"] = "unavailable"
         roots["grok"] = "unavailable"
         roots["cursor"] = "unavailable"
     else:
+        roots["claude"] = os.path.join(common, "olddonkey-loop", "claude")
         roots["grok"] = os.path.join(common, "olddonkey-loop", "grok")
         roots["cursor"] = os.path.join(common, "olddonkey-loop", "cursor")
 

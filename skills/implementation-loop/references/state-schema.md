@@ -1,6 +1,6 @@
 # Loop backend state schema
 
-Normative inventory of production state written by the three adapters, plus
+Normative inventory of production state written by the four adapters, plus
 the journal store the index reads. Derived from write sites in this tree, not
 from earlier plan summaries. Lifecycle cells in every artifact table are
 exactly `present` or `absent`. Conditional artifacts are called out in the
@@ -129,7 +129,7 @@ already carry them (`attribution_from_env`, `scripts/loop-journal:669`); an
 explicit `--field`/`--json` value wins, key by key. An empty or multi-line
 `LOOP_UNIT`, or a `LOOP_ROUND` that is not a positive decimal integer, fails
 the append with exit 2 — an adapter then refuses to launch and the gate warns.
-Every other event ignores both variables. The three adapters and
+Every other event ignores both variables. The four adapters and
 `run-gate.sh` call `loop-journal append` as a child process with their own
 environment, so the caller sets the variables on the dispatch or gate command.
 
@@ -301,6 +301,40 @@ are not protected run state.
 | apply-check.log | backends/cursor/dispatch.sh:460 | absent | absent | absent | absent | present | git apply --check output; successful nonempty apply |
 | apply.log | backends/cursor/dispatch.sh:464 | absent | absent | absent | absent | present | git apply output; successful nonempty apply |
 
+### Claude
+
+State root pattern (`backends/claude/dispatch.sh:141-143`):
+
+`<git-common-dir>/olddonkey-loop/claude/<dispatch-id>/`
+
+The dispatch id is `YYYYMMDDTHHMMSSZ-` plus 6 hex digits. The directory is
+created at `backends/claude/dispatch.sh:186` and the git-less copies live under
+`$HOME/.config/olddonkey-loop/claude-work/<dispatch-id>/` with
+`pristine/`, `work/`, and the post-run `frozen/` snapshot. A `frozen.ok` marker
+is created beside `frozen/` only after the copy succeeds. These are copy-root
+artifacts, not protected state artifacts. The manifest and prompt are written
+before the journal start and child. `stream.jsonl` and `stderr.log` are
+created at child launch. `last-message.txt` is created only after a valid init
+and result; parse failures create no patch. Before checking or diffing
+`frozen/`, the adapter drops new ignored paths and new paths under any
+`.claude/` component, including empty CLI scratch directories. It never adds
+anything under `.claude/` to the real worktree; a changed or deleted pristine
+path under `.claude/` is refused. In implement mode, `changes.patch` is
+written from pristine to frozen after those drops and all boundary checks.
+It is applied with `git apply -p2` and no path rewrite. Apply logs occur only
+for a nonempty patch on the apply path.
+
+| artifact | writer | early failure | parse failure | read-only | implement | successful terminal | format |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| project-files.zlist | backends/claude/dispatch.sh:190 | present | present | present | present | present | NUL-separated git ls-files paths |
+| prompt.txt | backends/claude/dispatch.sh:272 | present | present | present | present | present | UTF-8 preamble plus prompt |
+| stream.jsonl | backends/claude/dispatch.sh:338 | absent | present | present | present | present | child stream JSONL; created at :338 |
+| stderr.log | backends/claude/dispatch.sh:338 | absent | present | present | present | present | child stderr; created at :338 |
+| last-message.txt | backends/claude/dispatch.sh:398 | absent | absent | present | present | present | exact result string, no added newline; written at :398 |
+| changes.patch | backends/claude/dispatch.sh:701 | absent | absent | absent | present | present | raw pristine-vs-frozen patch; implement-only |
+| apply-check.log | backends/claude/dispatch.sh:713 | absent | absent | absent | absent | present | git apply --check output; nonempty patch only |
+| apply.log | backends/claude/dispatch.sh:719 | absent | absent | absent | absent | present | git apply output; nonempty patch only |
+
 ---
 
 ## 3. Correlation rule
@@ -309,12 +343,13 @@ Journal `dispatch_id` correlates to a state-directory basename by **exact
 match only**. The adapters use the same id as the directory name
 (`backends/codex/dispatch.sh:742` and `:770`;
 `backends/grok/dispatch.sh:186` and `:452`;
-`backends/cursor/dispatch.sh:161` and `:163`). Timestamp-proximity
+`backends/cursor/dispatch.sh:161` and `:163`;
+`backends/claude/dispatch.sh:141` and `:143`). Timestamp-proximity
 correlation is forbidden (v2 non-goal). A state directory whose basename
 matches no journal `dispatch.start` is **unattributed state** and is
 displayed as such. A journal dispatch whose directory is absent is
 `state_dir=missing`. When `git` or the git common dir cannot be resolved,
-grok and cursor state reads as `unavailable` — not an error, and not a
+claude, grok, and cursor state read as `unavailable` — not an error, and not a
 guessed path.
 
 ---
@@ -329,6 +364,7 @@ No other liveness word is a v1 state.
 
 | backend | activity signal | source |
 | --- | --- | --- |
+| claude | named artifact mtimes in the dispatch dir | backends/claude/dispatch.sh:186 |
 | codex | `transcript.log` growth (size/mtime) | backends/codex/dispatch.sh:786, :823 |
 | grok | named artifact mtimes in the dispatch dir | backends/grok/dispatch.sh:746 |
 | cursor | named artifact mtimes in the dispatch dir | backends/cursor/dispatch.sh:205 |

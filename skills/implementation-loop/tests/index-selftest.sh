@@ -39,6 +39,13 @@ CASE_STDERR=""
 
 INVENTORY_PY='
 INVENTORY = {
+    "claude": {
+        "early failure": ["project-files.zlist", "prompt.txt"],
+        "parse failure": ["project-files.zlist", "prompt.txt", "stream.jsonl", "stderr.log"],
+        "read-only": ["project-files.zlist", "prompt.txt", "stream.jsonl", "stderr.log", "last-message.txt"],
+        "implement": ["project-files.zlist", "prompt.txt", "stream.jsonl", "stderr.log", "last-message.txt", "changes.patch"],
+        "successful terminal": ["project-files.zlist", "prompt.txt", "stream.jsonl", "stderr.log", "last-message.txt", "changes.patch", "apply-check.log", "apply.log"],
+    },
     "codex": {
         "early failure": ["meta.tsv", "prompt.txt", "transcript.log", "last-message.txt"],
         "parse failure": ["meta.tsv", "prompt.txt", "transcript.log", "last-message.txt"],
@@ -88,7 +95,7 @@ CLASSES = (
     "implement",
     "successful terminal",
 )
-BACKENDS = ("codex", "grok", "cursor")
+BACKENDS = ("claude", "codex", "grok", "cursor")
 '
 
 pass() {
@@ -227,7 +234,7 @@ raw = subprocess.check_output(["git", "-C", ws, "rev-parse", "--git-common-dir"]
 print(os.path.realpath(raw if os.path.isabs(raw) else os.path.join(ws, raw)))
 PY
 )"
-mkdir -p "$CODEX_FIX" "$COMMON_FIX/olddonkey-loop/grok" "$COMMON_FIX/olddonkey-loop/cursor"
+mkdir -p "$CODEX_FIX" "$COMMON_FIX/olddonkey-loop/claude" "$COMMON_FIX/olddonkey-loop/grok" "$COMMON_FIX/olddonkey-loop/cursor"
 chmod 700 "$HOME/.config" "$HOME/.config/olddonkey-loop"
 
 python3 - "$TMP_ROOT/expected-inventory.json" <<PY
@@ -239,7 +246,7 @@ PY
 python3 - "$SCHEMA" "$TMP_ROOT/doc-inventory.json" <<'PY'
 import json, re, sys
 text = open(sys.argv[1], encoding="utf-8").read()
-backends = ("codex", "grok", "cursor")
+backends = ("claude", "codex", "grok", "cursor")
 classes = (
     "early failure",
     "parse failure",
@@ -250,7 +257,7 @@ classes = (
 parsed = {backend: {klass: [] for klass in classes} for backend in backends}
 current = None
 for raw_line in text.splitlines():
-    heading = re.match(r"^### (Codex|Grok|Cursor)\s*$", raw_line)
+    heading = re.match(r"^### (Claude|Codex|Grok|Cursor)\s*$", raw_line)
     if heading:
         current = heading.group(1).lower()
         continue
@@ -304,6 +311,7 @@ import os, sys
 $INVENTORY_PY
 codex_root, common = sys.argv[1], sys.argv[2]
 roots = {
+    "claude": os.path.join(common, "olddonkey-loop", "claude"),
     "codex": codex_root,
     "grok": os.path.join(common, "olddonkey-loop", "grok"),
     "cursor": os.path.join(common, "olddonkey-loop", "cursor"),
@@ -325,6 +333,7 @@ import os, sys
 $INVENTORY_PY
 codex_root, common = sys.argv[1], sys.argv[2]
 roots = {
+    "claude": os.path.join(common, "olddonkey-loop", "claude"),
     "codex": codex_root,
     "grok": os.path.join(common, "olddonkey-loop", "grok"),
     "cursor": os.path.join(common, "olddonkey-loop", "cursor"),
@@ -341,9 +350,9 @@ for backend in BACKENDS:
             raise SystemExit(1)
 PY
 then
-  pass "fixtures: five lifecycle classes × three backends built on disk"
+  pass "fixtures: five lifecycle classes × four backends built on disk"
 else
-  fail "fixtures: five lifecycle classes × three backends built on disk"
+  fail "fixtures: five lifecycle classes × four backends built on disk"
 fi
 
 run_cmd fix-index "$INDEX" --workspace "$WS_FIX"
@@ -368,9 +377,9 @@ for backend in BACKENDS:
         raise SystemExit(1)
 PY
 then
-  pass "fixtures: fifteen unattributed state dirs indexed by exact basename"
+  pass "fixtures: twenty unattributed state dirs indexed by exact basename"
 else
-  fail "fixtures: fifteen unattributed state dirs indexed by exact basename"
+  fail "fixtures: twenty unattributed state dirs indexed by exact basename"
 fi
 
 # ---------------------------------------------------------------------------
@@ -403,9 +412,13 @@ expect_status 0 "pipeline: unit-begin"
 run_cmd pipe-round "$RUN" round-begin --unit unit-3 --round 1 --workspace "$WS_PIPE"
 expect_status 0 "pipeline: round-begin"
 
+PIPE_CLAUDE="20260817T120000Z-a1a2a3"
 PIPE_CODEX="20260817T120000Z-c0de0001"
 PIPE_GROK="20260817T120000Z-aa11bb"
 PIPE_CURSOR="20260817T120000Z-cc22dd"
+run_cmd pipe-ds-a "$JOURNAL" append --workspace "$WS_PIPE" --event dispatch.start \
+  --field "dispatch_id=$PIPE_CLAUDE" --field backend=claude --field mode=implement
+expect_status 0 "pipeline: dispatch.start claude"
 run_cmd pipe-ds-c "$JOURNAL" append --workspace "$WS_PIPE" --event dispatch.start \
   --field "dispatch_id=$PIPE_CODEX" --field backend=codex --field mode=implement
 expect_status 0 "pipeline: dispatch.start codex"
@@ -417,12 +430,17 @@ run_cmd pipe-ds-u "$JOURNAL" append --workspace "$WS_PIPE" --event dispatch.star
 expect_status 0 "pipeline: dispatch.start cursor"
 
 mkdir -p "$CODEX_PIPE/$PIPE_CODEX" \
+  "$COMMON_PIPE/olddonkey-loop/claude/$PIPE_CLAUDE" \
   "$COMMON_PIPE/olddonkey-loop/grok/$PIPE_GROK" \
   "$COMMON_PIPE/olddonkey-loop/cursor/$PIPE_CURSOR"
+build_fixture "claude" "successful terminal" "$COMMON_PIPE/olddonkey-loop/claude/$PIPE_CLAUDE"
 build_fixture "codex" "successful terminal" "$CODEX_PIPE/$PIPE_CODEX"
 build_fixture "grok" "successful terminal" "$COMMON_PIPE/olddonkey-loop/grok/$PIPE_GROK"
 build_fixture "cursor" "read-only" "$COMMON_PIPE/olddonkey-loop/cursor/$PIPE_CURSOR"
 
+run_cmd pipe-de-a "$JOURNAL" append --workspace "$WS_PIPE" --event dispatch.end \
+  --field "dispatch_id=$PIPE_CLAUDE" --field exit=0 --field session=sess-claude
+expect_status 0 "pipeline: dispatch.end claude"
 run_cmd pipe-de-c "$JOURNAL" append --workspace "$WS_PIPE" --event dispatch.end \
   --field "dispatch_id=$PIPE_CODEX" --field exit=0 --field session=sess-codex
 expect_status 0 "pipeline: dispatch.end codex"
@@ -449,10 +467,10 @@ expect_status 0 "pipeline: post-end append is unattributed"
 run_cmd pipe-index "$INDEX" --workspace "$WS_PIPE"
 expect_status 0 "pipeline: loop-index exits 0"
 if python3 - "$CASE_STDOUT" "$RUN_NEW" "$RUN_OLD" "$GEN_NEW" "$GEN_OLD" \
-  "$PIPE_CODEX" "$PIPE_GROK" "$PIPE_CURSOR" "$CODEX_PIPE" "$COMMON_PIPE" <<'PY'
+  "$PIPE_CLAUDE" "$PIPE_CODEX" "$PIPE_GROK" "$PIPE_CURSOR" "$CODEX_PIPE" "$COMMON_PIPE" <<'PY'
 import json, os, sys
 (
-    path, run_new, run_old, gen_new, gen_old, d_codex, d_grok, d_cursor,
+    path, run_new, run_old, gen_new, gen_old, d_claude, d_codex, d_grok, d_cursor,
     codex_root, common,
 ) = sys.argv[1:]
 doc = json.load(open(path, encoding="utf-8"))
@@ -481,6 +499,7 @@ if unit["publish"].get("pr") != "https://example.invalid/p/1":
     raise SystemExit("pr")
 dispatches = {item["dispatch_id"]: item for item in doc["runs"][0]["dispatches"]}
 for dispatch_id, backend, session in (
+    (d_claude, "claude", "sess-claude"),
     (d_codex, "codex", "sess-codex"),
     (d_grok, "grok", "sess-grok"),
     (d_cursor, "cursor", "sess-cursor"),
@@ -836,9 +855,12 @@ fi
 WS_NOGIT="$(workspace nogit)"
 run_cmd ng-begin "$RUN" begin --workspace "$WS_NOGIT"
 expect_status 0 "gitless: begin succeeds"
+NG_CLAUDE="20260817T160000Z-aa8800"
 NG_CODEX="20260817T160000Z-c0de0009"
 NG_GROK="20260817T160000Z-aa9900"
 NG_CURSOR="20260817T160000Z-cc9900"
+run_cmd ng-a "$JOURNAL" append --workspace "$WS_NOGIT" --event dispatch.start \
+  --field "dispatch_id=$NG_CLAUDE" --field backend=claude --field mode=read-only
 run_cmd ng-c "$JOURNAL" append --workspace "$WS_NOGIT" --event dispatch.start \
   --field "dispatch_id=$NG_CODEX" --field backend=codex --field mode=implement
 run_cmd ng-g "$JOURNAL" append --workspace "$WS_NOGIT" --event dispatch.start \
@@ -850,17 +872,21 @@ mkdir -p "$CODEX_NG/$NG_CODEX"
 build_fixture "codex" "implement" "$CODEX_NG/$NG_CODEX"
 run_cmd ng-index "$INDEX" --workspace "$WS_NOGIT"
 expect_status 0 "gitless: loop-index exits 0"
-if python3 - "$CASE_STDOUT" "$NG_CODEX" "$NG_GROK" "$NG_CURSOR" "$CODEX_NG" <<'PY'
+if python3 - "$CASE_STDOUT" "$NG_CLAUDE" "$NG_CODEX" "$NG_GROK" "$NG_CURSOR" "$CODEX_NG" <<'PY'
 import json, os, sys
-path, d_codex, d_grok, d_cursor, root = sys.argv[1:]
+path, d_claude, d_codex, d_grok, d_cursor, root = sys.argv[1:]
 doc = json.load(open(path, encoding="utf-8"))
 items = {item["dispatch_id"]: item for item in doc["runs"][0]["dispatches"]}
 if items[d_codex]["state_dir"] != os.path.join(root, d_codex):
     raise SystemExit("codex should still index")
+if items[d_claude]["state_dir"] != "unavailable":
+    raise SystemExit(items[d_claude])
 if items[d_grok]["state_dir"] != "unavailable":
     raise SystemExit(items[d_grok])
 if items[d_cursor]["state_dir"] != "unavailable":
     raise SystemExit(items[d_cursor])
+if doc["unattributed_state"]["claude"] != "unavailable":
+    raise SystemExit(doc["unattributed_state"])
 if doc["unattributed_state"]["grok"] != "unavailable":
     raise SystemExit(doc["unattributed_state"])
 if doc["unattributed_state"]["cursor"] != "unavailable":
@@ -869,9 +895,9 @@ if not isinstance(doc["unattributed_state"]["codex"], list):
     raise SystemExit("codex unattributed")
 PY
 then
-  pass "gitless: grok/cursor unavailable, codex still indexed, exit 0"
+  pass "gitless: claude/grok/cursor unavailable, codex still indexed, exit 0"
 else
-  fail "gitless: grok/cursor unavailable, codex still indexed, exit 0"
+  fail "gitless: claude/grok/cursor unavailable, codex still indexed, exit 0"
 fi
 
 # ---------------------------------------------------------------------------

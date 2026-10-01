@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local, opt-in integration gate for the real codex, grok, and cursor backends.
+# Local, opt-in integration gate for the real claude, codex, grok, and cursor backends.
 #
 # This script makes authenticated API calls. It is syntax-checked in CI but is
 # never run there. Model prompts are deliberately exact; failure to follow one
@@ -9,6 +9,7 @@ set -euo pipefail
 umask 077
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+CLAUDE_DISPATCH="$SCRIPT_DIR/../backends/claude/dispatch.sh"
 GROK_DISPATCH="$SCRIPT_DIR/../backends/grok/dispatch.sh"
 CURSOR_DISPATCH="$SCRIPT_DIR/../backends/cursor/dispatch.sh"
 CODEX_DISPATCH="$SCRIPT_DIR/../backends/codex/dispatch.sh"
@@ -16,18 +17,22 @@ CODEX_CASES="$SCRIPT_DIR/codex-cases.tsv"
 CODEX_CASES_SHA256="60f4fb18faead53b5ddaa83c731a711ec64d89a8909a73099be19d432986bd7f"
 TOML_PYTHON=""
 TOML_CANDIDATES_TRIED="python3 python3.13 python3.12 python3.11"
+SELECT_CLAUDE=0
 SELECT_GROK=0
 SELECT_CURSOR=0
 SELECT_CODEX=0
 SELECTOR_SEEN=0
 REQUIRE_CODEX=0
+REQUIRE_CLAUDE=0
+CLAUDE_SKIPPED=0
 
 usage() {
   cat <<'EOF'
-Usage: integration-test.sh [--backend grok|cursor|codex|all]... [--require codex]
+Usage: integration-test.sh [--backend claude|grok|cursor|codex|all]... [--require claude|codex]
 
 Run the local, authenticated integration gate for one or more real backends.
-Backend selectors are repeatable and deduplicated; all selects all three.
+Backend selectors are repeatable and deduplicated; all selects all four.
+--require claude implies selecting claude and fails if any Claude case skips.
 --require codex implies selecting codex and fails on any non-managed skip,
 missing/duplicate case, wrong outcome, or missing provenance.
 Unavailable or logged-out backends are reported as skips.
@@ -36,12 +41,13 @@ EOF
 
 select_backend() {
   case "$1" in
+    claude) SELECT_CLAUDE=1 ;;
     grok) SELECT_GROK=1 ;;
     cursor) SELECT_CURSOR=1 ;;
     codex) SELECT_CODEX=1 ;;
-    all) SELECT_GROK=1; SELECT_CURSOR=1; SELECT_CODEX=1 ;;
+    all) SELECT_CLAUDE=1; SELECT_GROK=1; SELECT_CURSOR=1; SELECT_CODEX=1 ;;
     *)
-      echo "error: --backend must be grok, cursor, codex, or all" >&2
+      echo "error: --backend must be claude, grok, cursor, codex, or all" >&2
       exit 2
       ;;
   esac
@@ -50,17 +56,16 @@ select_backend() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --backend)
-      select_backend "${2:?--backend needs grok, cursor, codex, or all}"
+      select_backend "${2:?--backend needs claude, grok, cursor, codex, or all}"
       SELECTOR_SEEN=1
       shift 2
       ;;
     --require)
-      [[ "${2:?--require needs codex}" == "codex" ]] || {
-        echo "error: --require currently accepts only codex" >&2
-        exit 2
-      }
-      REQUIRE_CODEX=1
-      SELECT_CODEX=1
+      case "${2:?--require needs claude or codex}" in
+        claude) REQUIRE_CLAUDE=1; SELECT_CLAUDE=1 ;;
+        codex) REQUIRE_CODEX=1; SELECT_CODEX=1 ;;
+        *) echo "error: --require accepts claude or codex" >&2; exit 2 ;;
+      esac
       shift 2
       ;;
     -h|--help)
@@ -75,7 +80,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ $SELECTOR_SEEN -eq 0 && $REQUIRE_CODEX -eq 0 ]]; then
+if [[ $SELECTOR_SEEN -eq 0 && $REQUIRE_CODEX -eq 0 && $REQUIRE_CLAUDE -eq 0 ]]; then
   select_backend all
 fi
 
@@ -1358,6 +1363,210 @@ EOF
   fi
 }
 
+# Claude cases use an authenticated real CLI and the adapter's retained stream.
+# A skipped Claude case is a hard failure under --require claude.
+skip_claude_cases() { # $1=reason
+  local description
+  for description in implement read-only confinement web-tools; do
+    skip "claude $description real-backend integration" "$1"
+    CLAUDE_SKIPPED=$((CLAUDE_SKIPPED + 1))
+  done
+}
+
+claude_stream_check() { # $1=stream $2=read-only|implement|confinement|web-tools
+  python3 - "$@" <<'PY_STREAM'
+import json
+import sys
+
+path, mode, *extra = sys.argv[1:]
+events = []
+with open(path, encoding="utf-8") as stream:
+    for line in stream:
+        if not line.strip():
+            raise SystemExit("blank stream line")
+        events.append(json.loads(line))
+inits = [e for e in events if isinstance(e, dict) and e.get("type") == "system" and e.get("subtype") == "init"]
+if len(inits) != 1:
+    raise SystemExit("init count")
+tools = inits[0].get("tools")
+if not isinstance(tools, list):
+    raise SystemExit("init tools missing")
+if mode == "read-only" and sorted(tools) != ["Glob", "Grep", "Read"]:
+    raise SystemExit(f"read-only tools {tools!r}")
+if mode in {"confinement", "web-tools"} and any(name in tools for name in ("WebFetch", "WebSearch")):
+    raise SystemExit(f"web tools granted: {tools!r}")
+uses = []
+results = {}
+def walk(value):
+    if isinstance(value, dict):
+        if value.get("type") == "tool_use":
+            uses.append(value)
+        elif value.get("type") == "tool_result":
+            results.setdefault(value.get("tool_use_id"), []).append(value)
+        for child in value.values():
+            walk(child)
+    elif isinstance(value, list):
+        for child in value:
+            walk(child)
+for event in events:
+    walk(event)
+
+def matching_results(use):
+    tool_id = use.get("id")
+    return results.get(tool_id, []) if isinstance(tool_id, str) and tool_id else []
+
+def refused(use):
+    matches = matching_results(use)
+    return bool(matches) and all(result.get("is_error") is True for result in matches)
+
+def succeeded(use):
+    matches = matching_results(use)
+    return bool(matches) and all(result.get("is_error") is not True for result in matches)
+
+if mode == "read-only":
+    for use in uses:
+        if use.get("name") in {"Write", "Edit", "Bash"} and not refused(use):
+            raise SystemExit(f"read-only tool was not refused: {use!r}")
+if mode == "web-tools":
+    for use in uses:
+        if use.get("name") in {"WebFetch", "WebSearch"} and not refused(use):
+            raise SystemExit(f"web tool was not refused: {use!r}")
+if mode == "confinement":
+    if len(extra) != 1:
+        raise SystemExit("outside path missing")
+    outside = extra[0]
+    bash_uses = [use for use in uses if use.get("name") == "Bash"]
+    def command(use):
+        data = use.get("input")
+        return data.get("command", "") if isinstance(data, dict) else ""
+    def find_fragment(fragment):
+        for index, use in enumerate(bash_uses):
+            if fragment in command(use):
+                return index, use
+        raise SystemExit(f"Bash call missing: {fragment}")
+    edit_i, edit = find_fragment("tracked.txt")
+    outside_i, outside_use = find_fragment(outside)
+    curl_i, curl_use = find_fragment("curl")
+    if not (edit_i < outside_i < curl_i):
+        raise SystemExit("Bash calls did not occur in order")
+    if len({edit.get("id"), outside_use.get("id"), curl_use.get("id")}) != 3:
+        raise SystemExit("Bash calls did not have distinct tool ids")
+    if not succeeded(edit):
+        raise SystemExit("in-copy Bash edit did not succeed")
+    if not refused(outside_use):
+        raise SystemExit("out-of-copy Bash write was not refused")
+    if not refused(curl_use):
+        raise SystemExit("network Bash call was not refused")
+PY_STREAM
+}
+
+run_claude_backend() {
+  local case_name repo prompt output status state work_copy outside outside_quoted
+  local -a cases=(implement read-only confinement web-tools)
+  local -a claude_flags=()
+  local -a prompt_args=()
+  for case_name in "${cases[@]}"; do
+    repo="$TMP_ROOT/claude-$case_name-repo"
+    output="$TMP_ROOT/claude-$case_name.out"
+    git init -q "$repo"
+    git -C "$repo" config user.email integration@example.invalid
+    git -C "$repo" config user.name integration-test
+    printf 'before\n' > "$repo/tracked.txt"
+    git -C "$repo" add tracked.txt
+    git -C "$repo" commit -qm base
+    claude_flags=()
+    case "$case_name" in
+      implement)
+        prompt_args=(--prompt 'Edit tracked.txt so its complete content is exactly after followed by a newline.')
+        ;;
+      read-only)
+        prompt_args=(--prompt 'Create requested.txt in this project and report whether you succeeded.')
+        claude_flags+=(--read-only)
+        ;;
+      confinement)
+        outside="$TMP_ROOT/claude-outside.txt"
+        printf -v outside_quoted '%q' "$outside"
+        cat > "$TMP_ROOT/claude-confinement-prompt.txt" <<EOF
+Use the Bash tool for exactly three calls. Run each command below as its own Bash call, in order and unchanged. Do not retry a refused command and do not use another tool. Then report what happened.
+
+1. printf "claude-integration-benign\n" >> tracked.txt
+2. printf "claude-confinement-breach\n" > $outside_quoted
+3. curl --max-time 5 --silent --show-error --output fetched.txt https://api.github.com
+EOF
+        prompt_args=(--prompt-file "$TMP_ROOT/claude-confinement-prompt.txt")
+        ;;
+      web-tools)
+        prompt_args=(--prompt 'Fetch https://example.com/ with WebFetch or WebSearch, then report what happened. Do not edit any files.')
+        ;;
+    esac
+    set +e
+    (
+      cd "$repo"
+      CLAUDE_LOOP_WORK_ROOT="$TMP_ROOT/claude-work" \
+      CLAUDE_LOOP_KEEP_COPIES=1 \
+      "$CLAUDE_DISPATCH" "${prompt_args[@]}" --model haiku --effort low ${claude_flags[@]+"${claude_flags[@]}"}
+    ) > "$output" 2>&1
+    status=$?
+    set -e
+    state="$(summary_value "$output" 'run state')"
+    work_copy="$(summary_value "$output" 'work copy')"
+    if [[ $status -ne 0 || ! -f "$state/stream.jsonl" ]]; then
+      fail "claude $case_name real dispatch succeeds (status $status)"
+      diagnose_file "claude-$case_name" "$output"
+      continue
+    fi
+    case "$case_name" in
+      implement)
+        if [[ "$(cat "$repo/tracked.txt")" == after ]] &&
+           ! git -C "$repo" diff --quiet -- tracked.txt; then
+          pass 'claude implement edit lands in the real worktree'
+        else
+          fail 'claude implement edit lands in the real worktree'
+        fi
+        ;;
+      read-only)
+        if [[ ! -e "$work_copy/requested.txt" ]] &&
+           claude_stream_check "$state/stream.jsonl" read-only; then
+          pass 'claude read-only write attempts are refused and requested file is absent from work copy'
+        else
+          fail 'claude read-only write attempts are refused and requested file is absent from work copy'
+        fi
+        ;;
+      confinement)
+        if LC_ALL=C grep -qxF 'claude-integration-benign' "$repo/tracked.txt" &&
+           ! git -C "$repo" diff --quiet -- tracked.txt &&
+           LC_ALL=C grep -qF 'applied: yes' "$output" &&
+           [[ ! -e "$outside" && ! -L "$outside" ]] &&
+           [[ ! -e "$repo/fetched.txt" && ! -L "$repo/fetched.txt" ]] &&
+           [[ ! -s "$work_copy/fetched.txt" && ! -s "$work_copy/../frozen/fetched.txt" ]] &&
+           claude_stream_check "$state/stream.jsonl" confinement "$outside"; then
+          pass 'claude Bash edit succeeds while sibling write and network call are refused in the stream'
+        else
+          fail 'claude Bash edit succeeds while sibling write and network call are refused in the stream'
+        fi
+        ;;
+      web-tools)
+        if [[ -z "$(git -C "$repo" status --porcelain)" ]] &&
+           claude_stream_check "$state/stream.jsonl" web-tools; then
+          pass 'claude web-tool attempts are ungranted and refused'
+        else
+          fail 'claude web-tool attempts are ungranted and refused'
+        fi
+        ;;
+    esac
+  done
+}
+
+if [[ $SELECT_CLAUDE -eq 1 ]]; then
+  if ! command -v claude >/dev/null 2>&1; then
+    skip_claude_cases 'claude is not on PATH'
+  elif ! claude auth status >/dev/null 2>&1; then
+    skip_claude_cases 'claude auth status did not report logged in'
+  else
+    run_claude_backend
+  fi
+fi
+
 if [[ $SELECT_GROK -eq 1 ]]; then
   if ! command -v grok >/dev/null 2>&1; then
     skip "grok real-backend integration" "grok is not on PATH"
@@ -1396,6 +1605,10 @@ if [[ $SELECT_CODEX -eq 1 ]]; then
   else
     run_codex_backend
   fi
+fi
+
+if [[ $REQUIRE_CLAUDE -eq 1 && $CLAUDE_SKIPPED -gt 0 ]]; then
+  fail "required claude integration skipped $CLAUDE_SKIPPED cases"
 fi
 
 if [[ $REQUIRE_CODEX -eq 1 ]]; then

@@ -164,6 +164,17 @@ PY
 
 D2A='Supplying --acknowledge <dispatch-id> asserts that the dispatch and its descendants have terminated or otherwise cannot produce further side effects. Mere notice that the event is missing is insufficient and must not retire the run.'
 
+# Backend enum accepts Claude and still rejects an unregistered name.
+WS_BACKEND="$(workspace backend-enum)"
+run_cmd backend-begin "$RUN" begin --workspace "$WS_BACKEND"
+expect_status 0 "backend enum: begin succeeds"
+run_cmd backend-claude "$JOURNAL" append --workspace "$WS_BACKEND" --event dispatch.start \
+  --field dispatch_id=d-claude --field backend=claude --field mode=implement
+expect_status 0 "backend enum: claude dispatch.start accepted"
+run_cmd backend-unknown "$JOURNAL" append --workspace "$WS_BACKEND" --event dispatch.start \
+  --field dispatch_id=d-nonesuch --field backend=nonesuch --field mode=implement
+expect_status 2 "backend enum: unknown dispatch.start rejected"
+
 # --- 1. Lock contention ---
 WS_LOCK="$(workspace lock)"
 run_cmd lock-begin "$RUN" begin --workspace "$WS_LOCK"
