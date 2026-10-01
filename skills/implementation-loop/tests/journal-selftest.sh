@@ -1209,6 +1209,378 @@ run_cmd dup5-abandoned "$JOURNAL" append --workspace "$WS_DUP5" \
   --event dispatch.abandoned --field dispatch_id=d-dup --field attested_by=user
 expect_recover_refused dup-end-abandoned "$WS_DUP5" d-dup
 
+# --- Exact read interface and reviewer field ---
+store_snapshot() { # $1=store; path and SHA-256 of every file
+  python3 - "$1" <<'PY'
+import hashlib, os, sys
+root = sys.argv[1]
+for parent, dirs, files in os.walk(root):
+    dirs.sort()
+    for name in sorted(files):
+        path = os.path.join(parent, name)
+        rel = os.path.relpath(path, root)
+        print(rel, hashlib.sha256(open(path, "rb").read()).hexdigest())
+PY
+}
+
+WS_READ="$(workspace read-interface)"
+STORE_READ="$(store_dir "$WS_READ")"
+ABSENT_RUN="20200101T000000Z-abcdef"
+run_cmd reader-no-store "$JOURNAL" read-run --workspace "$WS_READ" --run "$ABSENT_RUN"
+expect_status 2 "read-run: no store exits 2"
+if [[ ! -s "$CASE_STDOUT" && ! -e "$STORE_READ" ]]; then
+  pass "read-run: no store prints nothing and creates nothing"
+else
+  fail "read-run: no store prints nothing and creates nothing"
+fi
+run_cmd finder-no-store "$JOURNAL" find-run --workspace "$WS_READ" --plan alpha
+expect_status 0 "find-run: no store exits 0"
+if [[ "$(cat "$CASE_STDOUT")" == '{"schema":1,"runs":[],"ambiguous":[]}' && ! -e "$STORE_READ" ]]; then
+  pass "find-run: no store prints empty lists and creates nothing"
+else
+  fail "find-run: no store prints empty lists and creates nothing"
+fi
+run_cmd finder-empty-plan "$JOURNAL" find-run --workspace "$WS_READ" --plan ''
+expect_status 2 "find-run: empty plan exits 2"
+run_cmd finder-newline-plan "$JOURNAL" find-run --workspace "$WS_READ" --plan $'one\ntwo'
+expect_status 2 "find-run: multiline plan exits 2"
+WS_NOLOCK="$(workspace read-no-lock)"
+STORE_NOLOCK="$(store_dir "$WS_NOLOCK")"
+mkdir -p "$STORE_NOLOCK"
+run_cmd reader-no-lock "$JOURNAL" read-run --workspace "$WS_NOLOCK" --run "$ABSENT_RUN"
+expect_status 2 "read-run: store root without meta.lock counts as no store"
+run_cmd finder-no-lock "$JOURNAL" find-run --workspace "$WS_NOLOCK" --plan alpha
+expect_status 0 "find-run: store root without meta.lock counts as no store"
+if [[ "$(cat "$CASE_STDOUT")" == '{"schema":1,"runs":[],"ambiguous":[]}' && ! -e "$STORE_NOLOCK/meta.lock" ]]; then
+  pass "find-run: absent meta.lock is not created"
+else
+  fail "find-run: absent meta.lock is not created"
+fi
+
+run_cmd reader-begin "$RUN" begin --workspace "$WS_READ" --plan alpha
+RUN_READ="$(field_from "$CASE_STDOUT" run)"
+READ_BEFORE="$(store_snapshot "$STORE_READ")"
+run_cmd reader-active "$JOURNAL" read-run --workspace "$WS_READ" --run "$RUN_READ"
+expect_status 0 "read-run: active run exits 0"
+if python3 - "$CASE_STDOUT" "$RUN_READ" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert set(doc) == {"schema", "run", "ended", "end_status", "tail", "complete", "events"}
+assert doc["schema"] == 1 and doc["run"] == sys.argv[2]
+assert doc["ended"] is False and doc["end_status"] is None
+assert doc["tail"] == "clean" and doc["complete"] is True
+assert len(doc["events"]) == 1 and doc["events"][0]["event"] == "run.begin"
+assert doc["events"][0]["plan"] == "alpha"
+PY
+then pass "read-run: active run prints its exact clean events"; else fail "read-run: active run prints its exact clean events"; fi
+if [[ "$READ_BEFORE" == "$(store_snapshot "$STORE_READ")" ]]; then
+  pass "read-run: every store file remains byte-identical"
+else
+  fail "read-run: every store file remains byte-identical"
+fi
+run_cmd reader-absent "$JOURNAL" read-run --workspace "$WS_READ" --run "$ABSENT_RUN"
+expect_status 2 "read-run: valid id without a segment exits 2"
+if [[ ! -s "$CASE_STDOUT" ]]; then pass "read-run: absent segment prints nothing"; else fail "read-run: absent segment prints nothing"; fi
+run_cmd reader-invalid "$JOURNAL" read-run --workspace "$WS_READ" --run invalid
+expect_status 2 "read-run: invalid run id exits 2"
+
+python3 - "$STORE_READ/meta.lock" "$TMP_ROOT/read-lock.ready" <<'PY' &
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w", encoding="utf-8").close()
+time.sleep(20)
+PY
+LOCK_HOLDER_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [[ -f "$TMP_ROOT/read-lock.ready" ]] && break
+  sleep 0.05
+done
+run_cmd reader-locked env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=0.1 "$JOURNAL" read-run \
+  --workspace "$WS_READ" --run "$RUN_READ"
+expect_status 3 "read-run: held lock exits 3"
+run_cmd finder-locked env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=0.1 "$JOURNAL" find-run \
+  --workspace "$WS_READ" --plan alpha
+expect_status 3 "find-run: held lock exits 3"
+kill "$LOCK_HOLDER_PID" 2>/dev/null || true
+wait "$LOCK_HOLDER_PID" 2>/dev/null || true
+LOCK_HOLDER_PID=""
+
+run_cmd reader-end "$RUN" end --workspace "$WS_READ" --status failed
+expect_status 0 "read-run: terminal fixture ended"
+if [[ ! -e "$STORE_READ/context" && -f "$STORE_READ/context.retired-$RUN_READ" ]]; then
+  pass "read-run: ended context was retired"
+else
+  fail "read-run: ended context was retired"
+fi
+run_cmd reader-ended "$JOURNAL" read-run --workspace "$WS_READ" --run "$RUN_READ"
+expect_status 0 "read-run: retired run can still be read by id"
+if python3 - "$CASE_STDOUT" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert doc["ended"] is True and doc["end_status"] == "failed"
+assert doc["tail"] == "clean" and doc["complete"] is True
+assert [event["event"] for event in doc["events"]] == ["run.begin", "run.end"]
+PY
+then pass "read-run: retired run reports run.end and failed status"; else fail "read-run: retired run reports run.end and failed status"; fi
+
+run_cmd finder-none "$JOURNAL" find-run --workspace "$WS_READ" --plan other
+if [[ $CASE_STATUS -eq 0 && "$(cat "$CASE_STDOUT")" == '{"schema":1,"runs":[],"ambiguous":[]}' ]]; then
+  pass "find-run: a plan with no match returns empty lists"
+else
+  fail "find-run: a plan with no match returns empty lists"
+fi
+run_cmd finder-one "$JOURNAL" find-run --workspace "$WS_READ" --plan alpha
+if python3 - "$CASE_STDOUT" "$RUN_READ" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == {"schema": 1, "runs": [sys.argv[2]], "ambiguous": []}
+PY
+then pass "find-run: one exact plan match survives context retirement"; else fail "find-run: one exact plan match survives context retirement"; fi
+run_cmd finder-second-begin "$RUN" begin --workspace "$WS_READ" --plan alpha
+RUN_READ_2="$(field_from "$CASE_STDOUT" run)"
+run_cmd finder-second-end "$RUN" end --workspace "$WS_READ" --status completed
+run_cmd finder-two "$JOURNAL" find-run --workspace "$WS_READ" --plan alpha
+if python3 - "$CASE_STDOUT" "$RUN_READ" "$RUN_READ_2" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc == {"schema": 1, "runs": sorted(sys.argv[2:]), "ambiguous": []}
+PY
+then pass "find-run: two runs with the same plan are sorted"; else fail "find-run: two runs with the same plan are sorted"; fi
+run_cmd finder-planless-begin "$RUN" begin --workspace "$WS_READ"
+RUN_PLANLESS="$(field_from "$CASE_STDOUT" run)"
+run_cmd finder-planless-end "$RUN" end --workspace "$WS_READ" --status completed
+
+SYNTHETIC_IDS=(20200101T000000Z-000001 20200101T000000Z-000002 \
+  20200101T000000Z-000003 20200101T000000Z-000004 \
+  20200101T000000Z-000005)
+python3 - "$STORE_READ/runs" "$RUN_READ" "${SYNTHETIC_IDS[@]}" <<'PY'
+import json, os, sys
+runs_dir, source_id, found_id, short_id, empty_id, other_id, unterminated_id = sys.argv[1:]
+with open(os.path.join(runs_dir, source_id + ".jsonl"), encoding="utf-8") as stream:
+    begin = json.loads(stream.readline())
+def create(run_id, data):
+    path = os.path.join(runs_dir, run_id + ".jsonl")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data)
+begin["run"] = found_id
+create(found_id, (json.dumps(begin) + "\nnot json\n").encode())
+create(short_id, b'{"schema":1,"event":"run.begin"')
+create(empty_id, b"")
+create(other_id, (json.dumps(dict(begin, run=other_id, event="checkpoint")) + "\n").encode())
+create(unterminated_id, json.dumps(dict(begin, run=unterminated_id)).encode())
+PY
+run_cmd finder-ambiguous "$JOURNAL" find-run --workspace "$WS_READ" --plan alpha
+if python3 - "$CASE_STDOUT" "$RUN_READ" "$RUN_READ_2" "$RUN_PLANLESS" "${SYNTHETIC_IDS[@]}" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+first, second, planless, found, short, empty, other, unterminated = sys.argv[2:]
+assert doc == {"schema": 1, "runs": sorted([first, second, found, unterminated]),
+               "ambiguous": sorted([short, empty, other])}
+assert planless not in doc["runs"] + doc["ambiguous"]
+PY
+then
+  pass "find-run: no-context, later-corrupt, and unterminated matches; short, empty, non-begin ambiguous; no-plan omitted"
+else
+  fail "find-run: no-context, later-corrupt, and unterminated matches; short, empty, non-begin ambiguous; no-plan omitted"
+fi
+if python3 - "$CASE_STDOUT" "${SYNTHETIC_IDS[4]}" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert sys.argv[2] in doc["runs"] and sys.argv[2] not in doc["ambiguous"]
+PY
+then pass "find-run: valid unterminated run.begin matches its plan"; else fail "find-run: valid unterminated run.begin matches its plan"; fi
+if python3 - "$CASE_STDOUT" "${SYNTHETIC_IDS[1]}" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert sys.argv[2] in doc["ambiguous"] and sys.argv[2] not in doc["runs"]
+PY
+then pass "find-run: half-written run.begin remains ambiguous"; else fail "find-run: half-written run.begin remains ambiguous"; fi
+WS_BAD_RUNS="$(workspace bad-runs-directory)"
+run_cmd bad-runs-begin "$RUN" begin --workspace "$WS_BAD_RUNS"
+STORE_BAD_RUNS="$(store_dir "$WS_BAD_RUNS")"
+printf '%s' x > "$STORE_BAD_RUNS/runs/unexpected"
+chmod 600 "$STORE_BAD_RUNS/runs/unexpected"
+run_cmd finder-bad-runs "$JOURNAL" find-run --workspace "$WS_BAD_RUNS" --plan alpha
+expect_status 5 "find-run: malformed runs directory exits 5"
+if [[ ! -s "$CASE_STDOUT" ]]; then pass "find-run: malformed runs directory prints no object"; else fail "find-run: malformed runs directory prints no object"; fi
+
+WS_BAD_READ="$(workspace bad-read)"
+run_cmd bad-read-begin "$RUN" begin --workspace "$WS_BAD_READ"
+RUN_BAD_READ="$(field_from "$CASE_STDOUT" run)"
+SEG_BAD_READ="$(store_dir "$WS_BAD_READ")/runs/${RUN_BAD_READ}.jsonl"
+write_bad_read() { # $1=kind
+  python3 - "$SEG_BAD_READ" "$RUN_BAD_READ" "$1" <<'PY'
+import json, sys
+path, run_id, kind = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    begin = json.loads(stream.readline())
+event = {"schema": 1, "seq": 2, "ts": "2026-10-01T00:00:00Z",
+         "event": "checkpoint", "run": run_id}
+lines = [json.dumps(begin)]
+if kind == "mid":
+    lines.append("not json")
+elif kind == "non-object":
+    lines.append("42")
+elif kind == "non-object-tail":
+    lines.append("42")
+elif kind == "wrong-run":
+    event["run"] = "20200101T000000Z-eeeeee"
+    lines.append(json.dumps(event))
+elif kind == "repeat":
+    event["seq"] = 1
+    lines.append(json.dumps(event))
+elif kind == "decrease":
+    lines.append(json.dumps(dict(event, seq=3)))
+    lines.append(json.dumps(event))
+elif kind == "missing-seq":
+    del event["seq"]
+    lines.append(json.dumps(event))
+elif kind == "noninteger-seq":
+    event["seq"] = 2.0
+    lines.append(json.dumps(event))
+with open(path, "w", encoding="utf-8") as stream:
+    stream.write("\n".join(lines) + ("" if kind == "non-object-tail" else "\n"))
+PY
+}
+for BAD_KIND in mid non-object wrong-run repeat decrease missing-seq noninteger-seq; do
+  write_bad_read "$BAD_KIND"
+  run_cmd "bad-read-$BAD_KIND" "$JOURNAL" read-run --workspace "$WS_BAD_READ" --run "$RUN_BAD_READ"
+  if [[ "$BAD_KIND" == mid || "$BAD_KIND" == non-object ]]; then EXPECTED_BAD_STATUS=4; else EXPECTED_BAD_STATUS=6; fi
+  expect_status "$EXPECTED_BAD_STATUS" "read-run: $BAD_KIND has its specified exit"
+  if [[ ! -s "$CASE_STDOUT" ]]; then pass "read-run: $BAD_KIND prints no object"; else fail "read-run: $BAD_KIND prints no object"; fi
+  if [[ "$BAD_KIND" == non-object ]]; then
+    run_cmd bad-read-non-object-recover-mid "$RUN" recover --workspace "$WS_BAD_READ"
+    expect_status 4 "recover: newline-terminated non-object agrees on mid-file corruption"
+  fi
+done
+write_bad_read non-object-tail
+run_cmd bad-read-non-object-tail "$JOURNAL" read-run --workspace "$WS_BAD_READ" --run "$RUN_BAD_READ"
+expect_status 0 "read-run: unterminated non-object tail returns an object"
+if python3 - "$CASE_STDOUT" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["tail"] == "torn" and doc["complete"] is False
+assert [event["event"] for event in doc["events"]] == ["run.begin"]
+PY
+then pass "read-run: unterminated non-object is omitted as a torn tail"; else fail "read-run: unterminated non-object is omitted as a torn tail"; fi
+run_cmd bad-read-non-object-recover "$RUN" recover --workspace "$WS_BAD_READ"
+expect_status 0 "recover: unterminated non-object tail agrees that no dispatch is open"
+
+for TEXT_KIND in utf8 surrogate; do
+  WS_TEXT="$(workspace "read-$TEXT_KIND")"
+  run_cmd "read-$TEXT_KIND-begin" "$RUN" begin --workspace "$WS_TEXT"
+  RUN_TEXT="$(field_from "$CASE_STDOUT" run)"
+  SEG_TEXT="$(store_dir "$WS_TEXT")/runs/${RUN_TEXT}.jsonl"
+  python3 - "$SEG_TEXT" "$RUN_TEXT" "$TEXT_KIND" <<'PY'
+import json, sys
+path, run_id, kind = sys.argv[1:]
+note = "caf" + chr(0xE9) if kind == "utf8" else chr(0xD800)
+event = {"schema": 1, "seq": 2, "ts": "2026-10-01T00:00:00Z",
+         "event": "checkpoint", "run": run_id, "note": note}
+with open(path, "ab") as stream:
+    stream.write((json.dumps(event, ensure_ascii=kind != "utf8") + "\n").encode("utf-8"))
+PY
+  run_cmd "read-$TEXT_KIND-ascii" env PYTHONIOENCODING=ascii:strict "$JOURNAL" read-run \
+    --workspace "$WS_TEXT" --run "$RUN_TEXT"
+  expect_status 0 "read-run: $TEXT_KIND stored string prints under ASCII stdout"
+  if python3 - "$CASE_STDOUT" "$SEG_TEXT" "$TEXT_KIND" <<'PY'
+import json, pathlib, sys
+output, segment, kind = sys.argv[1:]
+raw_output = pathlib.Path(output).read_bytes()
+raw_segment = pathlib.Path(segment).read_bytes()
+assert raw_output.isascii() and raw_output.endswith(b"\n")
+if kind == "utf8":
+    assert bytes([0xC3, 0xA9]) in raw_segment
+else:
+    assert bytes([92]) + b"ud800" in raw_segment
+stored = [json.loads(line) for line in raw_segment.decode("utf-8").splitlines()]
+assert json.loads(raw_output)["events"] == stored
+PY
+  then pass "read-run: $TEXT_KIND output is ASCII and round-trips every stored event"; else fail "read-run: $TEXT_KIND output is ASCII and round-trips every stored event"; fi
+done
+
+for TAIL_KIND in torn unterminated; do
+  WS_TAIL_READ="$(workspace "read-tail-$TAIL_KIND")"
+  run_cmd "tail-$TAIL_KIND-begin" "$RUN" begin --workspace "$WS_TAIL_READ"
+  RUN_TAIL_READ="$(field_from "$CASE_STDOUT" run)"
+  run_cmd "tail-$TAIL_KIND-start" "$JOURNAL" append --workspace "$WS_TAIL_READ" \
+    --event dispatch.start --field dispatch_id=d-tail --field backend=codex --field mode=implement
+  SEG_TAIL_READ="$(store_dir "$WS_TAIL_READ")/runs/${RUN_TAIL_READ}.jsonl"
+  if [[ "$TAIL_KIND" == torn ]]; then
+    printf '%s' '{"event":"dispatch.end","dispatch_id":"d-tail"' >> "$SEG_TAIL_READ"
+  else
+    python3 - "$SEG_TAIL_READ" "$RUN_TAIL_READ" <<'PY'
+import json, sys
+event = {"schema": 1, "seq": 3, "ts": "2026-10-01T00:00:00Z",
+         "event": "dispatch.end", "run": sys.argv[2], "dispatch_id": "d-tail", "exit": 0}
+with open(sys.argv[1], "ab") as stream:
+    stream.write(json.dumps(event).encode("utf-8"))
+PY
+  fi
+  run_cmd "tail-$TAIL_KIND-read" "$JOURNAL" read-run --workspace "$WS_TAIL_READ" --run "$RUN_TAIL_READ"
+  expect_status 0 "read-run: $TAIL_KIND tail returns an object"
+  READ_TAIL_OUTPUT="$CASE_STDOUT"
+  if python3 - "$READ_TAIL_OUTPUT" "$TAIL_KIND" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+kind = sys.argv[2]
+events = doc["events"]
+assert doc["tail"] == kind and doc["complete"] is False
+assert [e["event"] for e in events] == (["run.begin", "dispatch.start"] if kind == "torn"
+                                         else ["run.begin", "dispatch.start", "dispatch.end"])
+PY
+  then pass "read-run: $TAIL_KIND tail preserves exactly the parsed events"; else fail "read-run: $TAIL_KIND tail preserves exactly the parsed events"; fi
+  run_cmd "tail-$TAIL_KIND-recover" "$RUN" recover --workspace "$WS_TAIL_READ"
+  if python3 - "$READ_TAIL_OUTPUT" "$CASE_STDERR" "$CASE_STATUS" "$TAIL_KIND" <<'PY'
+import json, sys
+events = json.load(open(sys.argv[1]))["events"]
+closed = {e.get("dispatch_id") for e in events if e.get("event") in ("dispatch.end", "dispatch.abandoned")}
+unmatched = {e.get("dispatch_id") for e in events if e.get("event") == "dispatch.start"} - closed
+status = int(sys.argv[3])
+error = open(sys.argv[2], encoding="utf-8").read()
+assert bool(unmatched) == (status == 7)
+assert (unmatched == {"d-tail"}) == (sys.argv[4] == "torn")
+if unmatched:
+    assert "unmatched dispatch_id(s): d-tail" in error
+else:
+    assert status == 0
+PY
+  then pass "read-run/recover: $TAIL_KIND unmatched starts agree with recover refusal"; else fail "read-run/recover: $TAIL_KIND unmatched starts agree with recover refusal"; fi
+done
+
+WS_REVIEW_FIELD="$(workspace review-field)"
+run_cmd review-field-begin "$RUN" begin --workspace "$WS_REVIEW_FIELD"
+RUN_REVIEW_FIELD="$(field_from "$CASE_STDOUT" run)"
+for REVIEWER in claude codex cursor grok session; do
+  run_cmd "review-field-$REVIEWER" "$JOURNAL" append --workspace "$WS_REVIEW_FIELD" \
+    --event review.recorded --field unit=u1 --field round=1 --field verdict=pass \
+    --field "reviewer=$REVIEWER"
+  expect_status 0 "reviewer: $REVIEWER is accepted"
+done
+run_cmd review-field-invalid "$JOURNAL" append --workspace "$WS_REVIEW_FIELD" \
+  --event review.recorded --field unit=u1 --field round=1 --field verdict=pass \
+  --field reviewer=unknown
+expect_status 2 "reviewer: unknown value exits 2"
+expect_output stderr "invalid reviewer" "reviewer: unknown value names invalid reviewer"
+run_cmd review-field-run "$RUN" review --workspace "$WS_REVIEW_FIELD" --unit u1 \
+  --round 2 --verdict iterate --reviewer codex
+expect_status 0 "reviewer: loop-run --reviewer codex succeeds"
+run_cmd review-field-legacy "$RUN" review --workspace "$WS_REVIEW_FIELD" --unit u1 \
+  --round 3 --verdict pass
+expect_status 0 "reviewer: review without --reviewer succeeds"
+run_cmd review-field-read "$JOURNAL" read-run --workspace "$WS_REVIEW_FIELD" --run "$RUN_REVIEW_FIELD"
+if python3 - "$CASE_STDOUT" <<'PY'
+import json, sys
+events = json.load(open(sys.argv[1]))["events"]
+reviews = [event for event in events if event["event"] == "review.recorded"]
+assert [event.get("reviewer") for event in reviews] == [
+    "claude", "codex", "cursor", "grok", "session", "codex", None]
+assert "reviewer" not in reviews[-1]
+assert reviews[-2]["round"] == 2 and reviews[-2]["verdict"] == "iterate"
+PY
+then pass "reviewer: enum, loop-run round-trip, and absent key are stored exactly"; else fail "reviewer: enum, loop-run round-trip, and absent key are stored exactly"; fi
+
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' "$FAILED_CHECKS" "$CHECKS" >&2
   exit 1

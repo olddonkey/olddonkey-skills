@@ -1,5 +1,5 @@
-#schema=1
-claude	claude	CLAUDE_LOOP_	refuses	flag	json	backends/claude/fixture-driver.sh
-codex	codex	CODEX_LOOP_	exact-id	flag	text	backends/codex/fixture-driver.sh
-cursor	cursor-agent	CURSOR_LOOP_	refuses	embedded-in-model	json	backends/cursor/fixture-driver.sh
-grok	grok	GROK_LOOP_	exact-id	flag	json	backends/grok/fixture-driver.sh
+#schema=2
+claude	claude	CLAUDE_LOOP_	refuses	flag	json	backends/claude/fixture-driver.sh	last-message.txt
+codex	codex	CODEX_LOOP_	exact-id	flag	text	backends/codex/fixture-driver.sh	last-message.txt
+cursor	cursor-agent	CURSOR_LOOP_	refuses	embedded-in-model	json	backends/cursor/fixture-driver.sh	result.txt
+grok	grok	GROK_LOOP_	exact-id	flag	json	backends/grok/fixture-driver.sh	output.json#text

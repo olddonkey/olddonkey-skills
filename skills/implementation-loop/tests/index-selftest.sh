@@ -1379,7 +1379,7 @@ if python3 - "$TMP_ROOT/attr-index.stdout" "$RUN_ATTR" "$CASE_STDOUT" "$RUN_FREE
 import json, sys
 allowed = {
     "seq", "ts", "event", "dispatch_id", "mode", "exit", "binding", "purpose",
-    "gate_verdict", "review_verdict", "backend", "unit", "round", "attribution",
+    "gate_verdict", "review_verdict", "reviewer", "backend", "unit", "round", "attribution",
 }
 for output, run_id in (sys.argv[1:3], sys.argv[3:5]):
     doc = json.load(open(output, encoding="utf-8"))
@@ -1887,6 +1887,74 @@ then
   pass "schema: declared attribution, run totals, and timeline are documented"
 else
   fail "schema: declared attribution, run totals, and timeline are documented"
+fi
+
+WS_REVIEWER="$(workspace reviewer)"
+run_cmd reviewer-begin "$RUN" begin --workspace "$WS_REVIEWER"
+RUN_REVIEWER="$(field_from "$CASE_STDOUT" run)"
+run_cmd reviewer-record "$RUN" review --workspace "$WS_REVIEWER" --unit u-reviewer \
+  --round 1 --verdict pass --reviewer codex
+expect_status 0 "reviewer: loop-run records a closed-enum reviewer"
+run_cmd reviewer-index "$INDEX" --workspace "$WS_REVIEWER"
+if python3 - "$CASE_STDOUT" "$RUN_REVIEWER" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+assert run["units"][0]["review"] == {"verdict": "pass", "round": 1, "reviewer": "codex"}
+reviews = [item for item in run["timeline"] if item["event"] == "review.recorded"]
+assert len(reviews) == 1 and reviews[0]["reviewer"] == "codex"
+PY
+then
+  pass "reviewer: unit review and timeline project the reviewer"
+else
+  fail "reviewer: unit review and timeline project the reviewer"
+fi
+SEG_REVIEWER="$(store_dir "$WS_REVIEWER")/runs/${RUN_REVIEWER}.jsonl"
+python3 - "$SEG_REVIEWER" <<'PY'
+import json, sys
+path = sys.argv[1]
+events = [json.loads(line) for line in open(path, encoding="utf-8")]
+event = dict(events[-1], seq=3, round=2, verdict="iterate", reviewer="unregistered")
+with open(path, "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(event) + "\n")
+PY
+run_cmd reviewer-unknown-string-index "$INDEX" --workspace "$WS_REVIEWER"
+if python3 - "$CASE_STDOUT" "$RUN_REVIEWER" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+assert run["units"][0]["review"] == {"verdict": "iterate", "round": 2}
+reviews = [item for item in run["timeline"] if item["event"] == "review.recorded"]
+assert len(reviews) == 2 and reviews[0]["reviewer"] == "codex"
+assert "reviewer" not in reviews[1]
+PY
+then
+  pass "reviewer: unknown stored string is omitted from unit review and timeline"
+else
+  fail "reviewer: unknown stored string is omitted from unit review and timeline"
+fi
+python3 - "$SEG_REVIEWER" <<'PY'
+import json, sys
+path = sys.argv[1]
+events = [json.loads(line) for line in open(path, encoding="utf-8")]
+event = dict(events[-1], seq=4, reviewer={"unknown": True})
+with open(path, "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(event) + "\n")
+PY
+run_cmd reviewer-unknown-index "$INDEX" --workspace "$WS_REVIEWER"
+if python3 - "$CASE_STDOUT" "$RUN_REVIEWER" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+assert run["units"][0]["review"] == {"verdict": "iterate", "round": 2}
+reviews = [item for item in run["timeline"] if item["event"] == "review.recorded"]
+assert len(reviews) == 3 and reviews[0]["reviewer"] == "codex"
+assert all("reviewer" not in item for item in reviews[1:])
+PY
+then
+  pass "reviewer: unknown stored string and object values are not projected"
+else
+  fail "reviewer: unknown stored string and object values are not projected"
 fi
 
 if [[ $FAILED_CHECKS -gt 0 ]]; then

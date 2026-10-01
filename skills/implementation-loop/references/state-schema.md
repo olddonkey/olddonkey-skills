@@ -24,9 +24,10 @@ The five lifecycle classes are moments on the production path:
 Authority is `scripts/loop-journal`. This section is a reader index, not a
 second store spec.
 
-**Readers.** `scripts/loop-index` is the only reader of the store. Every other
-reader consumes its JSON document and opens no segment, cache, context, or
-repository file itself:
+**Readers.** `scripts/loop-journal read-run` and `find-run` are the exact
+segment read interface described below. `scripts/loop-index` is the derived
+reader of the store. The following readers consume its JSON document and
+open no segment, cache, context, or repository file themselves:
 
 - `scripts/loop-console` — the local web console.
 - `scripts/loop-evidence` — the per-unit record card. It runs the sibling
@@ -70,6 +71,39 @@ valid tail line counts; an unterminated invalid tail is ignored (torn write);
 a newline-terminated invalid line mid-file or at the tail is mid-file
 corruption. The index uses this classification and never repairs; a
 discarded torn tail makes that run's `counts_complete` false.
+
+**Exact read interface.** Both commands take `--workspace`, hold `meta.lock`
+only to snapshot bytes, and never write, repair, rebuild, or create a store.
+
+- `loop-journal read-run --run ID` prints one JSON object with `schema: 1`,
+  `run`, `ended`, `end_status`, `tail`, `complete`, and `events`. The events are
+  the parsed segment objects in order, including a valid unterminated last
+  line but excluding a torn last line. `tail` is `clean`, `unterminated`, or
+  `torn`; `complete` is true exactly for `clean`. `ended` reflects a `run.end`
+  event and `end_status` is its status or null. This works after context
+  retirement and does not read context. A newline-terminated non-object line
+  is mid-file corruption; an unterminated non-object last line is a torn tail.
+  Output JSON is ASCII-safe, including stored non-ASCII and escaped surrogate
+  strings. Exits: 0 when printed; 2 for usage,
+  invalid or missing run, or no store; 3 for a busy lock; 4 for mid-file
+  corruption; 6 for a different event `run`, or an absent,
+  non-integer, repeated, or decreasing `seq`. It does not validate payloads
+  or dispatch ids.
+- `loop-journal find-run --plan TEXT` prints one JSON object with `schema: 1`,
+  sorted `runs` and `ambiguous` id lists. `runs` contains segments whose first
+  event is `run.begin` with the exact plan, including a valid first event
+  without a trailing newline. `ambiguous` contains segments without a
+  parseable first event or whose first event is not `run.begin`; later
+  corruption does not affect the result. An absent plan on
+  a valid `run.begin` is neither a match nor ambiguous. A missing store
+  prints empty lists and creates nothing. Exits: 0 when printed; 2 for usage,
+  including empty or multiline plan; 3 for a busy lock; 5 for a malformed
+  `runs` directory.
+
+`review.recorded` accepts optional `reviewer` from the closed enum
+`claude`, `codex`, `cursor`, `grok`, `session`. The last valid review for a
+unit projects this value into the index unit's `review` object and its
+timeline item; an absent or unknown stored value is omitted.
 
 ### `gate.result`
 
@@ -191,11 +225,11 @@ Each run object also carries:
   Each event is projected to a closed whitelist: `seq`, `ts`, `event`;
   `dispatch_id`, `mode`, and `exit` on dispatch events; `binding`, `purpose`,
   and `gate_verdict` (the normalized verdict above) on `gate.result`;
-  `review_verdict` (`pass`, `iterate`, anything else `unknown`) on
-  `review.recorded`. Dispatch events carry `backend`, `unit`, `round`, and
-  `attribution` resolved from the whole dispatch, so an end whose start fell
-  outside the window still names its backend and every event of a conflicted
-  dispatch reads `conflict` with no unit. `gate.result` carries its own
+  `review_verdict` (`pass`, `iterate`, anything else `unknown`) and optional
+  valid `reviewer` on `review.recorded`. Dispatch events carry `backend`,
+  `unit`, `round`, and `attribution` resolved from the whole dispatch, so an
+  end whose start fell outside the window still names its backend. Every
+  event of a conflicted dispatch reads `conflict` with no unit. `gate.result` carries its own
   declared `unit`/`round` and `attribution`; `review.recorded` and
   `publish.recorded` carry their `unit` with `attribution: declared`.
   Free-text fields (`findings`, `note`, `plan`, `reason`, `attested_by`,

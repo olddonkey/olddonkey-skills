@@ -75,15 +75,18 @@ run):
    `bash skills/implementation-loop/backends/claude/selftest.sh` — expect
    `selftest: PASS (280 checks)`.
 7. `bash skills/implementation-loop/tests/journal-selftest.sh` — expect
-   `selftest: PASS (170 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
-   — expect `selftest: PASS (99 checks)`; and
+   `selftest: PASS (237 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
+   — expect `selftest: PASS (103 checks)`; and
    `bash skills/implementation-loop/tests/console-selftest.sh` — expect
    `selftest: PASS (151 checks)`.
 8. `bash skills/implementation-loop/tests/contract-core.sh`,
    `bash skills/implementation-loop/tests/contract-negative.sh`, and
    `bash skills/implementation-loop/tests/shim-selftest.sh` — expect all green.
+   The contract-core per-backend counts are claude 61, codex 63, cursor 67,
+   and grok 63. Contract-negative expects
+   `contract-negative: PASS (42 checks; 21 broken adapters rejected)`.
 9. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
-   `scripts/loop-evidence` record card) — expect `selftest: PASS (149 checks)`.
+   `scripts/loop-evidence` record card) — expect `selftest: PASS (152 checks)`.
 10. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
 11. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.

@@ -8,6 +8,8 @@
 #   loop-journal begin-run [--workspace DIR] [--plan TEXT]
 #   loop-journal end-run --status STATUS [--workspace DIR]
 #   loop-journal recover [--acknowledge ID]... [--workspace DIR]
+#   loop-journal read-run --run ID [--workspace DIR]
+#   loop-journal find-run --plan TEXT [--workspace DIR]
 #
 # Store: $HOME/.config/olddonkey-loop/journal/<sha256(canonical workspace)>/
 # JSONL segments are authoritative; runs.tsv is a rebuildable cache.
@@ -76,7 +78,10 @@ EVENT_SPECS = {
             "round": int,
             "verdict": ("pass", "iterate"),
         },
-        "optional": {"findings": str},
+        "optional": {
+            "findings": str,
+            "reviewer": ("claude", "codex", "cursor", "grok", "session"),
+        },
     },
     "publish.recorded": {
         "required": {"unit": str},
@@ -1301,6 +1306,74 @@ def cmd_recover(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_read_run(args: argparse.Namespace) -> int:
+    canonical = resolve_workspace(args.workspace)
+    paths = store_paths(canonical)
+    path = segment_path(paths, args.run)
+    if not os.path.lexists(paths["root"]) or not os.path.lexists(paths["lock"]):
+        fail("journal store does not exist", EXIT_USAGE)
+    with Lock(paths):
+        no_symlink_from(paths["root"], path)
+        if not os.path.lexists(path):
+            fail(f"run segment does not exist: {args.run}", EXIT_USAGE)
+        data = read_file_bytes(path)
+
+    events, truncated, mid_corrupt = parse_segment(data)
+    if mid_corrupt:
+        fail("mid-file corruption", EXIT_MID_CORRUPT)
+    previous_seq: int | None = None
+    for event in events:
+        if event.get("run") != args.run:
+            fail("event run does not match requested run", EXIT_STORE)
+        seq = event.get("seq")
+        if type(seq) is not int or (previous_seq is not None and seq <= previous_seq):
+            fail("event seq is missing or not strictly increasing", EXIT_STORE)
+        previous_seq = seq
+    if truncated:
+        tail = "torn"
+    elif data and not data.endswith(b"\n"):
+        tail = "unterminated"
+    else:
+        tail = "clean"
+    ends = [event for event in events if event.get("event") == "run.end"]
+    print(dump_json({
+        "schema": 1,
+        "run": args.run,
+        "ended": bool(ends),
+        "end_status": ends[-1].get("status") if ends else None,
+        "tail": tail,
+        "complete": tail == "clean",
+        "events": events,
+    }))
+    return EXIT_OK
+
+
+def cmd_find_run(args: argparse.Namespace) -> int:
+    if not args.plan or contains_newline(args.plan):
+        fail("plan must be non-empty and contain no newline", EXIT_USAGE)
+    canonical = resolve_workspace(args.workspace)
+    paths = store_paths(canonical)
+    segments: dict[str, bytes] = {}
+    if os.path.lexists(paths["root"]) and os.path.lexists(paths["lock"]):
+        with Lock(paths):
+            for run_id in list_run_ids(paths):
+                path = segment_path(paths, run_id)
+                segments[run_id] = read_file_bytes(path)
+
+    runs: list[str] = []
+    ambiguous: list[str] = []
+    for run_id, data in segments.items():
+        first_end = data.find(b"\n")
+        first_line = data if first_end < 0 else data[: first_end + 1]
+        events, _, mid_corrupt = parse_segment(first_line)
+        if mid_corrupt or not events or events[0].get("event") != "run.begin":
+            ambiguous.append(run_id)
+        elif events[0].get("plan") == args.plan:
+            runs.append(run_id)
+    print(dump_json({"schema": 1, "runs": sorted(runs), "ambiguous": sorted(ambiguous)}))
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loop-journal",
@@ -1308,7 +1381,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Locked append-only loop journal. JSONL segments are authoritative. "
             "LOOP_JOURNAL_GC_CAP_BYTES is a test-only gc cap override (default 52428800). "
             "LOOP_JOURNAL_LOCK_TIMEOUT_SEC is a test-only lock timeout override (default 5). "
-            "Exit codes: 2 usage, 3 lock busy, 4 mid-corrupt, 5 D4a, 6 store, "
+            "Exit codes: 2 usage/missing read-run store or segment, 3 lock busy, "
+            "4 mid-corrupt (including newline-terminated non-object), "
+            "5 D4a/malformed runs directory, 6 store/read-run run or seq mismatch, "
             "7 recover refusal, 8 active run."
         ),
     )
@@ -1361,6 +1436,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_workspace(recover)
     recover.add_argument("--acknowledge", action="append", default=[])
     recover.set_defaults(func=cmd_recover)
+
+    read_run = sub.add_parser("read-run", help="read one run segment without writing")
+    add_workspace(read_run)
+    read_run.add_argument("--run", required=True)
+    read_run.set_defaults(func=cmd_read_run)
+
+    find_run = sub.add_parser("find-run", help="find run.begin events by exact plan without writing")
+    add_workspace(find_run)
+    find_run.add_argument("--plan", required=True)
+    find_run.set_defaults(func=cmd_find_run)
     return parser
 
 

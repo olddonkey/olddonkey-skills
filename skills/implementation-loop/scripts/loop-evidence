@@ -293,6 +293,9 @@ def build_card(run: dict, unit: str) -> dict:
             "verdict": review["verdict"],
             "round": int_or_none(review.get("round")),
         }
+        reviewer = review.get("reviewer")
+        if isinstance(reviewer, str) and reviewer in {"claude", "codex", "cursor", "grok", "session"}:
+            last_verdict["reviewer"] = reviewer
     review_counts = {"iterate": 0, "pass": 0}
     counts = run.get("counts")
     if isinstance(counts, dict) and isinstance(counts.get("units"), dict):
@@ -448,10 +451,10 @@ def row_value(item: dict, card: dict) -> str:
         if last is None:
             verdict = "no review recorded"
         else:
-            verdict = (
-                f"last recorded verdict {text(last['verdict'])} "
-                f"(round {text(last['round'])})"
-            )
+            detail = f"round {text(last['round'])}"
+            if "reviewer" in last:
+                detail += f", reviewer {text(last['reviewer'])}"
+            verdict = f"last recorded verdict {text(last['verdict'])} ({detail})"
         reviews = item["reviews"]
         return (
             f"rounds begun: {item['rounds']}; {verdict}; reviews recorded: "
