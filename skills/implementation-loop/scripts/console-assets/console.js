@@ -29,6 +29,61 @@
     "fix-lane": ["codex", "claude-trivial-ok"],
   };
   var PERMISSION_KEYS = ["stop", "cadence", "fix-lane"];
+  var SVG_ALLOW = {
+    ns: "http://www.w3.org/2000/svg",
+    tags: ["svg", "g", "path", "circle", "rect", "line", "text", "title", "desc"],
+    attrs: [
+      "viewBox",
+      "d",
+      "cx",
+      "cy",
+      "r",
+      "x",
+      "y",
+      "x1",
+      "y1",
+      "x2",
+      "y2",
+      "width",
+      "height",
+      "rx",
+      "class",
+      "role",
+      "aria-label",
+      "aria-hidden",
+      "focusable",
+      "text-anchor",
+    ],
+    refused: /url\s*\(|java[\s\x00-\x1f]*script[\s\x00-\x1f]*:|</i,
+  };
+  var FLOW = {
+    backends: ["codex", "cursor", "grok"],
+    unknown: "unknown",
+    owned: [
+      "dispatch.start",
+      "dispatch.end",
+      "dispatch.abandoned",
+      "gate.result",
+      "review.recorded",
+      "publish.recorded",
+    ],
+    sinks: [
+      ["review", "Review"],
+      ["gate", "Gate"],
+      ["publish", "Publication"],
+    ],
+    packets: 20,
+    recent: 10,
+    width: 900,
+    height: 304,
+    row: 96,
+    pad: 12,
+    nodeW: 132,
+    nodeH: 40,
+    left: 86,
+    center: 450,
+    right: 814,
+  };
 
   function el(name) {
     return document.createElement(name);
@@ -60,6 +115,27 @@
     if (node.getAttribute(name) !== next) {
       node.setAttribute(name, next);
     }
+  }
+
+  function svgEl(tag) {
+    if (typeof tag !== "string" || SVG_ALLOW.tags.indexOf(tag) === -1) {
+      throw new Error("svg tag refused");
+    }
+    return document.createElementNS(SVG_ALLOW.ns, tag);
+  }
+
+  function svgAttr(node, name, value) {
+    if (typeof name !== "string" || SVG_ALLOW.attrs.indexOf(name) === -1) {
+      throw new Error("svg attribute refused");
+    }
+    var next = String(value);
+    if (SVG_ALLOW.refused.test(next)) {
+      throw new Error("svg attribute value refused");
+    }
+    if (node.getAttribute(name) !== next) {
+      node.setAttribute(name, next);
+    }
+    return node;
   }
 
   function wipe(node) {
@@ -664,6 +740,693 @@
     );
     txt(parts.ident, selectedDispatch || "");
     pullTranscript(selectedDispatch);
+  }
+
+  function flowOwn(obj, key) {
+    if (!obj || typeof obj !== "object") {
+      return null;
+    }
+    return Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : null;
+  }
+
+  function flowNum(value) {
+    if (typeof value !== "number" || !isFinite(value) || value < 0) {
+      return 0;
+    }
+    return Math.floor(value);
+  }
+
+  function flowSeq(item) {
+    if (!item || typeof item.seq !== "number" || !isFinite(item.seq)) {
+      return -1;
+    }
+    return item.seq;
+  }
+
+  function flowKey(item) {
+    return item.key;
+  }
+
+  function flowReady(run) {
+    var counts = run.counts;
+    return (
+      !!counts &&
+      typeof counts === "object" &&
+      !!counts.all &&
+      typeof counts.all === "object" &&
+      Array.isArray(run.timeline)
+    );
+  }
+
+  function flowReducedMotion() {
+    if (typeof matchMedia !== "function") {
+      return false;
+    }
+    var query = matchMedia("(prefers-reduced-motion: reduce)");
+    return !!(query && query.matches);
+  }
+
+  function flowMemory(root) {
+    if (!root._flow) {
+      root._flow = {
+        marks: {},
+        run: null,
+        filter: "all",
+        tokens: {},
+        names: {},
+        serial: 0,
+        state: null,
+      };
+    }
+    return root._flow;
+  }
+
+  function flowToken(flow, key) {
+    if (key === "all") {
+      return "all";
+    }
+    if (key === "none") {
+      return "unattributed";
+    }
+    if (!Object.prototype.hasOwnProperty.call(flow.tokens, key)) {
+      flow.serial += 1;
+      flow.tokens[key] = "unit-" + flow.serial;
+      flow.names[flow.tokens[key]] = key;
+    }
+    return flow.tokens[key];
+  }
+
+  function flowFilterFor(flow, token) {
+    if (token === "unattributed") {
+      return "none";
+    }
+    var key = flowOwn(flow.names, token);
+    return key || "all";
+  }
+
+  function flowUnits(counts) {
+    var names = [];
+    var units = counts.units;
+    if (!units || typeof units !== "object") {
+      return names;
+    }
+    var keys = Object.keys(units);
+    for (var i = 0; i < keys.length; i += 1) {
+      if (keys[i]) {
+        names.push(keys[i]);
+      }
+    }
+    return names;
+  }
+
+  function flowBackends(all, picked) {
+    var dispatches = flowOwn(all, "dispatches");
+    var found = [];
+    for (var i = 0; i < FLOW.backends.length; i += 1) {
+      if (flowOwn(dispatches, FLOW.backends[i])) {
+        found.push(FLOW.backends[i]);
+      }
+    }
+    // loop-index files a dispatch with no usable start under "unknown". It
+    // gets a node only while the shown counts hold one, and never a packet.
+    if (flowOwn(flowOwn(picked, "dispatches"), FLOW.unknown)) {
+      found.push(FLOW.unknown);
+    }
+    return found;
+  }
+
+  function flowBackendName(backend) {
+    return backend === FLOW.unknown ? "unknown backend" : backend;
+  }
+
+  function flowCounts(counts, filter) {
+    if (filter === "none") {
+      return flowOwn(counts, "unattributed") || {};
+    }
+    if (filter.indexOf("u:") === 0) {
+      return flowOwn(counts.units, filter.slice(2)) || {};
+    }
+    return counts.all;
+  }
+
+  function flowParts(pairs, empty) {
+    var shown = [];
+    for (var i = 0; i < pairs.length; i += 1) {
+      if (pairs[i][0] > 0) {
+        shown.push(pairs[i][0] + " " + pairs[i][1]);
+      }
+    }
+    return shown.length ? shown.join(" · ") : empty;
+  }
+
+  function flowEdgeLabel(edge, picked, partial) {
+    var text;
+    if (edge.backend) {
+      var byBackend = flowOwn(flowOwn(picked, "dispatches"), edge.backend);
+      text = flowParts(
+        [
+          [flowNum(flowOwn(byBackend, "ok")), "exit 0"],
+          [flowNum(flowOwn(byBackend, "failed")), "failed"],
+          [flowNum(flowOwn(byBackend, "open")), "open"],
+          [flowNum(flowOwn(byBackend, "abandoned")), "abandoned"],
+        ],
+        "0 dispatches"
+      );
+    } else if (edge.key === "review") {
+      var reviews = flowOwn(picked, "reviews");
+      text = flowParts(
+        [
+          [flowNum(flowOwn(reviews, "pass")), "pass"],
+          [flowNum(flowOwn(reviews, "iterate")), "iterate"],
+        ],
+        "0 reviews"
+      );
+    } else if (edge.key === "gate") {
+      var gates = flowOwn(picked, "gates");
+      text = flowParts(
+        [
+          [flowNum(flowOwn(gates, "green")), "green"],
+          [flowNum(flowOwn(gates, "red")), "red"],
+          [flowNum(flowOwn(gates, "unknown")), "unknown"],
+        ],
+        "0 gates"
+      );
+    } else {
+      var published = flowNum(flowOwn(picked, "publishes"));
+      text = published === 1 ? "1 publication" : published + " publications";
+    }
+    return partial ? "partial: " + text : text;
+  }
+
+  function flowAriaLabel(picked, backends, partial) {
+    // The unknown-backend lane is not an implementer; name it on its own.
+    var orphans = backends.indexOf(FLOW.unknown) !== -1;
+    var implementers = backends.length - (orphans ? 1 : 0);
+    var dispatches = 0;
+    var byBackend = flowOwn(picked, "dispatches");
+    var keys = byBackend && typeof byBackend === "object" ? Object.keys(byBackend) : [];
+    var outcomes = ["ok", "failed", "open", "abandoned"];
+    for (var i = 0; i < keys.length; i += 1) {
+      for (var j = 0; j < outcomes.length; j += 1) {
+        dispatches += flowNum(flowOwn(byBackend[keys[i]], outcomes[j]));
+      }
+    }
+    var reviews = flowOwn(picked, "reviews");
+    var gates = flowOwn(picked, "gates");
+    return (
+      "Loop flow of recorded events, not verified: Judge, " +
+      implementers +
+      (implementers === 1 ? " implementer, " : " implementers, ") +
+      (orphans ? "plus dispatches with an unknown backend, " : "") +
+      dispatches +
+      " dispatches, " +
+      (flowNum(flowOwn(reviews, "pass")) + flowNum(flowOwn(reviews, "iterate"))) +
+      " reviews, " +
+      (flowNum(flowOwn(gates, "green")) +
+        flowNum(flowOwn(gates, "red")) +
+        flowNum(flowOwn(gates, "unknown"))) +
+      " gates, " +
+      flowNum(flowOwn(picked, "publishes")) +
+      " publications" +
+      (partial ? ", counts partial." : ".")
+    );
+  }
+
+  function flowRoute(item) {
+    var kind = item && item.event;
+    if (
+      kind === "dispatch.start" ||
+      kind === "dispatch.end" ||
+      kind === "dispatch.abandoned"
+    ) {
+      var at = FLOW.backends.indexOf(item.backend);
+      if (at === -1) {
+        return null;
+      }
+      return {
+        edge: "impl-" + FLOW.backends[at],
+        far: FLOW.backends[at],
+        back: kind !== "dispatch.start",
+      };
+    }
+    if (kind === "review.recorded") {
+      return { edge: "review", far: "Review", back: false };
+    }
+    if (kind === "gate.result") {
+      return { edge: "gate", far: "Gate", back: false };
+    }
+    if (kind === "publish.recorded") {
+      return { edge: "publish", far: "Publication", back: false };
+    }
+    return null;
+  }
+
+  function flowVariant(item) {
+    var kind = item.event;
+    if (kind === "dispatch.end") {
+      return typeof item.exit === "number" && item.exit !== 0 ? "danger" : "neutral";
+    }
+    if (kind === "dispatch.abandoned") {
+      return "danger";
+    }
+    if (kind === "review.recorded") {
+      return item.review_verdict === "iterate" ? "caution" : "neutral";
+    }
+    if (kind === "gate.result") {
+      return item.gate_verdict === "red" ? "danger" : "neutral";
+    }
+    return "neutral";
+  }
+
+  function flowOwner(item) {
+    if (
+      item.attribution === "declared" &&
+      typeof item.unit === "string" &&
+      item.unit
+    ) {
+      return "u:" + item.unit;
+    }
+    return "none";
+  }
+
+  function flowMatches(filter, item) {
+    if (filter === "all") {
+      return true;
+    }
+    // run.*, unit.*, round.begin, checkpoint, and journal.repaired carry no
+    // unit in the timeline, so they show under All and nowhere else.
+    return FLOW.owned.indexOf(item.event) !== -1 && filter === flowOwner(item);
+  }
+
+  function flowEventText(item) {
+    var kind = typeof item.event === "string" ? item.event : "unknown event";
+    var head = (flowSeq(item) >= 0 ? "#" + item.seq + " " : "") + kind;
+    if (FLOW.owned.indexOf(kind) === -1) {
+      return head;
+    }
+    // Only a dispatch with no usable backend has no route.
+    var route = flowRoute(item) || {
+      far: flowBackendName(FLOW.unknown),
+      back: kind !== "dispatch.start",
+    };
+    var bits = [
+      head + ": " + (route.back ? route.far + " → Judge" : "Judge → " + route.far),
+    ];
+    if (item.event === "dispatch.end") {
+      bits.push(typeof item.exit === "number" ? "exit " + item.exit : "exit unknown");
+    } else if (item.event === "review.recorded") {
+      bits.push(
+        item.review_verdict === "pass" || item.review_verdict === "iterate"
+          ? item.review_verdict
+          : "verdict unknown"
+      );
+    } else if (item.event === "gate.result") {
+      bits.push(
+        item.gate_verdict === "green" || item.gate_verdict === "red"
+          ? item.gate_verdict
+          : "verdict unknown"
+      );
+    }
+    if (flowOwner(item) !== "none") {
+      bits.push("unit " + item.unit);
+    } else if (item.attribution === "conflict") {
+      bits.push("unattributed (conflicting labels)");
+    } else if (item.attribution === "partial") {
+      bits.push("unattributed (no dispatch.start)");
+    } else {
+      bits.push("unattributed");
+    }
+    return bits.join(" · ");
+  }
+
+  function flowEdge(key, backend, judgeX, farX, farY) {
+    var mid = FLOW.height / 2;
+    var judgeY = mid + (farY - mid) / 6;
+    var lift = farY > mid ? 18 : -8;
+    return {
+      key: key,
+      backend: backend,
+      out: "M " + judgeX + " " + judgeY + " L " + farX + " " + farY,
+      back: "M " + farX + " " + farY + " L " + judgeX + " " + judgeY,
+      lx: (judgeX + farX) / 2,
+      ly: (judgeY + farY) / 2 + lift,
+    };
+  }
+
+  function flowLayout(backends) {
+    var mid = FLOW.height / 2;
+    var half = FLOW.nodeW / 2;
+    // Four implementer rows (three backends and unknown) close up to fit.
+    var row =
+      backends.length > 1
+        ? Math.min(FLOW.row, (FLOW.height - FLOW.nodeH - FLOW.pad * 2) / (backends.length - 1))
+        : FLOW.row;
+    var nodes = [
+      { key: "judge", label: "Judge", cx: FLOW.center, cy: mid, judge: true },
+    ];
+    var edges = [];
+    var i;
+    var y;
+    for (i = 0; i < backends.length; i += 1) {
+      y = mid + (i - (backends.length - 1) / 2) * row;
+      nodes.push({
+        key: "impl-" + backends[i],
+        label: flowBackendName(backends[i]),
+        cx: FLOW.left,
+        cy: y,
+      });
+      edges.push(
+        flowEdge("impl-" + backends[i], backends[i], FLOW.center - half, FLOW.left + half, y)
+      );
+    }
+    for (i = 0; i < FLOW.sinks.length; i += 1) {
+      y = mid + (i - (FLOW.sinks.length - 1) / 2) * FLOW.row;
+      nodes.push({ key: FLOW.sinks[i][0], label: FLOW.sinks[i][1], cx: FLOW.right, cy: y });
+      edges.push(flowEdge(FLOW.sinks[i][0], "", FLOW.center + half, FLOW.right - half, y));
+    }
+    return { nodes: nodes, edges: edges };
+  }
+
+  function createFlowEdge(edge) {
+    var group = svgEl("g");
+    svgAttr(group, "class", "flow-edge");
+    var line = svgEl("path");
+    svgAttr(line, "class", "flow-line");
+    var label = svgEl("text");
+    svgAttr(label, "text-anchor", "middle");
+    group.appendChild(line);
+    group.appendChild(label);
+    group._line = line;
+    group._label = label;
+    updateFlowEdge(group, edge);
+    return group;
+  }
+
+  function updateFlowEdge(group, edge) {
+    svgAttr(group._line, "d", edge.out);
+    svgAttr(group._label, "class", edge.partial ? "flow-label is-partial" : "flow-label");
+    svgAttr(group._label, "x", edge.lx);
+    svgAttr(group._label, "y", edge.ly);
+    txt(group._label, edge.label);
+  }
+
+  function createFlowNode(node) {
+    var group = svgEl("g");
+    svgAttr(group, "class", node.judge ? "flow-node flow-judge" : "flow-node");
+    var box = svgEl("rect");
+    svgAttr(box, "width", FLOW.nodeW);
+    svgAttr(box, "height", FLOW.nodeH);
+    svgAttr(box, "rx", 8);
+    var name = svgEl("text");
+    svgAttr(name, "text-anchor", "middle");
+    group.appendChild(box);
+    group.appendChild(name);
+    group._box = box;
+    group._name = name;
+    updateFlowNode(group, node);
+    return group;
+  }
+
+  function updateFlowNode(group, node) {
+    svgAttr(group._box, "x", node.cx - FLOW.nodeW / 2);
+    svgAttr(group._box, "y", node.cy - FLOW.nodeH / 2);
+    svgAttr(group._name, "x", node.cx);
+    svgAttr(group._name, "y", node.cy + 5);
+    txt(group._name, node.label);
+  }
+
+  function createFlowOption(item) {
+    var option = el("option");
+    updateFlowOption(option, item);
+    return option;
+  }
+
+  function updateFlowOption(option, item) {
+    setAttr(option, "value", item.token);
+    txt(option, item.label);
+  }
+
+  function createFlowItem(item) {
+    var row = el("li");
+    updateFlowItem(row, item);
+    return row;
+  }
+
+  function updateFlowItem(row, item) {
+    txt(row, item.text);
+  }
+
+  function flowRecent(timeline, filter) {
+    var picked = [];
+    var used = {};
+    for (var i = timeline.length - 1; i >= 0 && picked.length < FLOW.recent; i -= 1) {
+      var item = timeline[i];
+      if (item && typeof item === "object" && flowMatches(filter, item)) {
+        var key = flowSeq(item) >= 0 ? "s" + item.seq : "i" + i;
+        if (used[key]) {
+          key += ":" + i;
+        }
+        used[key] = true;
+        picked.unshift({ key: key, text: flowEventText(item) });
+      }
+    }
+    if (!picked.length) {
+      picked.push({ key: "none", text: "No recorded events under this filter." });
+    }
+    return picked;
+  }
+
+  function flowFresh(flow, runKey, timeline) {
+    var top = -1;
+    var i;
+    for (i = 0; i < timeline.length; i += 1) {
+      if (flowSeq(timeline[i]) > top) {
+        top = timeline[i].seq;
+      }
+    }
+    var seen = Object.prototype.hasOwnProperty.call(flow.marks, runKey);
+    var mark = seen ? flow.marks[runKey] : top;
+    var fresh = [];
+    if (seen) {
+      for (i = 0; i < timeline.length; i += 1) {
+        if (flowSeq(timeline[i]) > mark) {
+          fresh.push(timeline[i]);
+        }
+      }
+    }
+    flow.marks[runKey] = Math.max(mark, top);
+    return fresh;
+  }
+
+  function clearPackets(layer) {
+    while (layer.firstChild) {
+      layer.removeChild(layer.firstChild);
+    }
+  }
+
+  function launchPacket(layer, d, variant, lag) {
+    var packet = svgEl("path");
+    svgAttr(
+      packet,
+      "class",
+      "flow-packet is-" + variant + " flow-lag-" + Math.min(lag, 9)
+    );
+    svgAttr(packet, "d", d);
+    packet.addEventListener("animationend", function () {
+      if (packet.parentNode === layer) {
+        layer.removeChild(packet);
+      }
+    });
+    layer.appendChild(packet);
+    while (layer.childNodes.length > FLOW.packets) {
+      layer.removeChild(layer.firstChild);
+    }
+  }
+
+  function syncFlowFilter(select, flow, units) {
+    var items = [{ key: "all", token: "all", label: "All" }];
+    for (var i = 0; i < units.length; i += 1) {
+      items.push({
+        key: "u:" + units[i],
+        token: flowToken(flow, "u:" + units[i]),
+        label: units[i],
+      });
+    }
+    items.push({ key: "none", token: "unattributed", label: "Unattributed" });
+    syncKeyed(select, items, flowKey, createFlowOption, updateFlowOption);
+    applySelectValue(select, flowToken(flow, flow.filter));
+  }
+
+  function ensureFlowSkeleton(root) {
+    if (root._mode === "flow" && root._parts) {
+      return root._parts;
+    }
+    wipe(root);
+    root._mode = "flow";
+    var parts = {};
+    parts.bar = el("div");
+    parts.bar.className = "flow-bar";
+    var label = el("label");
+    label.setAttribute("for", "flow-filter");
+    label.className = "flow-filter-label";
+    txt(label, "Show");
+    parts.filter = el("select");
+    parts.filter.setAttribute("id", "flow-filter");
+    parts.filter.addEventListener("change", function () {
+      var flow = flowMemory(root);
+      flow.filter = flowFilterFor(flow, parts.filter.value);
+      clearPackets(parts.packets);
+      if (flow.state) {
+        drawFlow(root, flow.state);
+      }
+    });
+    parts.legend = el("p");
+    parts.legend.className = "flow-legend";
+    var caveat = el("span");
+    txt(caveat, "recorded events — not verified");
+    parts.legend.appendChild(caveat);
+    parts.legend.appendChild(chip("recorded", "neutral"));
+    parts.legend.appendChild(chip("iterate", "caution"));
+    parts.legend.appendChild(chip("nonzero exit, red, abandoned", "danger"));
+    parts.bar.appendChild(label);
+    parts.bar.appendChild(parts.filter);
+    parts.bar.appendChild(parts.legend);
+    root.appendChild(parts.bar);
+    parts.figure = el("div");
+    parts.figure.className = "flow-figure";
+    parts.svg = svgEl("svg");
+    svgAttr(parts.svg, "class", "flow-svg");
+    svgAttr(parts.svg, "viewBox", "0 0 " + FLOW.width + " " + FLOW.height);
+    svgAttr(parts.svg, "width", FLOW.width);
+    svgAttr(parts.svg, "height", FLOW.height);
+    svgAttr(parts.svg, "role", "img");
+    svgAttr(parts.svg, "focusable", "false");
+    parts.edges = svgEl("g");
+    svgAttr(parts.edges, "class", "flow-edges");
+    parts.packets = svgEl("g");
+    svgAttr(parts.packets, "class", "flow-packets");
+    svgAttr(parts.packets, "aria-hidden", "true");
+    parts.nodes = svgEl("g");
+    svgAttr(parts.nodes, "class", "flow-nodes");
+    parts.svg.appendChild(parts.edges);
+    parts.svg.appendChild(parts.packets);
+    parts.svg.appendChild(parts.nodes);
+    parts.figure.appendChild(parts.svg);
+    root.appendChild(parts.figure);
+    parts.recentHead = el("h3");
+    parts.recentHead.className = "visually-hidden";
+    txt(parts.recentHead, "Last ten recorded events");
+    root.appendChild(parts.recentHead);
+    parts.recent = el("ol");
+    parts.recent.className = "visually-hidden";
+    root.appendChild(parts.recent);
+    parts.truncated = null;
+    parts.damaged = null;
+    root._parts = parts;
+    return parts;
+  }
+
+  function drawFlow(root, state) {
+    var run = pickRun(state);
+    if (!run) {
+      showHint(root, "No runs recorded yet.");
+      return;
+    }
+    if (!flowReady(run)) {
+      showHint(root, "No flow data: this index output has no run totals or timeline.");
+      return;
+    }
+    var flow = flowMemory(root);
+    flow.state = state;
+    var parts = ensureFlowSkeleton(root);
+    var runKey = "r:" + String(run.run_id);
+    if (flow.run !== runKey) {
+      clearPackets(parts.packets);
+      flow.run = runKey;
+    }
+    var counts = run.counts;
+    var units = flowUnits(counts);
+    if (flow.filter.indexOf("u:") === 0 && units.indexOf(flow.filter.slice(2)) === -1) {
+      flow.filter = "all";
+    }
+    syncFlowFilter(parts.filter, flow, units);
+    var picked = flowCounts(counts, flow.filter);
+    var backends = flowBackends(counts.all, picked);
+    var layout = flowLayout(backends);
+    var partial = run.counts_complete !== true;
+    var truncated = run.timeline_truncated === true;
+    var edges = {};
+    var i;
+    for (i = 0; i < layout.edges.length; i += 1) {
+      layout.edges[i].label = flowEdgeLabel(layout.edges[i], picked, partial);
+      layout.edges[i].partial = partial;
+      edges["e:" + layout.edges[i].key] = layout.edges[i];
+    }
+    syncKeyed(parts.edges, layout.edges, flowKey, createFlowEdge, updateFlowEdge);
+    syncKeyed(parts.nodes, layout.nodes, flowKey, createFlowNode, updateFlowNode);
+    svgAttr(parts.svg, "aria-label", flowAriaLabel(picked, backends, partial));
+    // A damaged record's counts are partial, so a truncated, damaged run gets
+    // one notice that says both and never claims whole-run totals.
+    var damage = "";
+    if (partial) {
+      damage = truncated
+        ? "packets show the last 500 events; counts are partial because the record is damaged"
+        : "The run's record is damaged: every count here is partial.";
+    }
+    parts.truncated = updateOptional(
+      root,
+      parts.truncated,
+      "flow-notice",
+      truncated && !partial
+        ? "packets show the last 500 events; totals cover the whole run"
+        : "",
+      parts.figure
+    );
+    parts.damaged = updateOptional(
+      root,
+      parts.damaged,
+      "flow-notice is-damaged",
+      damage,
+      parts.truncated && parts.truncated.parentNode === root ? parts.truncated : parts.figure
+    );
+    syncKeyed(
+      parts.recent,
+      flowRecent(run.timeline, flow.filter),
+      flowKey,
+      createFlowItem,
+      updateFlowItem
+    );
+    var fresh = flowFresh(flow, runKey, run.timeline);
+    if (flowReducedMotion()) {
+      clearPackets(parts.packets);
+      return;
+    }
+    var lag = 0;
+    for (i = 0; i < fresh.length; i += 1) {
+      var route = flowRoute(fresh[i]);
+      if (!route || !flowMatches(flow.filter, fresh[i])) {
+        continue;
+      }
+      var edge = flowOwn(edges, "e:" + route.edge);
+      if (!edge) {
+        continue;
+      }
+      launchPacket(
+        parts.packets,
+        route.back ? edge.back : edge.out,
+        flowVariant(fresh[i]),
+        lag
+      );
+      lag += 1;
+    }
+  }
+
+  function renderFlow(state) {
+    var root = document.getElementById("flow-root");
+    if (!root) {
+      return;
+    }
+    drawFlow(root, state);
   }
 
   function publishSignature(publish) {
@@ -1414,6 +2177,7 @@
     stampUpdated();
     renderVitals(state);
     renderNow(state);
+    renderFlow(state);
     renderThisRun(state);
   }
 

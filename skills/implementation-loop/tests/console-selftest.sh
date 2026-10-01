@@ -573,6 +573,56 @@ else
   fail "update path: unit/dispatch/gate/vitals/dial updates are not create-time-only (source-level)"
 fi
 
+if python3 - "$ASSETS" <<'PY'
+import os, re, sys
+root = sys.argv[1]
+js = open(os.path.join(root, "console.js"), encoding="utf-8").read()
+html = open(os.path.join(root, "index.html"), encoding="utf-8").read()
+
+
+def extract_function(name):
+    match = re.search(r"function " + re.escape(name) + r"\s*\(", js)
+    if match is None:
+        raise SystemExit("missing function %s" % name)
+    brace = js.find("{", match.start())
+    depth = 0
+    for index in range(brace, len(js)):
+        if js[index] == "{":
+            depth += 1
+        elif js[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return js[match.start() : index + 1]
+    raise SystemExit("unbalanced function %s" % name)
+
+
+order = [html.find('id="section-now"'), html.find('id="section-flow"'), html.find('id="section-run"')]
+if -1 in order or order != sorted(order):
+    raise SystemExit("Flow section is not between Now and This run: %s" % order)
+if '<div id="flow-root"></div>' not in html:
+    raise SystemExit("missing #flow-root")
+render_all = extract_function("renderAll")
+if not re.search(r"renderNow\(state\);\s*renderFlow\(state\);\s*renderThisRun\(state\);", render_all):
+    raise SystemExit("renderAll does not draw Flow between Now and This run")
+if js.count("createElementNS(") != 1 or "createElementNS(" not in extract_function("svgEl"):
+    raise SystemExit("an SVG element is created outside svgEl")
+names = re.findall(r"function (\w*[Ff]low\w*|svgEl|svgAttr|clearPackets|launchPacket)\s*\(", js)
+if len(names) < 30:
+    raise SystemExit("flow functions not found: %s" % names)
+for name in names:
+    body = extract_function(name)
+    for token in ("fetch(", "XMLHttpRequest", "WebSocket", "EventSource", "sendBeacon", "pullState", "pullTranscript", "pullDials"):
+        if token in body:
+            raise SystemExit("%s issues a request (%s)" % (name, token))
+PY
+then
+  pass "flow: index.html places the Flow section between Now and This run; renderAll draws it in that order (source-level)"
+  pass "flow: every SVG element is created through svgEl, and no flow function issues a request (source-level)"
+else
+  fail "flow: index.html places the Flow section between Now and This run; renderAll draws it in that order (source-level)"
+  fail "flow: every SVG element is created through svgEl, and no flow function issues a request (source-level)"
+fi
+
 if node - "$ASSETS/console.js" >"$TMP_ROOT/render.tap" 2>"$TMP_ROOT/render.err" <<'JS'
 const fs = require("fs");
 const vm = require("vm");
@@ -629,15 +679,84 @@ function walk(node, visit) {
   });
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+const SVG_TAGS = ["svg", "g", "path", "circle", "rect", "line", "text", "title", "desc"];
+const SVG_ATTRS = [
+  "viewBox", "d", "cx", "cy", "r", "x", "y", "x1", "y1", "x2", "y2", "width",
+  "height", "rx", "class", "role", "aria-label", "aria-hidden", "focusable",
+  "text-anchor",
+];
+const FLOW_HELPERS = [
+  "wipe",
+  "keyedMap",
+  "itemById",
+  "syncKeyed",
+  "showHint",
+  "placeBefore",
+  "updateOptional",
+  "pickRun",
+  "svgEl",
+  "svgAttr",
+  "flowOwn",
+  "flowNum",
+  "flowSeq",
+  "flowKey",
+  "flowReady",
+  "flowReducedMotion",
+  "flowMemory",
+  "flowToken",
+  "flowFilterFor",
+  "flowUnits",
+  "flowBackends",
+  "flowBackendName",
+  "flowCounts",
+  "flowParts",
+  "flowEdgeLabel",
+  "flowAriaLabel",
+  "flowRoute",
+  "flowVariant",
+  "flowOwner",
+  "flowMatches",
+  "flowEventText",
+  "flowEdge",
+  "flowLayout",
+  "createFlowEdge",
+  "updateFlowEdge",
+  "createFlowNode",
+  "updateFlowNode",
+  "createFlowOption",
+  "updateFlowOption",
+  "createFlowItem",
+  "updateFlowItem",
+  "flowRecent",
+  "flowFresh",
+  "clearPackets",
+  "launchPacket",
+  "syncFlowFilter",
+  "ensureFlowSkeleton",
+  "drawFlow",
+  "renderFlow",
+];
+const svgCreated = [];
+
 const sandbox = {
   document: {
     activeElement: null,
     createElement: function (name) {
       return makeNode(name);
     },
+    createElementNS: function (ns, name) {
+      svgCreated.push(name);
+      const node = makeNode(name);
+      node.namespaceURI = ns;
+      return node;
+    },
     getElementById: function () {
       return null;
     },
+  },
+  matchMedia: function () {
+    return { matches: false };
   },
   URL: URL,
   postDial: function () {},
@@ -648,6 +767,8 @@ const sandbox = {
 };
 vm.createContext(sandbox);
 vm.runInContext(extractBlock(/var DIAL_OPTIONS =/), sandbox);
+vm.runInContext(extractBlock(/var SVG_ALLOW =/), sandbox);
+vm.runInContext(extractBlock(/var FLOW =/), sandbox);
 [
   "el",
   "txt",
@@ -685,7 +806,7 @@ vm.runInContext(extractBlock(/var DIAL_OPTIONS =/), sandbox);
   "updateTile",
   "pad2",
   "stampUpdated",
-].forEach(function (name) {
+].concat(FLOW_HELPERS).forEach(function (name) {
   vm.runInContext(
     "this." + name + " = " + extractBlock(new RegExp("function " + name + "\\(")),
     sandbox
@@ -782,6 +903,93 @@ check("render: publish link text is host-plus-path; href stays the parsed URL", 
   if (plain.children[0].textContent !== "javascript:alert(1)") {
     throw new Error("non-http text changed");
   }
+});
+
+function refuses(fn) {
+  try {
+    fn();
+  } catch (error) {
+    return true;
+  }
+  return false;
+}
+
+check("flow: svgEl creates each allowlisted tag in the SVG namespace and refuses every other tag", function () {
+  SVG_TAGS.forEach(function (tag) {
+    const node = sandbox.svgEl(tag);
+    if (node.nodeName !== tag || node.namespaceURI !== SVG_NS) {
+      throw new Error("svgEl(" + tag + ") made " + node.nodeName + " in " + node.namespaceURI);
+    }
+  });
+  const others = [
+    "script", "foreignObject", "a", "image", "use", "animate", "set", "style",
+    "iframe", "object", "embed", "animateMotion", "animateTransform", "feImage",
+    "filter", "pattern", "mask", "clipPath", "marker", "symbol", "defs", "switch",
+    "tspan", "textPath", "linearGradient", "stop", "view", "div", "img", "SVG",
+    "Path", "svg ", " g", "",
+  ];
+  if (others.length < 20) {
+    throw new Error("refusal list too short");
+  }
+  const before = svgCreated.length;
+  others.concat([null, undefined, 1, ["svg"], { toString: function () { return "g"; } }]).forEach(function (tag) {
+    if (!refuses(function () { sandbox.svgEl(tag); })) {
+      throw new Error("svgEl accepted " + JSON.stringify(tag));
+    }
+  });
+  if (svgCreated.length !== before) {
+    throw new Error("a refused tag still reached createElementNS: " + svgCreated.slice(before).join(","));
+  }
+});
+
+check("flow: svgAttr sets each allowlisted attribute and refuses every other name and any url( / javascript: / < value", function () {
+  SVG_ATTRS.forEach(function (name) {
+    const node = makeNode("rect");
+    sandbox.svgAttr(node, name, "12");
+    if (node.attrs[name] !== "12") {
+      throw new Error("svgAttr did not set " + name);
+    }
+  });
+  const others = [
+    "href", "xlink:href", "onload", "onclick", "onerror", "onmouseover", "onbegin",
+    "onfocus", "style", "src", "fill", "stroke", "filter", "mask", "clip-path",
+    "marker-start", "transform", "id", "xmlns", "xml:base", "attributeName",
+    "values", "from", "to", "begin", "data-x", "tabindex", "VIEWBOX", "Class",
+    "pathLength", "",
+  ];
+  if (others.length < 20) {
+    throw new Error("refusal list too short");
+  }
+  others.forEach(function (name) {
+    const node = makeNode("rect");
+    if (!refuses(function () { sandbox.svgAttr(node, name, "1"); })) {
+      throw new Error("svgAttr accepted " + JSON.stringify(name));
+    }
+    if (Object.keys(node.attrs).length) {
+      throw new Error("refused " + name + " still wrote " + JSON.stringify(node.attrs));
+    }
+  });
+  [["fill", "url(#x)"], ["style", "fill: url(#x)"], ["href", "javascript:alert(1)"]].forEach(function (pair) {
+    if (!refuses(function () { sandbox.svgAttr(makeNode("rect"), pair[0], pair[1]); })) {
+      throw new Error("svgAttr accepted " + pair.join("="));
+    }
+  });
+  const values = [
+    "url(#x)", "URL(#x)", "url (#x)", "javascript:alert(1)", "JavaScript:alert(1)",
+    "java\tscript:alert(1)", "java\nscript:alert(1)", " javascript :x", "<script>",
+    "a<b", "<",
+  ];
+  ["class", "aria-label", "d", "x", "viewBox"].forEach(function (name) {
+    values.forEach(function (value) {
+      const node = makeNode("rect");
+      if (!refuses(function () { sandbox.svgAttr(node, name, value); })) {
+        throw new Error("svgAttr accepted " + name + "=" + JSON.stringify(value));
+      }
+      if (Object.keys(node.attrs).length) {
+        throw new Error("refused value still wrote " + JSON.stringify(node.attrs));
+      }
+    });
+  });
 });
 
 function makeLiveText(value) {
@@ -952,15 +1160,57 @@ function deltaWrites(before, after) {
   };
 }
 
+// A real SVG element's className is a read-only SVGAnimatedString (assigning
+// it throws under "use strict"), so the fake refuses it, and it refuses any
+// setAttribute outside the allowlist even if a caller bypasses svgAttr.
+function makeLiveSvgNode(ns, name) {
+  if (ns !== SVG_NS) {
+    throw new Error("createElementNS namespace " + ns);
+  }
+  const node = makeLiveNode(name);
+  node.namespaceURI = ns;
+  const plainSet = node.setAttribute;
+  node.setAttribute = function (key, value) {
+    if (SVG_ATTRS.indexOf(key) === -1) {
+      throw new Error("SVG setAttribute outside the allowlist: " + key);
+    }
+    plainSet.call(this, key, value);
+  };
+  Object.defineProperty(node, "className", {
+    get: function () {
+      return { baseVal: this.getAttribute("class") || "" };
+    },
+    set: function () {
+      throw new TypeError("SVG className is read-only");
+    },
+  });
+  return node;
+}
+
+let flowReduce = false;
+const mediaQueries = [];
+const fetchCalls = [];
+
 const liveSandbox = {
   document: {
     activeElement: null,
     createElement: function (name) {
       return makeLiveNode(name);
     },
+    createElementNS: function (ns, name) {
+      return makeLiveSvgNode(ns, name);
+    },
     getElementById: function () {
       return null;
     },
+  },
+  matchMedia: function (query) {
+    mediaQueries.push(query);
+    return { matches: flowReduce && query === "(prefers-reduced-motion: reduce)" };
+  },
+  fetch: function () {
+    fetchCalls.push(Array.prototype.slice.call(arguments));
+    return new Promise(function () {});
   },
   URL: URL,
   postDial: function () {},
@@ -971,6 +1221,8 @@ const liveSandbox = {
 };
 vm.createContext(liveSandbox);
 vm.runInContext(extractBlock(/var DIAL_OPTIONS =/), liveSandbox);
+vm.runInContext(extractBlock(/var SVG_ALLOW =/), liveSandbox);
+vm.runInContext(extractBlock(/var FLOW =/), liveSandbox);
 [
   "el",
   "txt",
@@ -1007,7 +1259,7 @@ vm.runInContext(extractBlock(/var DIAL_OPTIONS =/), liveSandbox);
   "updateTile",
   "pad2",
   "stampUpdated",
-].forEach(function (name) {
+].concat(FLOW_HELPERS).forEach(function (name) {
   vm.runInContext(
     "this." + name + " = " + extractBlock(new RegExp("function " + name + "\\(")),
     liveSandbox
@@ -1352,6 +1604,1002 @@ check("update: stampUpdated writes #updated-at through txt and is quiet on the s
     throw new Error("later stamp " + updated.textContent);
   }
 });
+
+// Flow view fixtures: run objects shaped like loop-index output (counts,
+// counts_complete, timeline, timeline_truncated).
+function bucket(extra) {
+  return Object.assign(
+    {
+      dispatches: {},
+      reviews: { iterate: 0, pass: 0 },
+      gates: { green: 0, red: 0, unknown: 0 },
+      publishes: 0,
+    },
+    extra || {}
+  );
+}
+
+function tally(ok, failed, open, abandoned) {
+  return { ok: ok || 0, failed: failed || 0, open: open || 0, abandoned: abandoned || 0 };
+}
+
+function flowRun(id, timeline, extra) {
+  return Object.assign(
+    {
+      run_id: id,
+      status: "active",
+      counts_complete: true,
+      counts: {
+        all: bucket({ dispatches: { codex: tally(1) } }),
+        units: { u1: bucket() },
+        unattributed: bucket(),
+      },
+      timeline: timeline,
+      timeline_truncated: false,
+    },
+    extra || {}
+  );
+}
+
+function flowState(active) {
+  return {
+    context: { state: "active", run: active },
+    runs: Array.prototype.slice.call(arguments, 1),
+  };
+}
+
+function ev(seq, event, extra) {
+  return Object.assign({ seq: seq, ts: "2026-09-28T00:00:00Z", event: event }, extra || {});
+}
+
+function dispatchEv(seq, event, backend, extra) {
+  return ev(
+    seq,
+    event,
+    Object.assign({ dispatch_id: "d-" + seq, backend: backend, attribution: "none" }, extra || {})
+  );
+}
+
+function evs(from, to, make) {
+  const out = [];
+  for (let seq = from; seq <= to; seq += 1) {
+    out.push(make(seq));
+  }
+  return out;
+}
+
+// Packet-bearing traffic, so a first render has something it must not replay.
+function busy(from, to) {
+  return evs(from, to, function (seq) {
+    switch (seq % 4) {
+      case 0:
+        return dispatchEv(seq, "dispatch.start", "codex");
+      case 1:
+        return ev(seq, "gate.result", { gate_verdict: "red", attribution: "none" });
+      case 2:
+        return ev(seq, "review.recorded", { review_verdict: "pass", attribution: "none" });
+      default:
+        return ev(seq, "publish.recorded", { attribution: "none" });
+    }
+  });
+}
+
+function flowRoot() {
+  return makeLiveNode("div");
+}
+
+function packetsOf(root) {
+  return root._parts.packets._childList.slice();
+}
+
+function classOf(node) {
+  if (typeof node.className === "string") {
+    return node.className;
+  }
+  if (node.className && typeof node.className.baseVal === "string") {
+    return node.className.baseVal;
+  }
+  return "";
+}
+
+function variantOf(node) {
+  const found = classOf(node).match(/\bis-(ok|neutral|caution|danger)\b/g) || [];
+  if (found.length !== 1) {
+    throw new Error("packet variant classes " + classOf(node));
+  }
+  return found[0].slice(3);
+}
+
+function edgeLabel(root, key) {
+  const group = root._parts.edges._byId[key];
+  if (!group) {
+    throw new Error("no edge " + key);
+  }
+  return group._label.textContent;
+}
+
+function edgePath(backends, key, back) {
+  const edge = liveSandbox.flowLayout(backends).edges.filter(function (item) {
+    return item.key === key;
+  })[0];
+  if (!edge) {
+    throw new Error("layout has no edge " + key);
+  }
+  return back ? edge.back : edge.out;
+}
+
+function fire(node, type) {
+  (node.listeners[type] || []).slice().forEach(function (fn) {
+    fn({ type: type, target: node });
+  });
+}
+
+function chooseFilter(root, label) {
+  const select = root._parts.filter;
+  const option = select.children.filter(function (child) {
+    return child.textContent === label;
+  })[0];
+  if (!option) {
+    throw new Error("no filter option " + label);
+  }
+  select.value = option.getAttribute("value");
+  fire(select, "change");
+}
+
+function liveWalk(node, visit) {
+  visit(node);
+  (node._childList || []).forEach(function (child) {
+    liveWalk(child, visit);
+  });
+}
+
+function nodeLabels(root) {
+  return root._parts.nodes.children.map(function (group) {
+    return group._name.textContent;
+  });
+}
+
+check("flow: implementer nodes exist only for backends present in counts, in the order codex, cursor, grok, then unknown backend (headless)", function () {
+  const root = flowRoot();
+  const run = flowRun("A", busy(1, 4));
+  run.counts.all.dispatches = { grok: tally(1), unknown: tally(2), codex: tally(0, 1) };
+  liveSandbox.drawFlow(root, flowState("A", run));
+  const labels = nodeLabels(root).join(",");
+  if (labels !== "Judge,codex,grok,unknown backend,Review,Gate,Publication") {
+    throw new Error("nodes " + labels);
+  }
+  const edges = Object.keys(root._parts.edges._byId).sort().join(",");
+  if (edges !== "gate,impl-codex,impl-grok,impl-unknown,publish,review") {
+    throw new Error("edges " + edges);
+  }
+  const bare = flowRoot();
+  const none = flowRun("B", []);
+  none.counts.all.dispatches = {};
+  liveSandbox.drawFlow(bare, flowState("B", none));
+  if (nodeLabels(bare).join(",") !== "Judge,Review,Gate,Publication") {
+    throw new Error("dispatch-free nodes " + nodeLabels(bare).join(","));
+  }
+  const all = flowRoot();
+  const three = flowRun("C", []);
+  three.counts.all.dispatches = { grok: tally(1), cursor: tally(1), codex: tally(1) };
+  liveSandbox.drawFlow(all, flowState("C", three));
+  if (nodeLabels(all).join(",") !== "Judge,codex,cursor,grok,Review,Gate,Publication") {
+    throw new Error("three-backend nodes " + nodeLabels(all).join(","));
+  }
+});
+
+check("flow: the first render animates nothing; two new events make exactly two packets with their recorded classes; a repeat makes none (headless)", function () {
+  const root = flowRoot();
+  const base = busy(1, 8);
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", base)));
+  if (packetsOf(root).length !== 0) {
+    throw new Error("first render made " + packetsOf(root).length + " packets");
+  }
+  const next = flowRun(
+    "A",
+    base.concat([
+      dispatchEv(9, "dispatch.end", "codex", { exit: 3 }),
+      ev(10, "review.recorded", { review_verdict: "iterate", unit: "u1", attribution: "declared" }),
+    ])
+  );
+  liveSandbox.drawFlow(root, flowState("A", next));
+  const made = packetsOf(root);
+  if (made.length !== 2) {
+    throw new Error("update made " + made.length + " packets");
+  }
+  if (!/\bflow-packet\b/.test(classOf(made[0])) || variantOf(made[0]) !== "danger") {
+    throw new Error("nonzero-exit packet " + classOf(made[0]));
+  }
+  if (made[0].getAttribute("d") !== edgePath(["codex"], "impl-codex", true)) {
+    throw new Error("dispatch.end did not travel codex → Judge: " + made[0].getAttribute("d"));
+  }
+  if (variantOf(made[1]) !== "caution" || made[1].getAttribute("d") !== edgePath(["codex"], "review", false)) {
+    throw new Error("iterate packet " + classOf(made[1]) + " " + made[1].getAttribute("d"));
+  }
+  liveSandbox.drawFlow(root, flowState("A", next));
+  liveSandbox.drawFlow(root, flowState("A", JSON.parse(JSON.stringify(next))));
+  if (packetsOf(root).length !== 2) {
+    throw new Error("a repeated update animated again: " + packetsOf(root).length);
+  }
+  fire(made[0], "animationend");
+  if (packetsOf(root).length !== 1 || packetsOf(root)[0] !== made[1]) {
+    throw new Error("animationend did not remove its packet");
+  }
+});
+
+check("flow: packet variants are recorded outcomes: exit 0, pass, green, and unknown are neutral; nonzero exit, red, and abandoned are danger; iterate is caution; nothing is is-ok (headless)", function () {
+  const root = flowRoot();
+  const base = busy(1, 4);
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", base)));
+  const unit = { unit: "u1", attribution: "declared" };
+  const added = [
+    [dispatchEv(5, "dispatch.start", "codex"), "neutral"],
+    [dispatchEv(6, "dispatch.end", "codex", { exit: 0 }), "neutral"],
+    [ev(7, "review.recorded", Object.assign({ review_verdict: "pass" }, unit)), "neutral"],
+    [ev(8, "gate.result", Object.assign({ gate_verdict: "green", binding: "clean" }, unit)), "neutral"],
+    [ev(9, "publish.recorded", unit), "neutral"],
+    [dispatchEv(10, "dispatch.end", "codex", { exit: 2 }), "danger"],
+    [dispatchEv(11, "dispatch.abandoned", "codex"), "danger"],
+    [ev(12, "gate.result", Object.assign({ gate_verdict: "red" }, unit)), "danger"],
+    [ev(13, "review.recorded", Object.assign({ review_verdict: "iterate" }, unit)), "caution"],
+    [ev(14, "gate.result", { gate_verdict: "unknown", attribution: "none" }), "neutral"],
+    [dispatchEv(15, "dispatch.end", "codex"), "neutral"],
+    [ev(16, "review.recorded", { review_verdict: "unknown", attribution: "none" }), "neutral"],
+  ];
+  const run = flowRun(
+    "A",
+    base.concat(added.map(function (pair) {
+      return pair[0];
+    }))
+  );
+  run.counts.all = bucket({
+    dispatches: { codex: tally(1, 2, 1, 1) },
+    reviews: { pass: 1, iterate: 1 },
+    gates: { green: 1, red: 1, unknown: 1 },
+    publishes: 1,
+  });
+  liveSandbox.drawFlow(root, flowState("A", run));
+  const made = packetsOf(root);
+  if (made.length !== added.length) {
+    throw new Error("packets " + made.length);
+  }
+  made.forEach(function (packet, index) {
+    if (variantOf(packet) !== added[index][1]) {
+      throw new Error(added[index][0].event + " packet is " + classOf(packet));
+    }
+  });
+  liveWalk(root, function (node) {
+    if (/\bis-ok\b/.test(classOf(node))) {
+      throw new Error(node.nodeName + " carries is-ok: " + classOf(node));
+    }
+  });
+  if (root.textContent.indexOf("recorded events — not verified") === -1) {
+    throw new Error("legend missing: " + root.textContent);
+  }
+});
+
+check("flow: run.*, unit.*, round.begin, checkpoint, journal.repaired, and unknown-backend dispatches make no packet (headless)", function () {
+  const root = flowRoot();
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", busy(1, 4))));
+  const quiet = busy(1, 4).concat([
+    ev(5, "run.begin"),
+    ev(6, "unit.begin", { unit: "u1" }),
+    ev(7, "round.begin", { unit: "u1" }),
+    ev(8, "checkpoint"),
+    ev(9, "journal.repaired"),
+    ev(10, "unit.end", { unit: "u1" }),
+    ev(11, "run.end"),
+    dispatchEv(12, "dispatch.start", "unknown"),
+    dispatchEv(13, "dispatch.end", "unknown", { exit: 1 }),
+    ev(14, "dispatch.end", { exit: 1, attribution: "none" }),
+    ev(15, "dispatch.start", { dispatch_id: "d-x", backend: "claude", attribution: "none" }),
+  ]);
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", quiet)));
+  if (packetsOf(root).length !== 0) {
+    throw new Error("packets " + packetsOf(root).map(function (p) {
+      return p.getAttribute("d");
+    }).join(" | "));
+  }
+});
+
+check("flow: a run switch clears packets without replaying and keeps a separate high-water mark per run (headless)", function () {
+  const root = flowRoot();
+  const a = busy(1, 50);
+  const a2 = a.concat(busy(51, 52));
+  const b = busy(1, 3);
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", a), flowRun("B", b)));
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", a2), flowRun("B", b)));
+  if (packetsOf(root).length !== 2) {
+    throw new Error("A's update made " + packetsOf(root).length);
+  }
+  liveSandbox.drawFlow(root, flowState("B", flowRun("A", a2), flowRun("B", b)));
+  if (packetsOf(root).length !== 0) {
+    throw new Error("run switch left or replayed " + packetsOf(root).length + " packets");
+  }
+  const marks = root._flow.marks;
+  if (marks["r:B"] !== 3 || marks["r:A"] !== 52) {
+    throw new Error("marks " + JSON.stringify(marks));
+  }
+  liveSandbox.drawFlow(root, flowState("B", flowRun("A", a2), flowRun("B", busy(1, 4))));
+  if (packetsOf(root).length !== 1) {
+    throw new Error("B's next event made " + packetsOf(root).length + " packets; its mark is not its own");
+  }
+});
+
+check("flow: A → B → A animates exactly the events A gained while B was shown (headless)", function () {
+  const root = flowRoot();
+  const a = busy(1, 6);
+  const b = busy(1, 3);
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", a), flowRun("B", b)));
+  liveSandbox.drawFlow(root, flowState("B", flowRun("A", a), flowRun("B", b)));
+  const gained = a.concat([
+    ev(7, "gate.result", { gate_verdict: "red", attribution: "none" }),
+    ev(8, "checkpoint"),
+    ev(9, "publish.recorded", { attribution: "none" }),
+  ]);
+  liveSandbox.drawFlow(root, flowState("B", flowRun("A", gained), flowRun("B", b)));
+  if (packetsOf(root).length !== 0) {
+    throw new Error("B animated A's events");
+  }
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", gained), flowRun("B", b)));
+  const made = packetsOf(root);
+  if (made.length !== 2) {
+    throw new Error("return to A made " + made.length + " packets");
+  }
+  if (made[0].getAttribute("d") !== edgePath(["codex"], "gate", false) || variantOf(made[0]) !== "danger") {
+    throw new Error("first packet " + made[0].getAttribute("d") + " " + classOf(made[0]));
+  }
+  if (made[1].getAttribute("d") !== edgePath(["codex"], "publish", false) || variantOf(made[1]) !== "neutral") {
+    throw new Error("second packet " + made[1].getAttribute("d") + " " + classOf(made[1]));
+  }
+});
+
+check("flow: 21 new events in one update leave at most 20 packet elements, oldest removed first (headless)", function () {
+  const root = flowRoot();
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", [])));
+  const burst = [ev(1, "gate.result", { gate_verdict: "red", attribution: "none" })].concat(
+    evs(2, 21, function (seq) {
+      return dispatchEv(seq, "dispatch.start", "codex");
+    })
+  );
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", burst)));
+  const made = packetsOf(root);
+  if (made.length !== 20) {
+    throw new Error("packet elements " + made.length);
+  }
+  if (made.some(function (packet) {
+    return variantOf(packet) === "danger";
+  })) {
+    throw new Error("the oldest packet was not the one removed");
+  }
+});
+
+check("flow: reduced motion creates no packet while edge labels still update (headless)", function () {
+  flowReduce = true;
+  const created = [];
+  const plainCreate = liveSandbox.document.createElementNS;
+  try {
+    const root = flowRoot();
+    liveSandbox.drawFlow(root, flowState("A", flowRun("A", busy(1, 4))));
+    if (edgeLabel(root, "impl-codex") !== "1 exit 0") {
+      throw new Error("first label " + edgeLabel(root, "impl-codex"));
+    }
+    liveSandbox.document.createElementNS = function (ns, name) {
+      created.push(name);
+      return plainCreate(ns, name);
+    };
+    const next = flowRun("A", busy(1, 12));
+    next.counts.all.dispatches.codex = tally(5, 2);
+    liveSandbox.drawFlow(root, flowState("A", next));
+    if (packetsOf(root).length !== 0 || created.length !== 0) {
+      throw new Error("reduced motion made packets: " + packetsOf(root).length + " / created " + created.join(","));
+    }
+    if (edgeLabel(root, "impl-codex") !== "5 exit 0 · 2 failed") {
+      throw new Error("label did not update: " + edgeLabel(root, "impl-codex"));
+    }
+    if (mediaQueries.indexOf("(prefers-reduced-motion: reduce)") === -1) {
+      throw new Error("matchMedia was not asked about reduced motion");
+    }
+  } finally {
+    flowReduce = false;
+    liveSandbox.document.createElementNS = plainCreate;
+  }
+});
+
+check("flow: a dispatch.end whose start fell outside the window routes back from its resolved backend (headless)", function () {
+  const root = flowRoot();
+  const counts = {
+    all: bucket({ dispatches: { codex: tally(300), grok: tally(200) } }),
+    units: {},
+    unattributed: bucket({ dispatches: { codex: tally(300), grok: tally(200) } }),
+  };
+  const win = busy(600, 601);
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", win, { counts: counts, timeline_truncated: true })));
+  const next = win.concat([
+    ev(602, "dispatch.end", { dispatch_id: "d-early", backend: "grok", exit: 0, attribution: "none" }),
+  ]);
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", next, { counts: counts, timeline_truncated: true })));
+  const made = packetsOf(root);
+  if (made.length !== 1) {
+    throw new Error("packets " + made.length);
+  }
+  if (made[0].getAttribute("d") !== edgePath(["codex", "grok"], "impl-grok", true) || variantOf(made[0]) !== "neutral") {
+    throw new Error("packet " + made[0].getAttribute("d") + " " + classOf(made[0]));
+  }
+});
+
+check("flow: a conflicted dispatch lands under All and Unattributed and under no unit, for every filter value (headless)", function () {
+  const base = busy(1, 4);
+  const counts = {
+    all: bucket({ dispatches: { codex: tally(1, 1) } }),
+    units: { u1: bucket({ dispatches: { codex: tally(1) } }), u2: bucket() },
+    unattributed: bucket({ dispatches: { codex: tally(0, 1) } }),
+  };
+  const conflicted = [
+    ev(5, "dispatch.start", { dispatch_id: "d-c", backend: "codex", attribution: "conflict" }),
+    ev(6, "dispatch.end", { dispatch_id: "d-c", backend: "codex", exit: 1, attribution: "conflict" }),
+  ];
+  const expected = { All: 2, u1: 0, u2: 0, Unattributed: 2 };
+  const labels = { All: "1 exit 0 · 1 failed", u1: "1 exit 0", u2: "0 dispatches", Unattributed: "1 failed" };
+  Object.keys(expected).forEach(function (label) {
+    const root = flowRoot();
+    liveSandbox.drawFlow(root, flowState("A", flowRun("A", base, { counts: counts })));
+    chooseFilter(root, label);
+    if (packetsOf(root).length !== 0) {
+      throw new Error("filter change to " + label + " replayed packets");
+    }
+    liveSandbox.drawFlow(root, flowState("A", flowRun("A", base.concat(conflicted), { counts: counts })));
+    if (packetsOf(root).length !== expected[label]) {
+      throw new Error(label + ": " + packetsOf(root).length + " packets");
+    }
+    const listed = root._parts.recent.textContent.indexOf("conflicting labels") !== -1;
+    if (listed !== expected[label] > 0) {
+      throw new Error(label + ": event list " + root._parts.recent.textContent);
+    }
+    if (edgeLabel(root, "impl-codex") !== labels[label]) {
+      throw new Error(label + ": label " + edgeLabel(root, "impl-codex"));
+    }
+  });
+});
+
+check("flow: each packet-bearing event lands under All and its unit, not under Unattributed; a unit-less gate and a partial dispatch that still names a unit land under Unattributed only (headless)", function () {
+  const declared = { unit: "u1", attribution: "declared" };
+  const owned = { All: 1, u1: 1, Unattributed: 0 };
+  const cases = [
+    [ev(5, "dispatch.start", Object.assign({ dispatch_id: "d-x", backend: "codex", round: 1 }, declared)), owned],
+    [ev(5, "dispatch.end", Object.assign({ dispatch_id: "d-x", backend: "codex", exit: 0 }, declared)), owned],
+    [ev(5, "dispatch.abandoned", Object.assign({ dispatch_id: "d-x", backend: "codex" }, declared)), owned],
+    [ev(5, "review.recorded", Object.assign({ review_verdict: "pass" }, declared)), owned],
+    [ev(5, "gate.result", Object.assign({ gate_verdict: "green", purpose: "unit-final" }, declared)), owned],
+    [ev(5, "publish.recorded", declared), owned],
+    [ev(5, "gate.result", { gate_verdict: "unknown", attribution: "none" }), { All: 1, u1: 0, Unattributed: 1 }],
+    [
+      ev(5, "dispatch.end", { dispatch_id: "d-p", backend: "codex", exit: 0, unit: "u1", round: 1, attribution: "partial" }),
+      { All: 1, u1: 0, Unattributed: 1 },
+    ],
+  ];
+  cases.forEach(function (entry) {
+    Object.keys(entry[1]).forEach(function (label) {
+      const root = flowRoot();
+      const base = busy(1, 4);
+      liveSandbox.drawFlow(root, flowState("A", flowRun("A", base)));
+      chooseFilter(root, label);
+      liveSandbox.drawFlow(root, flowState("A", flowRun("A", base.concat([entry[0]]))));
+      if (packetsOf(root).length !== entry[1][label]) {
+        throw new Error(entry[0].event + " (" + entry[0].attribution + ") under " + label + ": " + packetsOf(root).length);
+      }
+    });
+  });
+});
+
+check("flow: counts_complete false prefixes every edge label with partial and says the record is damaged (headless)", function () {
+  [false, undefined].forEach(function (flag) {
+    const root = flowRoot();
+    const run = flowRun("A", busy(1, 4));
+    if (flag === undefined) {
+      delete run.counts_complete;
+    } else {
+      run.counts_complete = flag;
+    }
+    liveSandbox.drawFlow(root, flowState("A", run));
+    const keys = Object.keys(root._parts.edges._byId);
+    if (keys.length !== 4) {
+      throw new Error("edges " + keys.join(","));
+    }
+    keys.forEach(function (key) {
+      if (edgeLabel(root, key).indexOf("partial: ") !== 0) {
+        throw new Error(key + " label " + edgeLabel(root, key));
+      }
+      if (!/\bis-partial\b/.test(classOf(root._parts.edges._byId[key]._label))) {
+        throw new Error(key + " label class " + classOf(root._parts.edges._byId[key]._label));
+      }
+    });
+    const damaged = root._parts.damaged;
+    if (!damaged || damaged.parentNode !== root || !/record is damaged/.test(damaged.textContent)) {
+      throw new Error("damaged notice missing");
+    }
+    if (!/counts partial/.test(root._parts.svg.getAttribute("aria-label"))) {
+      throw new Error("aria-label " + root._parts.svg.getAttribute("aria-label"));
+    }
+  });
+  const whole = flowRoot();
+  liveSandbox.drawFlow(whole, flowState("A", flowRun("A", busy(1, 4))));
+  Object.keys(whole._parts.edges._byId).forEach(function (key) {
+    if (/partial/.test(edgeLabel(whole, key))) {
+      throw new Error("complete run labelled partial: " + edgeLabel(whole, key));
+    }
+  });
+  if (whole._parts.damaged && whole._parts.damaged.parentNode === whole) {
+    throw new Error("complete run says the record is damaged");
+  }
+});
+
+check("flow: a publication routes Judge → Publication with no gate and after a red gate; no Gate → Publication path is drawn (headless)", function () {
+  const judgeLeft = liveSandbox.FLOW.center - liveSandbox.FLOW.nodeW / 2;
+  const judgeRight = liveSandbox.FLOW.center + liveSandbox.FLOW.nodeW / 2;
+  const publishOut = edgePath(["codex"], "publish", false);
+  const declared = { unit: "u1", attribution: "declared" };
+  [
+    [ev(5, "publish.recorded", declared)],
+    [
+      ev(5, "gate.result", Object.assign({ gate_verdict: "red", purpose: "unit-final" }, declared)),
+      ev(6, "publish.recorded", declared),
+    ],
+  ].forEach(function (added) {
+    const root = flowRoot();
+    const base = [ev(1, "run.begin"), ev(2, "unit.begin", { unit: "u1" }), ev(3, "round.begin"), ev(4, "checkpoint")];
+    liveSandbox.drawFlow(root, flowState("A", flowRun("A", base)));
+    liveSandbox.drawFlow(root, flowState("A", flowRun("A", base.concat(added))));
+    const made = packetsOf(root);
+    if (made.length !== added.length || made[made.length - 1].getAttribute("d") !== publishOut) {
+      throw new Error("publication packet " + made.map(function (p) {
+        return p.getAttribute("d");
+      }).join(" | "));
+    }
+    const paths = [];
+    liveWalk(root._parts.svg, function (node) {
+      if (node.nodeName === "path") {
+        paths.push(node.getAttribute("d"));
+      }
+    });
+    if (paths.length < 5) {
+      throw new Error("paths " + paths.length);
+    }
+    paths.forEach(function (d) {
+      const nums = (d.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+      if (nums.length !== 4) {
+        throw new Error("unexpected path " + d);
+      }
+      if ([nums[0], nums[2]].indexOf(judgeLeft) === -1 && [nums[0], nums[2]].indexOf(judgeRight) === -1) {
+        throw new Error("path not anchored on Judge: " + d);
+      }
+    });
+    Object.keys(root._parts.edges._byId).forEach(function (key) {
+      if (/gate/.test(key) && /publish/.test(key)) {
+        throw new Error("gate-publication edge " + key);
+      }
+    });
+  });
+});
+
+check("flow: a truncated timeline shows the notice, and edge labels equal the run's counts, not the window (headless)", function () {
+  const root = flowRoot();
+  const counts = {
+    all: bucket({
+      dispatches: { codex: tally(412, 7, 1, 2) },
+      reviews: { pass: 30, iterate: 12 },
+      gates: { green: 40, red: 3, unknown: 1 },
+      publishes: 9,
+    }),
+    units: {},
+    unattributed: bucket(),
+  };
+  const win = busy(1101, 1103);
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", win, { counts: counts, timeline_truncated: true })));
+  const want = {
+    "impl-codex": "412 exit 0 · 7 failed · 1 open · 2 abandoned",
+    review: "30 pass · 12 iterate",
+    gate: "40 green · 3 red · 1 unknown",
+    publish: "9 publications",
+  };
+  Object.keys(want).forEach(function (key) {
+    if (edgeLabel(root, key) !== want[key]) {
+      throw new Error(key + " label " + edgeLabel(root, key));
+    }
+  });
+  const notice = root._parts.truncated;
+  if (!notice || notice.parentNode !== root || notice.textContent !== "packets show the last 500 events; totals cover the whole run") {
+    throw new Error("truncation notice missing");
+  }
+  const whole = JSON.parse(JSON.stringify(counts));
+  whole.all.publishes = 1;
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", win, { counts: whole, timeline_truncated: false })));
+  if (notice.parentNode === root) {
+    throw new Error("notice stayed after the window stopped truncating");
+  }
+  if (edgeLabel(root, "publish") !== "1 publication") {
+    throw new Error("singular publication label " + edgeLabel(root, "publish"));
+  }
+});
+
+check("flow: a truncated, damaged run shows one notice that calls counts partial and never claims whole-run totals; each flag alone keeps its own notice (headless)", function () {
+  const both = "packets show the last 500 events; counts are partial because the record is damaged";
+  const cut = "packets show the last 500 events; totals cover the whole run";
+  const damaged = "The run's record is damaged: every count here is partial.";
+  function notices(root) {
+    return root.children
+      .filter(function (child) {
+        return /\bflow-notice\b/.test(classOf(child));
+      })
+      .map(function (child) {
+        return child.textContent;
+      });
+  }
+  // [timeline_truncated, counts_complete, notices shown]
+  const cases = [
+    [true, false, [both]],
+    [true, true, [cut]],
+    [false, false, [damaged]],
+    [false, true, []],
+  ];
+  // Each state on a fresh root, then one root walked through every state and
+  // back, so no notice from an earlier state survives a transition.
+  const walked = flowRoot();
+  cases.concat(cases.slice().reverse()).forEach(function (entry) {
+    [flowRoot(), walked].forEach(function (root) {
+      const run = flowRun("A", busy(1, 4), {
+        timeline_truncated: entry[0],
+        counts_complete: entry[1],
+      });
+      liveSandbox.drawFlow(root, flowState("A", run));
+      const shown = notices(root);
+      const state = "truncated " + entry[0] + ", complete " + entry[1];
+      if (JSON.stringify(shown) !== JSON.stringify(entry[2])) {
+        throw new Error(state + ": notices " + JSON.stringify(shown));
+      }
+      const claims = root.textContent.indexOf("totals cover the whole run") !== -1;
+      if (claims !== (entry[0] && entry[1])) {
+        throw new Error(state + ": whole-run claim " + claims);
+      }
+      if (!entry[1]) {
+        if (edgeLabel(root, "impl-codex").indexOf("partial: ") !== 0) {
+          throw new Error(state + ": label " + edgeLabel(root, "impl-codex"));
+        }
+        if (!/\bis-damaged\b/.test(root._parts.damaged.className)) {
+          throw new Error(state + ": notice class " + root._parts.damaged.className);
+        }
+      }
+    });
+  });
+});
+
+check("flow: a dispatch with no usable start draws an unknown backend node after grok with its count label, makes no packet, and leaves when the filter excludes it (headless)", function () {
+  const root = flowRoot();
+  const base = busy(1, 4);
+  const plain = {
+    all: bucket({ dispatches: { codex: tally(1), grok: tally(1) } }),
+    units: { u1: bucket({ dispatches: { codex: tally(1) } }) },
+    unattributed: bucket({ dispatches: { grok: tally(1) } }),
+  };
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", base, { counts: plain })));
+  if (nodeLabels(root).join(",") !== "Judge,codex,grok,Review,Gate,Publication") {
+    throw new Error("no unknown entry, nodes " + nodeLabels(root).join(","));
+  }
+  // loop-index output for an orphan dispatch.end: backend unknown,
+  // attribution partial, counted under all and unattributed only.
+  const counts = JSON.parse(JSON.stringify(plain));
+  counts.all.dispatches.unknown = tally(0, 1);
+  counts.unattributed.dispatches.unknown = tally(0, 1);
+  const orphan = ev(5, "dispatch.end", {
+    dispatch_id: "d-orphan",
+    backend: "unknown",
+    exit: 1,
+    attribution: "partial",
+  });
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", base.concat([orphan]), { counts: counts })));
+  function expectUnknown(where, shown, label) {
+    const nodes = nodeLabels(root).join(",");
+    const want = shown
+      ? "Judge,codex,grok,unknown backend,Review,Gate,Publication"
+      : "Judge,codex,grok,Review,Gate,Publication";
+    if (nodes !== want) {
+      throw new Error(where + ": nodes " + nodes);
+    }
+    const edge = root._parts.edges._byId["impl-unknown"];
+    if (shown ? !edge || edgeLabel(root, "impl-unknown") !== label : edge) {
+      throw new Error(where + ": unknown edge " + (edge ? edge._label.textContent : "absent"));
+    }
+    if (packetsOf(root).length !== 0) {
+      throw new Error(where + ": packets " + packetsOf(root).map(function (p) {
+        return p.getAttribute("d");
+      }).join(" | "));
+    }
+    const aria = root._parts.svg.getAttribute("aria-label");
+    if (/plus dispatches with an unknown backend/.test(aria) !== shown) {
+      throw new Error(where + ": aria-label " + aria);
+    }
+  }
+  expectUnknown("All", true, "1 failed");
+  if (!/2 implementers, plus dispatches with an unknown backend, 3 dispatches/.test(root._parts.svg.getAttribute("aria-label"))) {
+    throw new Error("aria-label " + root._parts.svg.getAttribute("aria-label"));
+  }
+  if (root._parts.recent.textContent.indexOf("#5 dispatch.end: unknown backend → Judge · exit 1") === -1) {
+    throw new Error("event list " + root._parts.recent.textContent);
+  }
+  chooseFilter(root, "u1");
+  expectUnknown("u1", false);
+  chooseFilter(root, "Unattributed");
+  expectUnknown("Unattributed", true, "1 failed");
+  chooseFilter(root, "All");
+  expectUnknown("All again", true, "1 failed");
+  const more = base.concat([
+    orphan,
+    ev(6, "dispatch.abandoned", { dispatch_id: "d-lost", backend: "unknown", attribution: "partial" }),
+  ]);
+  counts.all.dispatches.unknown = tally(0, 1, 0, 1);
+  counts.unattributed.dispatches.unknown = tally(0, 1, 0, 1);
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", more, { counts: counts, counts_complete: false })));
+  expectUnknown("partial", true, "partial: 1 failed · 1 abandoned");
+
+  // Three backends and unknown: four rows, all inside the viewBox, none overlapping.
+  const four = flowRoot();
+  const wide = flowRun("B", []);
+  wide.counts.all.dispatches = { unknown: tally(1), grok: tally(1), cursor: tally(1), codex: tally(1) };
+  liveSandbox.drawFlow(four, flowState("B", wide));
+  if (nodeLabels(four).join(",") !== "Judge,codex,cursor,grok,unknown backend,Review,Gate,Publication") {
+    throw new Error("four-row nodes " + nodeLabels(four).join(","));
+  }
+  let floor = -Infinity;
+  ["codex", "cursor", "grok", "unknown"].forEach(function (name) {
+    const box = four._parts.nodes._byId["impl-" + name]._box;
+    const top = Number(box.getAttribute("y"));
+    const bottom = top + Number(box.getAttribute("height"));
+    if (top < 0 || bottom > liveSandbox.FLOW.height || top < floor) {
+      throw new Error(name + " node spans " + top + ".." + bottom);
+    }
+    floor = bottom;
+  });
+});
+
+check("flow: the hidden list holds the last ten timeline events of every type; unit-less types show under All only (headless)", function () {
+  const root = flowRoot();
+  const declared = { unit: "u1", attribution: "declared" };
+  const timeline = busy(1, 18).concat([
+    ev(19, "gate.result", { gate_verdict: "red", attribution: "none" }),
+    ev(20, "publish.recorded", { attribution: "none" }),
+    // A unit field on a unit-less type must not move it under that unit.
+    ev(21, "round.begin", declared),
+    ev(22, "unit.begin", declared),
+    ev(23, "dispatch.start", Object.assign({ dispatch_id: "d-u", backend: "codex" }, declared)),
+    ev(24, "dispatch.end", Object.assign({ dispatch_id: "d-u", backend: "codex", exit: 0 }, declared)),
+    ev(25, "checkpoint"),
+    ev(26, "review.recorded", Object.assign({ review_verdict: "pass" }, declared)),
+    ev(27, "gate.result", Object.assign({ gate_verdict: "green" }, declared)),
+    ev(28, "unit.end", declared),
+    ev(29, "journal.repaired"),
+    ev(30, "checkpoint"),
+  ]);
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", timeline)));
+  function listed() {
+    return root._parts.recent.children.map(function (row) {
+      return row.textContent;
+    });
+  }
+  function expectList(where, want) {
+    const got = listed();
+    if (got.length > 10 || JSON.stringify(got) !== JSON.stringify(want)) {
+      throw new Error(where + ": list " + JSON.stringify(got));
+    }
+  }
+  if (root._parts.recentHead.textContent !== "Last ten recorded events") {
+    throw new Error("heading " + root._parts.recentHead.textContent);
+  }
+  const owned = [
+    "#23 dispatch.start: Judge → codex · unit u1",
+    "#24 dispatch.end: codex → Judge · exit 0 · unit u1",
+    "#26 review.recorded: Judge → Review · pass · unit u1",
+    "#27 gate.result: Judge → Gate · green · unit u1",
+  ];
+  expectList("All", [
+    "#21 round.begin",
+    "#22 unit.begin",
+    owned[0],
+    owned[1],
+    "#25 checkpoint",
+    owned[2],
+    owned[3],
+    "#28 unit.end",
+    "#29 journal.repaired",
+    "#30 checkpoint",
+  ]);
+  chooseFilter(root, "u1");
+  expectList("u1", owned);
+  chooseFilter(root, "Unattributed");
+  const unattributed = listed();
+  if (unattributed.length !== 10 || unattributed[9] !== "#20 publish.recorded: Judge → Publication · unattributed") {
+    throw new Error("Unattributed: list " + JSON.stringify(unattributed));
+  }
+  if (/checkpoint|unit\.|round\.begin|journal\.repaired/.test(unattributed.join(" | "))) {
+    throw new Error("Unattributed lists a unit-less type: " + JSON.stringify(unattributed));
+  }
+  chooseFilter(root, "All");
+  const quiet = evs(31, 70, function (seq) {
+    return ev(seq, ["checkpoint", "round.begin", "unit.begin", "unit.end"][seq % 4], declared);
+  });
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", timeline.concat(quiet))));
+  const tail = listed();
+  if (tail.length !== 10 || tail[0].indexOf("#61 ") !== 0 || tail[9].indexOf("#70 ") !== 0) {
+    throw new Error("All after 40 unit-less events: " + JSON.stringify(tail));
+  }
+  chooseFilter(root, "u1");
+  expectList("u1 after 40 unit-less events", owned);
+});
+
+check("flow: a hostile unit name reaches the DOM only as text (headless)", function () {
+  const hostile = "<img src=x onerror=1>";
+  const root = flowRoot();
+  const counts = {
+    all: bucket({ dispatches: { codex: tally(1) }, publishes: 1 }),
+    units: {},
+    unattributed: bucket(),
+  };
+  counts.units[hostile] = bucket({ dispatches: { codex: tally(1) }, publishes: 1 });
+  const declared = { unit: hostile, attribution: "declared" };
+  const base = [ev(1, "publish.recorded", declared)];
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", base, { counts: counts })));
+  chooseFilter(root, hostile);
+  liveSandbox.drawFlow(
+    root,
+    flowState(
+      "A",
+      flowRun(
+        "A",
+        base.concat([
+          ev(2, "dispatch.start", Object.assign({ dispatch_id: "d-h", backend: "codex" }, declared)),
+          ev(3, "review.recorded", Object.assign({ review_verdict: "pass" }, declared)),
+        ]),
+        { counts: counts }
+      )
+    )
+  );
+  if (packetsOf(root).length !== 2) {
+    throw new Error("hostile-unit filter packets " + packetsOf(root).length);
+  }
+  if (root._parts.svg.getAttribute("role") !== "img" || !root._parts.svg.getAttribute("aria-label")) {
+    throw new Error("svg role/aria-label missing");
+  }
+  let textHits = 0;
+  liveWalk(root, function (node) {
+    if (node.nodeName === "img") {
+      throw new Error("an img element exists");
+    }
+    Object.keys(node.attrs || {}).forEach(function (key) {
+      if (node.attrs[key].indexOf(hostile) !== -1 || node.attrs[key].indexOf("<") !== -1) {
+        throw new Error("attribute " + key + " carries journal text: " + node.attrs[key]);
+      }
+    });
+    if (node.nodeType === 3 && node.nodeValue.indexOf(hostile) !== -1) {
+      textHits += 1;
+      const host = node.parentNode;
+      if (!host || (host.nodeName !== "option" && host.nodeName !== "li")) {
+        throw new Error("journal text under " + (host && host.nodeName));
+      }
+    }
+  });
+  if (textHits < 2) {
+    throw new Error("hostile name was not shown as text (" + textHits + ")");
+  }
+});
+
+check("flow: render, filter change, and run switch make no request (headless)", function () {
+  fetchCalls.length = 0;
+  const root = flowRoot();
+  const saved = liveSandbox.document.getElementById;
+  liveSandbox.document.getElementById = function (id) {
+    return id === "flow-root" ? root : null;
+  };
+  try {
+    liveSandbox.renderFlow(flowState("A", flowRun("A", busy(1, 4)), flowRun("B", busy(1, 2))));
+    liveSandbox.renderFlow(flowState("A", flowRun("A", busy(1, 8)), flowRun("B", busy(1, 2))));
+    chooseFilter(root, "u1");
+    chooseFilter(root, "Unattributed");
+    chooseFilter(root, "All");
+    liveSandbox.renderFlow(flowState("B", flowRun("A", busy(1, 8)), flowRun("B", busy(1, 3))));
+    chooseFilter(root, "u1");
+    liveSandbox.renderFlow(flowState("A", flowRun("A", busy(1, 9)), flowRun("B", busy(1, 3))));
+  } finally {
+    liveSandbox.document.getElementById = saved;
+  }
+  if (!root._parts || !root._parts.svg) {
+    throw new Error("renderFlow did not draw into #flow-root");
+  }
+  if (fetchCalls.length !== 0) {
+    throw new Error("flow code made " + fetchCalls.length + " requests: " + JSON.stringify(fetchCalls));
+  }
+  liveSandbox.fetch("/probe");
+  if (fetchCalls.length !== 1) {
+    throw new Error("the fake fetch does not record calls");
+  }
+  fetchCalls.length = 0;
+});
+
+check("flow: a poll updates the SVG in place; nodes, edges, and filter options keep their identity (headless)", function () {
+  const root = flowRoot();
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", busy(1, 4))));
+  const svg = root._parts.svg;
+  const edges = root._parts.edges.children.slice();
+  const nodes = root._parts.nodes.children.slice();
+  const options = root._parts.filter.children.slice();
+  const codex = root._parts.nodes._byId["impl-codex"];
+  const codexY = codex._box.getAttribute("y");
+  const next = flowRun("A", busy(1, 9));
+  next.counts.all.dispatches.codex = tally(4, 1);
+  next.counts.all.dispatches.grok = tally(2);
+  next.counts.units.u2 = bucket();
+  liveSandbox.drawFlow(root, flowState("A", next));
+  if (root._parts.svg !== svg || root._parts.figure.children[0] !== svg) {
+    throw new Error("the SVG was rebuilt");
+  }
+  [
+    [edges, root._parts.edges],
+    [nodes, root._parts.nodes],
+    [options, root._parts.filter],
+  ].forEach(function (pair) {
+    pair[0].forEach(function (node) {
+      if (pair[1].children.indexOf(node) === -1) {
+        throw new Error("a " + node.nodeName + " was replaced");
+      }
+    });
+  });
+  if (root._parts.nodes._byId["impl-codex"] !== codex || codex._box.getAttribute("y") === codexY) {
+    throw new Error("codex node was replaced or not moved for grok");
+  }
+  if (edgeLabel(root, "impl-codex") !== "4 exit 0 · 1 failed" || edgeLabel(root, "impl-grok") !== "2 exit 0") {
+    throw new Error("labels " + edgeLabel(root, "impl-codex") + " / " + edgeLabel(root, "impl-grok"));
+  }
+  const snap = countWrites(root);
+  liveSandbox.drawFlow(root, flowState("A", JSON.parse(JSON.stringify(next))));
+  const delta = deltaWrites(snap, countWrites(root));
+  if (delta.total !== 0 || delta.className !== 0 || delta.value !== 0) {
+    throw new Error("an unchanged poll wrote " + JSON.stringify(delta));
+  }
+});
+
+check("flow: index output without counts or timeline, or with no runs, shows an empty-state hint (headless)", function () {
+  const root = flowRoot();
+  function hasSvg() {
+    let found = false;
+    liveWalk(root, function (node) {
+      if (node.nodeName === "svg") {
+        found = true;
+      }
+    });
+    return found;
+  }
+  function expectHint(pattern) {
+    if (root._mode !== "hint" || !root.firstChild || root.firstChild.className !== "empty-hint") {
+      throw new Error("no empty-state hint (mode " + root._mode + ")");
+    }
+    if (!pattern.test(root.firstChild.textContent) || hasSvg()) {
+      throw new Error("hint " + root.firstChild.textContent);
+    }
+  }
+  liveSandbox.drawFlow(root, { context: { state: "none" }, runs: [] });
+  expectHint(/No runs recorded yet/);
+  const old = { run_id: "A", status: "active", units: [], dispatches: [], gates: [] };
+  liveSandbox.drawFlow(root, flowState("A", old));
+  expectHint(/no run totals or timeline/);
+  liveSandbox.drawFlow(root, flowState("A", Object.assign({}, old, { counts: { all: bucket() } })));
+  expectHint(/no run totals or timeline/);
+  liveSandbox.drawFlow(root, flowState("A", Object.assign({}, old, { timeline: [] })));
+  expectHint(/no run totals or timeline/);
+  liveSandbox.drawFlow(root, flowState("A", flowRun("A", busy(1, 4))));
+  if (root._mode !== "flow" || !hasSvg()) {
+    throw new Error("flow did not draw once counts and timeline arrived");
+  }
+  liveSandbox.drawFlow(root, flowState("A", old));
+  expectHint(/no run totals or timeline/);
+});
 JS
 then
   :
@@ -1382,6 +2630,29 @@ else
   fail "render: clean unknown gate shows verdict chip 'unknown' (is-neutral), the fixed caveat, no 'Publication evidence' (headless)"
   fail "update: updateDial writes changed fields; focused select is skipped until blur (headless)"
   fail "update: stampUpdated writes #updated-at through txt and is quiet on the same second (headless)"
+  fail "flow: svgEl creates each allowlisted tag in the SVG namespace and refuses every other tag"
+  fail "flow: svgAttr sets each allowlisted attribute and refuses every other name and any url( / javascript: / < value"
+  fail "flow: implementer nodes exist only for backends present in counts, in the order codex, cursor, grok, then unknown backend (headless)"
+  fail "flow: the first render animates nothing; two new events make exactly two packets with their recorded classes; a repeat makes none (headless)"
+  fail "flow: packet variants are recorded outcomes: exit 0, pass, green, and unknown are neutral; nonzero exit, red, and abandoned are danger; iterate is caution; nothing is is-ok (headless)"
+  fail "flow: run.*, unit.*, round.begin, checkpoint, journal.repaired, and unknown-backend dispatches make no packet (headless)"
+  fail "flow: a run switch clears packets without replaying and keeps a separate high-water mark per run (headless)"
+  fail "flow: A → B → A animates exactly the events A gained while B was shown (headless)"
+  fail "flow: 21 new events in one update leave at most 20 packet elements, oldest removed first (headless)"
+  fail "flow: reduced motion creates no packet while edge labels still update (headless)"
+  fail "flow: a dispatch.end whose start fell outside the window routes back from its resolved backend (headless)"
+  fail "flow: a conflicted dispatch lands under All and Unattributed and under no unit, for every filter value (headless)"
+  fail "flow: each packet-bearing event lands under All and its unit, not under Unattributed; a unit-less gate and a partial dispatch that still names a unit land under Unattributed only (headless)"
+  fail "flow: counts_complete false prefixes every edge label with partial and says the record is damaged (headless)"
+  fail "flow: a publication routes Judge → Publication with no gate and after a red gate; no Gate → Publication path is drawn (headless)"
+  fail "flow: a truncated timeline shows the notice, and edge labels equal the run's counts, not the window (headless)"
+  fail "flow: a truncated, damaged run shows one notice that calls counts partial and never claims whole-run totals; each flag alone keeps its own notice (headless)"
+  fail "flow: a dispatch with no usable start draws an unknown backend node after grok with its count label, makes no packet, and leaves when the filter excludes it (headless)"
+  fail "flow: the hidden list holds the last ten timeline events of every type; unit-less types show under All only (headless)"
+  fail "flow: a hostile unit name reaches the DOM only as text (headless)"
+  fail "flow: render, filter change, and run switch make no request (headless)"
+  fail "flow: a poll updates the SVG in place; nodes, edges, and filter options keep their identity (headless)"
+  fail "flow: index output without counts or timeline, or with no runs, shows an empty-state hint (headless)"
 fi
 
 # ---------------------------------------------------------------------------

@@ -410,6 +410,169 @@ section {
   white-space: pre-wrap;
 }
 
+.flow-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.flow-filter-label {
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.flow-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  font-size: var(--fs-meta);
+  color: var(--muted);
+}
+
+.flow-notice {
+  margin: 0 0 0.75rem;
+  font-size: var(--fs-meta);
+  color: var(--muted);
+}
+
+.flow-notice.is-damaged {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.flow-figure {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+}
+
+.flow-svg {
+  display: block;
+  width: 100%;
+  min-width: 40rem;
+  max-width: 56rem;
+  height: auto;
+  margin-inline: auto;
+}
+
+.flow-line {
+  fill: none;
+  stroke: var(--border-control);
+  stroke-width: 1.5;
+}
+
+.flow-label {
+  fill: var(--muted);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+
+.flow-label.is-partial {
+  fill: var(--caution);
+}
+
+.flow-node rect {
+  fill: var(--surface-raised);
+  stroke: var(--border-control);
+  stroke-width: 1;
+}
+
+.flow-node.flow-judge rect {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.flow-node text {
+  fill: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.flow-packet {
+  fill: none;
+  stroke: var(--neutral);
+  stroke-width: 9;
+  stroke-linecap: round;
+  stroke-dasharray: 1 4000;
+  stroke-dashoffset: 2;
+  animation: flow-travel 1.6s ease-in-out both;
+}
+
+.flow-packet.is-caution {
+  stroke: var(--caution);
+}
+
+.flow-packet.is-danger {
+  stroke: var(--danger);
+}
+
+.flow-lag-1 {
+  animation-delay: 150ms;
+}
+
+.flow-lag-2 {
+  animation-delay: 300ms;
+}
+
+.flow-lag-3 {
+  animation-delay: 450ms;
+}
+
+.flow-lag-4 {
+  animation-delay: 600ms;
+}
+
+.flow-lag-5 {
+  animation-delay: 750ms;
+}
+
+.flow-lag-6 {
+  animation-delay: 900ms;
+}
+
+.flow-lag-7 {
+  animation-delay: 1050ms;
+}
+
+.flow-lag-8 {
+  animation-delay: 1200ms;
+}
+
+.flow-lag-9 {
+  animation-delay: 1350ms;
+}
+
+@keyframes flow-travel {
+  from {
+    stroke-dashoffset: 2;
+  }
+
+  to {
+    stroke-dashoffset: -250;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-packet {
+    display: none;
+  }
+}
+
 .run-head {
   display: flex;
   flex-wrap: wrap;
@@ -595,6 +758,7 @@ a {
 }
 
 .dial-controls select,
+.flow-bar select,
 .dial-apply,
 .dial-reset {
   font: inherit;
@@ -613,7 +777,8 @@ a {
 
 .dial-apply:hover,
 .dial-reset:hover,
-.dial-controls select:hover {
+.dial-controls select:hover,
+.flow-bar select:hover {
   background: var(--hover);
 }
 
@@ -638,6 +803,7 @@ a {
 .dial-apply:focus-visible,
 .dial-reset:focus-visible,
 .dial-controls select:focus-visible,
+.flow-bar select:focus-visible,
 .dispatch-card:focus-visible,
 a:focus-visible {
   outline: 2px solid var(--focus);
