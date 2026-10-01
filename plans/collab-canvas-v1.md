@@ -981,6 +981,38 @@ coordinator. An agent that splits a requester's graph into better units (the
 engineer does that at admission). Live model output for cursor and grok. Gate
 containment (owed before unit 8). Proof-grade evidence.
 
+## 13. Implementation notes
+
+What building the units changed, relative to §4 and §7 above. Where this section and those differ, this section is what was built.
+
+### Unit 0, as merged (PR #69)
+
+- Every post-run check and the diff read one frozen copy of the work tree, taken after the CLI exits. A reviewer's stub that kept writing after the checks got a file applied in four runs of five before this.
+- The patch is not rewritten. It is `git diff --no-index --no-renames` applied with `git apply -p2`. The header rewriting the cursor adapter does breaks renames, paths such as `lib/work/x`, and hunk lines that look like headers; the cursor adapter still has it and that is a separate change.
+- New paths that the real repository ignores are dropped and reported, not applied.
+- The real CLI creates an empty `.claude/.cc-writes/` in its working directory whenever Bash runs. So new paths under any `.claude/` directory are dropped and reported, and only a change to or deletion of an existing one is refused.
+- The real CLI refuses a compound shell command it cannot analyse statically, because there is nobody to approve it. The real-CLI containment case therefore runs three separate simple commands and is judged from the stream.
+- §12's carried falsifier was run against CLI 2.1.285 and was not triggered: an in-copy edit lands, an out-of-copy write is refused by the OS sandbox, and `curl` is refused.
+
+### Unit 1, as merged (PR #70)
+
+- `read-run` returns exactly the events the journal's own parser returns. A line that is valid JSON and not an object is therefore corruption (exit 4) or a torn tail, never exit 6.
+- `find-run` treats a complete `run.begin` that lacks its newline as a run, as the parser does.
+- Both print ASCII-only JSON.
+
+### Unit 2, as specified for implementation
+
+- `loop-journal` gains a third read-only subcommand, `read-context`, because nothing else lets a caller ask which run the context names.
+- A quarantine has its own id and a list of runs, which may be empty, and is released with `release-quarantine --id`. A released unit is in a new terminal state, `released`; its run stays unterminated in the journal.
+- The lost-state case is `unknown-outcome(state-lost)`, not a `blocked` state: its run is still open and it leaves by `abandon`.
+- The cap is on the whole prompt, `caps.prompt_bytes`, at most 120000, because three adapters pass the prompt as one argument and Linux limits an argument to 131072 bytes. There is no separate diff cap.
+- The spec's Environment section comes from a new `references/coordinator-environment.md`, not from `dispatch-prompt.md`, whose block has an unfilled placeholder.
+- A judge that explains under Why that the request cannot be specified, and leaves Change empty, ends the unit `parked(spec-declined)` with no retry.
+- Under `deep`, the spec-blind review is dispatched only after the first review passes.
+- A unit that ends parked, blocked, or abandoned with a clean tree at the base commit is returned to the base branch and its `canvas/<id>` branch is deleted.
+- An `init` command creates the config directory and prints the workspace key.
+- The own-write rule tolerates a `journal.repaired` event before the expected one, since the journal emits it when it repairs a torn tail.
+
 ## 12. Review record
 
 Codex read-only review, `gpt-6-sol` at `max`, one thread
