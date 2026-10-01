@@ -105,6 +105,10 @@ Per-run totals and timeline:
                       closed field whitelist (no free-text fields)
   timeline_truncated  true when older events fell outside the window
 
+Review projection: a valid reviewer (claude, codex, cursor, grok, session)
+appears in the unit's last review object and that review's timeline item.
+Absent or unknown stored reviewer values are omitted.
+
 Test-only environment overrides:
   LOOP_INDEX_ACTIVITY_SEC           default 300
   LOOP_INDEX_STALL_SEC              default 1200
@@ -208,6 +212,8 @@ JOURNAL_EVENTS = AGENT_INVOKED_EVENTS | DISPATCH_EVENTS | {"gate.result", "journ
 GATE_BINDINGS = frozenset({"clean", "dirty", "changed", "unavailable"})
 
 GATE_PURPOSES = frozenset({"unit-final", "baseline-generation", "focused", "unspecified"})
+
+REVIEWERS = frozenset({"claude", "codex", "cursor", "grok", "session"})
 
 TIMELINE_LIMIT = 500
 
@@ -439,6 +445,9 @@ def build_units(events: list[dict], *, degraded: bool) -> list[dict]:
                 continue
             if verdict in {"pass", "iterate"}:
                 record["review"] = {"verdict": verdict, "round": round_n}
+                reviewer = event.get("reviewer")
+                if isinstance(reviewer, str) and reviewer in REVIEWERS:
+                    record["review"]["reviewer"] = reviewer
         elif kind == "publish.recorded":
             published = {}
             for key in ("branch", "pr", "sha", "note"):
@@ -704,6 +713,9 @@ def timeline_item(event: dict, records: dict[str, dict]) -> dict:
         if kind == "review.recorded":
             verdict = event.get("verdict")
             item["review_verdict"] = verdict if verdict in {"pass", "iterate"} else "unknown"
+            reviewer = event.get("reviewer")
+            if isinstance(reviewer, str) and reviewer in REVIEWERS:
+                item["reviewer"] = reviewer
         unit = declared_label(event)[0]
         if unit is not None:
             item["unit"] = unit

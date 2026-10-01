@@ -75,12 +75,12 @@ try:
 except OSError as exc:
     print(f"manifest: unreadable: {exc}", file=sys.stderr)
     raise SystemExit(1)
-if not lines or lines[0] != "#schema=1":
-    print("manifest: first line must be #schema=1", file=sys.stderr)
+if not lines or lines[0] != "#schema=2":
+    print("manifest: first line must be #schema=2", file=sys.stderr)
     raise SystemExit(1)
 rows = [line.split("\t") for line in lines[1:] if line]
-if not rows or any(len(row) != 7 for row in rows):
-    print("manifest: every non-schema row must have exactly seven tab-separated columns", file=sys.stderr)
+if not rows or any(len(row) != 8 for row in rows):
+    print("manifest: every non-schema row must have exactly eight tab-separated columns", file=sys.stderr)
     raise SystemExit(1)
 
 names = [row[0] for row in rows]
@@ -91,7 +91,7 @@ if len(names) != len(set(names)):
 if len(namespaces) != len(set(namespaces)):
     errors.append("environment namespaces must be unique")
 for row in rows:
-    name, cli, namespace, resume, effort, output_schema, driver_text = row
+    name, cli, namespace, resume, effort, output_schema, driver_text, final_message = row
     if re.fullmatch(r"[a-z][a-z0-9-]*", name) is None:
         errors.append(f"invalid backend name: {name!r}")
     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", cli) is None:
@@ -104,6 +104,8 @@ for row in rows:
         errors.append(f"invalid effort capability for {name}: {effort!r}")
     if output_schema not in {"json", "text"}:
         errors.append(f"invalid output schema for {name}: {output_schema!r}")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*(#[A-Za-z_][A-Za-z0-9_]*)?", final_message) is None:
+        errors.append(f"invalid final message location for {name}: {final_message!r}")
     driver_path = PurePosixPath(driver_text)
     if driver_path.is_absolute() or ".." in driver_path.parts:
         errors.append(f"invalid fixture driver path for {name}: {driver_text!r}")
@@ -138,7 +140,7 @@ if [[ -n "$SELECTED_BACKEND" ]] && ! LC_ALL=C awk -F '\t' -v name="$SELECTED_BAC
   exit 2
 fi
 
-VALID_RULES="help,prompt-file,prompt-inline,prompt-precedence,prompt-required,dash-prompt,missing-values,repeated-flags,unknown-flags,readonly-alias,background,exit-status,signal-status,env-namespace,summary-fields,journal-missing,journal-start-refusal,journal-events,journal-unattributed,journal-readonly-mode"
+VALID_RULES="help,prompt-file,prompt-inline,prompt-precedence,prompt-required,dash-prompt,missing-values,repeated-flags,unknown-flags,readonly-alias,background,exit-status,signal-status,env-namespace,summary-fields,journal-missing,journal-start-refusal,journal-events,journal-unattributed,journal-readonly-mode,final-message"
 if [[ -n "$ONLY_RULES" ]]; then
   OLD_IFS="$IFS"
   IFS=,
@@ -385,6 +387,70 @@ PY
   fi
 }
 
+expect_final_message() {
+  local home workspace index_output index_error state_dir
+  home="$(case_home final-message)"
+  workspace="$(case_workspace final-message)"
+  index_output="$TMP_ROOT/$BACKEND/final-message.index.json"
+  index_error="$TMP_ROOT/$BACKEND/final-message.index.stderr"
+  if ! HOME="$home" "$LOOP_ROOT/scripts/loop-index" --workspace "$workspace" > "$index_output" 2> "$index_error"; then
+    fail "case run has exactly one indexed dispatch (loop-index failed)"
+    return
+  fi
+  if state_dir="$(python3 - "$index_output" "$TMP_ROOT/$BACKEND/final-message.begin-run" "$BACKEND" <<'PY'
+import json, sys
+
+index_path, begin_path, backend = sys.argv[1:]
+with open(begin_path, encoding="utf-8") as stream:
+    run_ids = [line.removeprefix("run=").strip() for line in stream if line.startswith("run=")]
+with open(index_path, encoding="utf-8") as stream:
+    document = json.load(stream)
+if len(run_ids) != 1:
+    raise SystemExit("expected one begun run id")
+runs = [run for run in document["runs"] if run["run_id"] == run_ids[0]]
+if len(runs) != 1 or len(runs[0]["dispatches"]) != 1:
+    raise SystemExit("expected exactly one dispatch in the case run")
+dispatch = runs[0]["dispatches"][0]
+if dispatch.get("backend") != backend:
+    raise SystemExit("wrong dispatch backend")
+print(dispatch["state_dir"])
+PY
+)"; then
+    pass "case run has exactly one indexed dispatch"
+  else
+    fail "case run has exactly one indexed dispatch"
+    return
+  fi
+  if [[ -d "$state_dir" ]]; then
+    pass "indexed dispatch state_dir exists"
+  else
+    fail "indexed dispatch state_dir exists"
+    return
+  fi
+  if python3 - "$state_dir" "$FINAL_MESSAGE" <<'PY'
+import json, pathlib, sys
+
+state_dir, location = sys.argv[1:]
+filename, marker, key = location.partition("#")
+path = pathlib.Path(state_dir) / filename
+if marker:
+    value = json.loads(path.read_bytes())
+    if not isinstance(value, dict) or not isinstance(value.get(key), str):
+        raise SystemExit("final message JSON member is not a string")
+    actual = value[key].encode("utf-8")
+else:
+    actual = path.read_bytes()
+expected = 'final line one\nsecond "quoted" back\\slash café'.encode("utf-8")
+if actual != expected:
+    raise SystemExit("final message bytes differ")
+PY
+  then
+    pass "manifest final-message bytes equal the scripted message"
+  else
+    fail "manifest final-message bytes equal the scripted message"
+  fi
+}
+
 run_backend() {
   BACKENDS_TESTED=$((BACKENDS_TESTED + 1))
 
@@ -598,9 +664,18 @@ run_backend() {
     expect_dispatch_labels journal-readonly-mode - - \
       "without LOOP_UNIT/LOOP_ROUND neither dispatch.start nor dispatch.end carries unit or round"
   fi
+
+  if rule_enabled final-message; then
+    CURRENT_RULE="final-message"
+    run_case final-message --prompt final-message
+    expect_status 0 "journaled final-message dispatch succeeds"
+    if [[ $CASE_STATUS -eq 0 ]]; then
+      expect_final_message
+    fi
+  fi
 }
 
-while IFS=$'\t' read -r BACKEND CLI_NAME ENV_NAMESPACE RESUME_CAPABILITY EFFORT_CAPABILITY OUTPUT_SCHEMA DRIVER_RELATIVE; do
+while IFS=$'\t' read -r BACKEND CLI_NAME ENV_NAMESPACE RESUME_CAPABILITY EFFORT_CAPABILITY OUTPUT_SCHEMA DRIVER_RELATIVE FINAL_MESSAGE; do
   [[ -z "$SELECTED_BACKEND" || "$BACKEND" == "$SELECTED_BACKEND" ]] || continue
   DRIVER="$LOOP_ROOT/$DRIVER_RELATIVE"
   ADAPTER="$LOOP_ROOT/backends/$BACKEND/dispatch.sh"

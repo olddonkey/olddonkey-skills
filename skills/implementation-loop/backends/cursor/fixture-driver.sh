@@ -47,7 +47,7 @@ setup_loop_journal_fixture() {
       printf '%s\n' '#!/usr/bin/env bash' 'exit 6' > "$LOOP_JOURNAL"
       chmod 755 "$LOOP_JOURNAL"
       ;;
-    journal-events|journal-readonly-mode|signal-status)
+    journal-events|journal-readonly-mode|signal-status|final-message)
       export LOOP_JOURNAL="$REAL_JOURNAL"
       env HOME="$HOME_DIR" "$REAL_JOURNAL" begin-run --workspace "$WORKSPACE" \
         > "$TMPDIR_ABS/$CASE_NAME.begin-run"
@@ -159,7 +159,14 @@ case "$CONTRACT_CASE" in
   signal-status) kill -TERM "$$" ;;
 esac
 
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"duration_api_ms":1,"result":"contract final message","session_id":"session-contract-123","request_id":"request-contract-123","usage":{}}'
+python3 - <<'PY_STREAM'
+import json, os
+message = ('final line one\nsecond "quoted" back\\slash café'
+           if os.environ["CONTRACT_CASE"] == "final-message" else "contract final message")
+print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                  "duration_ms": 1, "duration_api_ms": 1, "result": message,
+                  "session_id": "session-contract-123", "request_id": "request-contract-123", "usage": {}}))
+PY_STREAM
 exit 0
 STUB
 chmod 755 "$CURSOR_STUB"

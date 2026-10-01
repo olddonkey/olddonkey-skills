@@ -47,7 +47,7 @@ setup_loop_journal_fixture() {
       printf '%s\n' '#!/usr/bin/env bash' 'exit 6' > "$LOOP_JOURNAL"
       chmod 755 "$LOOP_JOURNAL"
       ;;
-    journal-events|journal-readonly-mode|signal-status)
+    journal-events|journal-readonly-mode|signal-status|final-message)
       export LOOP_JOURNAL="$REAL_JOURNAL"
       env HOME="$HOME_DIR" "$REAL_JOURNAL" begin-run --workspace "$WORKSPACE" \
         > "$TMPDIR_ABS/$CASE_NAME.begin-run"
@@ -151,7 +151,11 @@ printf '%s' "$last" > "$CONTRACT_TMPDIR/$CONTRACT_CASE.observed-prompt"
 printf '%s\n' "$model" > "$CONTRACT_TMPDIR/$CONTRACT_CASE.observed-model"
 printf '%s\n' "$mode" > "$CONTRACT_TMPDIR/$CONTRACT_CASE.observed-mode"
 : "${output:?Codex stub did not receive -o}"
-printf 'contract final message\n' > "$output"
+if [[ "$CONTRACT_CASE" == "final-message" ]]; then
+  printf '%s' $'final line one\nsecond "quoted" back\\slash café' > "$output"
+else
+  printf 'contract final message\n' > "$output"
+fi
 printf '%s\n' '--------'
 printf 'approval: never\n'
 printf 'sandbox: %s [workdir, /tmp, TMPDIR]\n' "$mode"

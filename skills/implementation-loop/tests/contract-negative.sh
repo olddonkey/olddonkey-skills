@@ -12,7 +12,7 @@ TMP_ROOT_RAW="$(mktemp -d "$SCRIPT_DIR/.contract-negative.XXXXXX")"
 TMP_ROOT="$(CDPATH= cd -- "$TMP_ROOT_RAW" && pwd -P)"
 trap 'rm -rf -- "$TMP_ROOT"' EXIT HUP INT TERM
 
-RULES="help prompt-file prompt-inline prompt-precedence prompt-required dash-prompt missing-values repeated-flags unknown-flags readonly-alias background exit-status signal-status env-namespace summary-fields journal-missing journal-start-refusal journal-events journal-unattributed journal-readonly-mode"
+RULES="help prompt-file prompt-inline prompt-precedence prompt-required dash-prompt missing-values repeated-flags unknown-flags readonly-alias background exit-status signal-status env-namespace summary-fields journal-missing journal-start-refusal journal-events journal-unattributed journal-readonly-mode final-message"
 CHECKS=0
 FAILURES=0
 
@@ -116,6 +116,23 @@ if [[ "$BROKEN_RULE" == "summary-fields" ]]; then
   exit 0
 fi
 
+if [[ "$BROKEN_RULE" == "final-message" ]]; then
+  dispatch_id="20260901T000000Z-a1b2c3d4"
+  : "${LOOP_JOURNAL:?}"
+  "$LOOP_JOURNAL" append --workspace "$PWD" --event dispatch.start \
+    --field "dispatch_id=$dispatch_id" --field backend=codex --field mode=implement >/dev/null || exit $?
+  "$LOOP_JOURNAL" append --workspace "$PWD" --event dispatch.end \
+    --field "dispatch_id=$dispatch_id" --field exit=0 >/dev/null || exit $?
+  workspace_key="$(python3 - "$PWD" <<'PY_KEY'
+import hashlib, os, sys
+print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode("utf-8")).hexdigest())
+PY_KEY
+)"
+  state_dir="$HOME/.config/olddonkey-loop/codex/$workspace_key/$dispatch_id"
+  mkdir -p "$state_dir"
+  printf '%s' $'final line one\nsecond "quoted" back\\slash cafè' > "$state_dir/last-message.txt"
+fi
+
 printf '%s\n' \
   'workspace: contract-negative' \
   'codex version: broken-stub' \
@@ -145,7 +162,14 @@ for RULE in $RULES; do
     fail "broken $RULE adapter exits through contract-core with status 1 (got $STATUS)"
   fi
   if LC_ALL=C grep -qE "^not ok [0-9]+ - backend=codex rule=$RULE " "$OUTPUT" && \
-     ! LC_ALL=C grep '^not ok ' "$OUTPUT" | grep -qv " rule=$RULE "; then
+     ! LC_ALL=C grep '^not ok ' "$OUTPUT" | grep -qv " rule=$RULE " && \
+     { [[ "$RULE" != final-message ]] || {
+       [[ "$(LC_ALL=C grep -c '^not ok ' "$OUTPUT")" -eq 1 ]] &&
+       LC_ALL=C grep -qE '^not ok [0-9]+ - backend=codex rule=final-message manifest final-message bytes equal the scripted message' "$OUTPUT" &&
+       LC_ALL=C grep -qE '^ok [0-9]+ - backend=codex rule=final-message journaled final-message dispatch succeeds' "$OUTPUT" &&
+       LC_ALL=C grep -qE '^ok [0-9]+ - backend=codex rule=final-message case run has exactly one indexed dispatch' "$OUTPUT" &&
+       LC_ALL=C grep -qE '^ok [0-9]+ - backend=codex rule=final-message indexed dispatch state_dir exists' "$OUTPUT"
+     }; }; then
     pass "broken $RULE adapter fails for rule=$RULE and no other rule"
   else
     fail "broken $RULE adapter did not fail for the named rule"
@@ -158,4 +182,4 @@ if [[ $FAILURES -gt 0 ]]; then
   exit 1
 fi
 
-printf 'contract-negative: PASS (%d checks; 20 broken adapters rejected)\n' "$CHECKS"
+printf 'contract-negative: PASS (%d checks; 21 broken adapters rejected)\n' "$CHECKS"

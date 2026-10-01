@@ -10,7 +10,7 @@
 #   loop-run unit-end --unit U --status done|parked [--workspace DIR]
 #   loop-run round-begin --unit U --round N [--workspace DIR]
 #   loop-run checkpoint [--note TEXT] [--workspace DIR]
-#   loop-run review --unit U --round N --verdict pass|iterate [--findings REF] [--workspace DIR]
+#   loop-run review --unit U --round N --verdict pass|iterate [--reviewer claude|codex|cursor|grok|session] [--findings REF] [--workspace DIR]
 #   loop-run publish --unit U [--branch B] [--pr URL] [--sha SHA] [--note TEXT] [--workspace DIR]
 #   loop-run recover [--acknowledge DISPATCH_ID]... [--workspace DIR]
 
@@ -45,7 +45,7 @@ Commands:
   unit-end    append unit.end
   round-begin append round.begin
   checkpoint  append checkpoint
-  review      append review.recorded
+  review      append review.recorded (optional --reviewer R)
   publish     append publish.recorded
   recover     abandon the active run after every dispatch.start is closed
 
@@ -212,9 +212,12 @@ def cmd_review(args: list[str]) -> int:
     round_n = take_flag(args, "--round", required=True)
     verdict = take_flag(args, "--verdict", required=True)
     findings = take_flag(args, "--findings")
+    reviewer = take_flag(args, "--reviewer")
     fields = [("unit", unit), ("round", round_n), ("verdict", verdict)]
     if findings is not None:
         fields.append(("findings", findings))
+    if reviewer is not None:
+        fields.append(("reviewer", reviewer))
     return append_event(args, "review.recorded", fields)
 
 

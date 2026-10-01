@@ -997,7 +997,23 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Every card: wording, fixed sentence, json shape, round trip
+# 7. A recorded reviewer appears in the review row and JSON verdict.
+# ---------------------------------------------------------------------------
+WS_REVIEWER="$(workspace reviewer)"
+RUN_REVIEWER="$(begin_run "$WS_REVIEWER")"
+step "$RUN" round-begin --unit u-reviewer --round 1 --workspace "$WS_REVIEWER"
+step "$RUN" review --unit u-reviewer --round 1 --verdict pass --reviewer session \
+  --workspace "$WS_REVIEWER"
+make_card reviewer "$WS_REVIEWER" --unit u-reviewer --run "$RUN_REVIEWER"
+expect_line reviewer "review rounds and last recorded verdict" \
+  '| review rounds and last recorded verdict | rounds begun: 1; last recorded verdict pass (round 1, reviewer session); reviews recorded: 0 iterate, 1 pass | recorded | not applicable |' \
+  "reviewer: markdown review row names the recorded reviewer"
+expect_get reviewer rows.1.last_verdict \
+  '{"verdict": "pass", "round": 1, "reviewer": "session"}' \
+  "reviewer: JSON last_verdict includes reviewer"
+
+# ---------------------------------------------------------------------------
+# 8. Every card: wording, fixed sentence, json shape, round trip
 # ---------------------------------------------------------------------------
 CASE_STDOUT=""
 CASE_STDERR="$TMP_ROOT/words.stderr"
