@@ -1,0 +1,571 @@
+#!/usr/bin/env bash
+# Per-unit record card derived from the loop index.
+#
+# Usage:
+#   loop-evidence --unit U [--run RUN_ID] [--workspace DIR] [--format markdown|json]
+#
+# Reads nothing itself: it runs the sibling loop-index with a fixed argv and a
+# timeout, and derives the card from that one JSON document. Every row is a
+# recorded, unverified journal claim; the card never presents one as proof.
+
+set -euo pipefail
+umask 077
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+export LOOP_EVIDENCE_SCRIPT_DIR="$SCRIPT_DIR"
+exec python3 - "$@" <<'PY'
+from __future__ import annotations
+
+import sys
+
+sys.dont_write_bytecode = True
+
+import argparse
+import json
+import os
+import re
+import subprocess
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_INDEX = 5
+
+INDEX_TIMEOUT_SEC = 5
+RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+STRENGTHS = ("recorded", "declared", "values match", "unknown")
+ATTRIBUTIONS = ("declared", "none", "not applicable")
+VERDICTS = ("green", "red", "unknown")
+
+CAVEAT = (
+    "Every row is an unverified entry in the local journal, which any process "
+    "running as this user can append to; nothing here meets task-graph-v1 "
+    "§3's proof bar."
+)
+
+ROW_LABELS = (
+    ("dispatches", "dispatches attributed to this unit"),
+    ("review", "review rounds and last recorded verdict"),
+    ("final_gate", "final gate"),
+    ("later_adverse_gates", "later adverse gates"),
+    ("recorded_shas", "recorded SHAs"),
+    ("publication", "publication"),
+)
+
+HELP = """\
+Per-unit record card derived from the loop index.
+
+Usage:
+  loop-evidence --unit U [--run RUN_ID] [--workspace DIR] [--format markdown|json]
+
+--unit U          unit to describe (required)
+--run RUN_ID      run to read (default: the context's active run when it
+                  contains the unit, else the newest run that does)
+--workspace DIR   workspace (default: $PWD)
+--format FORMAT   markdown (default) or json
+
+The only reader is the sibling loop-index, run with a fixed argv and a
+timeout. This command never reads the journal, the repository, or any
+tracked file itself, and writes nothing.
+
+Every row carries two fields:
+  strength      recorded | declared | values match | unknown
+  attribution   declared | none | not applicable
+
+Rows: dispatches attributed to the unit, review rounds and last recorded
+verdict, the final gate (the unit's last unit-final gate.result), later
+adverse gates (red or unknown), recorded SHAs (the final gate's post head
+against the published sha), and publication. Dispatches whose attribution
+is conflict or partial are listed separately as attribution unclear and
+counted for no unit.
+
+Every journal-sourced string in markdown is escaped: CR, LF, and tab
+become a space; & < > " ' become HTML entities; then each of
+\\ ` * _ { } [ ] ( ) # + - . ! | ~ is backslash-escaped. Nothing
+journal-sourced is emitted as a link, image, or raw HTML. json carries
+the same data with no escaping beyond JSON's own.
+
+The journal is local and unauthenticated: any process running as this
+user can append to it. The card is a record, not a proof.
+
+Exit codes:
+  0  card printed
+  2  usage, unknown run, or unknown unit
+  5  loop-index failed, timed out, or returned an unexpected document
+"""
+
+
+class CardError(Exception):
+    def __init__(self, message: str, code: int) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def fail(message: str, code: int) -> None:
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def contains_newline(value: str) -> bool:
+    return "\n" in value or "\r" in value
+
+
+def resolve_workspace(raw: str) -> str:
+    if not raw or contains_newline(raw):
+        fail("workspace path is invalid", EXIT_USAGE)
+    if not os.path.isdir(raw):
+        fail(f"workspace is not a directory: {raw}", EXIT_USAGE)
+    canonical = os.path.realpath(raw)
+    if not os.path.isdir(canonical):
+        fail(f"workspace is not a directory: {raw}", EXIT_USAGE)
+    if contains_newline(canonical):
+        fail("canonical workspace path contains a newline", EXIT_USAGE)
+    return canonical
+
+
+def script_dir() -> str:
+    raw = os.environ.get("LOOP_EVIDENCE_SCRIPT_DIR")
+    if not raw:
+        fail("LOOP_EVIDENCE_SCRIPT_DIR is not set", EXIT_INDEX)
+    return os.path.abspath(raw)
+
+
+def helper_message(stderr: bytes) -> str:
+    text = stderr.decode("utf-8", errors="replace").strip().splitlines()
+    if not text:
+        return ""
+    line = text[0]
+    if line.startswith("error: "):
+        line = line[len("error: ") :]
+    return "".join(char if char.isprintable() else "?" for char in line)
+
+
+def run_loop_index(index: str, workspace: str) -> dict:
+    try:
+        completed = subprocess.run(
+            [index, "--workspace", workspace],
+            check=False,
+            capture_output=True,
+            timeout=INDEX_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        raise CardError("loop-index timed out", EXIT_INDEX) from None
+    except OSError as error:
+        raise CardError(f"loop-index could not be executed: {error}", EXIT_INDEX) from None
+    if completed.returncode != 0:
+        message = f"loop-index failed (exit {completed.returncode})"
+        detail = helper_message(completed.stderr)
+        if detail:
+            message += f": {detail}"
+        raise CardError(message, EXIT_INDEX)
+    try:
+        document = json.loads(completed.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise CardError("loop-index returned invalid JSON", EXIT_INDEX) from None
+    check_document(document)
+    return document
+
+
+def check_document(document: object) -> None:
+    def bad() -> None:
+        raise CardError("loop-index returned an unexpected document", EXIT_INDEX)
+
+    if not isinstance(document, dict) or document.get("schema") != 1:
+        bad()
+    if not isinstance(document.get("context"), dict) or not isinstance(
+        document.get("runs"), list
+    ):
+        bad()
+    for run in document["runs"]:
+        if not isinstance(run, dict) or not isinstance(run.get("run_id"), str):
+            bad()
+        for key in ("units", "dispatches", "gates"):
+            items = run.get(key)
+            if not isinstance(items, list) or not all(
+                isinstance(item, dict) for item in items
+            ):
+                bad()
+
+
+# ---------------------------------------------------------------------------
+# Card data: one dict, rendered as markdown or dumped as JSON.
+# ---------------------------------------------------------------------------
+
+
+def str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def int_or_none(value: object) -> int | None:
+    return value if type(value) is int else None
+
+
+def is_unit_dispatch(record: dict, unit: str) -> bool:
+    return record.get("attribution") == "declared" and record.get("unit") == unit
+
+
+def is_unit_gate(gate: dict, unit: str) -> bool:
+    return gate.get("attribution") == "declared" and gate.get("unit") == unit
+
+
+def run_has_unit(run: dict, unit: str) -> bool:
+    if any(record.get("unit") == unit for record in run["units"]):
+        return True
+    if any(is_unit_dispatch(record, unit) for record in run["dispatches"]):
+        return True
+    return any(is_unit_gate(gate, unit) for gate in run["gates"])
+
+
+def select_run(document: dict, unit: str, wanted: str | None) -> dict:
+    runs = document["runs"]
+    if wanted is not None:
+        run = next((item for item in runs if item["run_id"] == wanted), None)
+        if run is None:
+            raise CardError(f"unknown run: {wanted}", EXIT_USAGE)
+        if not run_has_unit(run, unit):
+            raise CardError(f"unknown unit in run {wanted}: {unit}", EXIT_USAGE)
+        return run
+    context = document["context"]
+    if context.get("state") == "active":
+        active = next(
+            (item for item in runs if item["run_id"] == context.get("run")), None
+        )
+        if active is not None and run_has_unit(active, unit):
+            return active
+    # loop-index lists runs newest generation first.
+    for run in runs:
+        if run_has_unit(run, unit):
+            return run
+    raise CardError(f"unknown unit: {unit}", EXIT_USAGE)
+
+
+def dispatch_view(record: dict) -> dict:
+    return {
+        "dispatch_id": str_or_none(record.get("dispatch_id")),
+        "backend": str_or_none(record.get("backend")),
+        "mode": str_or_none(record.get("mode")),
+        "round": int_or_none(record.get("round")),
+        "state": str_or_none(record.get("state")),
+        "exit": int_or_none(record.get("exit")),
+    }
+
+
+def gate_view(gate: dict) -> dict:
+    verdict = gate.get("verdict")
+    return {
+        "verdict": verdict if verdict in VERDICTS else "unknown",
+        "policy": str_or_none(gate.get("policy")),
+        "purpose": str_or_none(gate.get("purpose")),
+        "binding": str_or_none(gate.get("binding")),
+        "round": int_or_none(gate.get("round")),
+        "post_head": str_or_none(gate.get("post_head")),
+    }
+
+
+def row(name: str, strength: str, attribution: str, **data: object) -> dict:
+    assert strength in STRENGTHS and attribution in ATTRIBUTIONS
+    item: dict = {"row": name, "strength": strength, "attribution": attribution}
+    item.update(data)
+    return item
+
+
+def build_card(run: dict, unit: str) -> dict:
+    unit_row = next((item for item in run["units"] if item.get("unit") == unit), None)
+    dispatches = [
+        dispatch_view(record)
+        for record in run["dispatches"]
+        if is_unit_dispatch(record, unit)
+    ]
+    unclear = []
+    for record in run["dispatches"]:
+        if record.get("attribution") in {"conflict", "partial"}:
+            view = dispatch_view(record)
+            del view["round"]
+            view["unclear"] = record["attribution"]
+            unclear.append(view)
+
+    rounds = int_or_none(unit_row.get("rounds")) if unit_row else None
+    review = unit_row.get("review") if unit_row else None
+    last_verdict = None
+    if isinstance(review, dict) and review.get("verdict") in {"pass", "iterate"}:
+        last_verdict = {
+            "verdict": review["verdict"],
+            "round": int_or_none(review.get("round")),
+        }
+    review_counts = {"iterate": 0, "pass": 0}
+    counts = run.get("counts")
+    if isinstance(counts, dict) and isinstance(counts.get("units"), dict):
+        unit_counts = counts["units"].get(unit)
+        if isinstance(unit_counts, dict) and isinstance(unit_counts.get("reviews"), dict):
+            for verdict in review_counts:
+                value = int_or_none(unit_counts["reviews"].get(verdict))
+                if value is not None:
+                    review_counts[verdict] = value
+
+    gates = [gate for gate in run["gates"] if is_unit_gate(gate, unit)]
+    final_index = None
+    for index, gate in enumerate(gates):
+        if gate.get("purpose") == "unit-final":
+            final_index = index
+    final_gate = gate_view(gates[final_index]) if final_index is not None else None
+    later = []
+    if final_index is not None:
+        for gate in gates[final_index + 1 :]:
+            view = gate_view(gate)
+            if view["verdict"] in {"red", "unknown"}:
+                later.append(view)
+
+    publish = unit_row.get("publish") if unit_row else None
+    publication = None
+    if isinstance(publish, dict):
+        publication = {key: str_or_none(publish.get(key)) for key in ("branch", "pr", "sha")}
+
+    post_head = final_gate["post_head"] if final_gate else None
+    publish_sha = publication["sha"] if publication else None
+    if (
+        post_head is not None
+        and publish_sha is not None
+        and SHA_RE.fullmatch(post_head)
+        and SHA_RE.fullmatch(publish_sha)
+    ):
+        comparison = "values match" if post_head == publish_sha else "recorded SHAs differ"
+    else:
+        comparison = "cannot compare"
+
+    rows = [
+        row("dispatches", "recorded", "declared", count=len(dispatches), dispatches=dispatches),
+        row(
+            "review",
+            "recorded",
+            "not applicable",
+            rounds=rounds if rounds is not None else 0,
+            last_verdict=last_verdict,
+            reviews=review_counts,
+        ),
+        row(
+            "final_gate",
+            "recorded" if final_gate else "unknown",
+            "declared" if final_gate else "none",
+            gate=final_gate,
+        ),
+        row("later_adverse_gates", "recorded", "declared", gates=later),
+        row(
+            "recorded_shas",
+            "values match" if comparison == "values match" else "unknown",
+            "not applicable",
+            comparison=comparison,
+            gate_post_head=post_head,
+            publish_sha=publish_sha,
+        ),
+        row(
+            "publication",
+            "recorded" if publication else "unknown",
+            "not applicable",
+            publication=publication,
+        ),
+    ]
+    return {
+        "schema": 1,
+        "unit": unit,
+        "run": run["run_id"],
+        "run_status": str_or_none(run.get("status")),
+        "counts_complete": run.get("counts_complete") is True,
+        "rows": rows,
+        "attribution_unclear": unclear,
+        "caveat": CAVEAT,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Markdown. Every journal-sourced value goes through text(); fixed wording
+# never does.
+# ---------------------------------------------------------------------------
+
+BACKSLASH_ESCAPED = frozenset("\\`*_{}[]()#+-.!|~")
+
+
+def escape_text(value: str) -> str:
+    # Lone surrogates survive json.loads but cannot be written as UTF-8.
+    value = value.encode("utf-8", "replace").decode("utf-8")
+    for char in ("\r", "\n", "\t"):
+        value = value.replace(char, " ")
+    for char, entity in (
+        ("&", "&amp;"),
+        ("<", "&lt;"),
+        (">", "&gt;"),
+        ('"', "&quot;"),
+        ("'", "&#39;"),
+    ):
+        value = value.replace(char, entity)
+    return "".join("\\" + char if char in BACKSLASH_ESCAPED else char for char in value)
+
+
+def text(value: object) -> str:
+    if value is None:
+        return "not recorded"
+    return escape_text(str(value))
+
+
+def dispatch_phrase(item: dict, *, with_round: bool) -> str:
+    parts = [text(item["backend"]), text(item["mode"])]
+    if with_round:
+        parts.append(f"round {text(item['round'])}")
+    parts.append(text(item["state"]))
+    parts.append(
+        f"exit {text(item['exit'])}" if item["exit"] is not None else "no exit recorded"
+    )
+    return f"{text(item['dispatch_id'])} ({', '.join(parts)})"
+
+
+def gate_fields(gate: dict) -> list[str]:
+    binding = f"binding {text(gate['binding'])}"
+    if gate["binding"] != "clean":
+        binding += " (not clean)"
+    return [
+        f"policy {text(gate['policy'])}",
+        f"purpose {text(gate['purpose'])}",
+        binding,
+        f"post head {text(gate['post_head'])}",
+        f"round {text(gate['round'])}",
+    ]
+
+
+def row_value(item: dict, card: dict) -> str:
+    name = item["row"]
+    if name == "dispatches":
+        if not item["dispatches"]:
+            return "none recorded"
+        phrases = [dispatch_phrase(entry, with_round=True) for entry in item["dispatches"]]
+        return f"{item['count']} recorded: " + "; ".join(phrases)
+    if name == "review":
+        last = item["last_verdict"]
+        if last is None:
+            verdict = "no review recorded"
+        else:
+            verdict = (
+                f"last recorded verdict {text(last['verdict'])} "
+                f"(round {text(last['round'])})"
+            )
+        reviews = item["reviews"]
+        return (
+            f"rounds begun: {item['rounds']}; {verdict}; reviews recorded: "
+            f"{reviews['iterate']} iterate, {reviews['pass']} pass"
+        )
+    if name == "final_gate":
+        gate = item["gate"]
+        if gate is None:
+            return "no final gate recorded"
+        return "; ".join([f"verdict {text(gate['verdict'])}", *gate_fields(gate)])
+    if name == "later_adverse_gates":
+        final = next(entry for entry in card["rows"] if entry["row"] == "final_gate")
+        if final["gate"] is None:
+            return "no final gate recorded"
+        if not item["gates"]:
+            return "none recorded after the final gate"
+        phrases = [
+            f"verdict {text(gate['verdict'])} ({', '.join(gate_fields(gate))})"
+            for gate in item["gates"]
+        ]
+        return f"{len(phrases)} recorded: " + "; ".join(phrases)
+    if name == "recorded_shas":
+        return (
+            f"{item['comparison']}: gate post head {text(item['gate_post_head'])}, "
+            f"publish sha {text(item['publish_sha'])}"
+        )
+    if name == "publication":
+        published = item["publication"]
+        if published is None:
+            return "no publication recorded"
+        return (
+            f"branch {text(published['branch'])}; PR {text(published['pr'])}; "
+            f"sha {text(published['sha'])}"
+        )
+    raise AssertionError(name)
+
+
+def render_markdown(card: dict) -> str:
+    labels = dict(ROW_LABELS)
+    record = "complete" if card["counts_complete"] else "partial"
+    lines = [
+        f"### Record card for unit {text(card['unit'])}",
+        "",
+        f"Run {text(card['run'])} (status {text(card['run_status'])}; "
+        f"journal record {record})",
+        "",
+        "| row | recorded value | strength | attribution |",
+        "| --- | --- | --- | --- |",
+    ]
+    for item in card["rows"]:
+        lines.append(
+            f"| {labels[item['row']]} | {row_value(item, card)} | "
+            f"{item['strength']} | {item['attribution']} |"
+        )
+    lines.append("")
+    if card["attribution_unclear"]:
+        lines.append("Attribution unclear (counted for no unit):")
+        lines.append("")
+        reasons = {
+            "conflict": "its events declare different units or rounds",
+            "partial": "no dispatch.start recorded",
+        }
+        for entry in card["attribution_unclear"]:
+            lines.append(
+                f"- {dispatch_phrase(entry, with_round=False)}: {reasons[entry['unclear']]}"
+            )
+    else:
+        lines.append("Attribution unclear (counted for no unit): none recorded.")
+    lines.append("")
+    lines.append(card["caveat"])
+    return "\n".join(lines) + "\n"
+
+
+def render_json(card: dict) -> str:
+    return json.dumps(card, ensure_ascii=True, indent=2) + "\n"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="loop-evidence", add_help=False)
+    parser.add_argument("-h", "--help", action="store_true")
+    parser.add_argument("--unit", default=None)
+    parser.add_argument("--run", default=None)
+    parser.add_argument("--workspace", default=None)
+    parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as error:
+        return int(error.code) if isinstance(error.code, int) else EXIT_USAGE
+    if args.help:
+        sys.stdout.write(HELP)
+        return EXIT_OK
+    if args.unit is None:
+        fail("--unit is required", EXIT_USAGE)
+    if not args.unit or contains_newline(args.unit):
+        fail("--unit must be a non-empty single-line string", EXIT_USAGE)
+    if args.run is not None and not RUN_ID_RE.fullmatch(args.run):
+        fail("--run must be a run id (YYYYMMDDTHHMMSSZ-xxxxxx)", EXIT_USAGE)
+    workspace = args.workspace
+    if workspace is None:
+        workspace = os.environ.get("PWD") or os.getcwd()
+    canonical = resolve_workspace(workspace)
+    index = os.path.join(script_dir(), "loop-index")
+    try:
+        document = run_loop_index(index, canonical)
+        run = select_run(document, args.unit, args.run)
+    except CardError as error:
+        fail(str(error), error.code)
+    card = build_card(run, args.unit)
+    output = render_json(card) if args.format == "json" else render_markdown(card)
+    sys.stdout.buffer.write(output.encode("utf-8"))
+    sys.stdout.flush()
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
+PY
