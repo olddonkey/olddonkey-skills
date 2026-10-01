@@ -65,7 +65,7 @@ run):
 4. `bash skills/implementation-loop/backends/codex/selftest.sh` — expect
    `selftest: PASS (166 checks)`, then
    `bash skills/implementation-loop/tests/gate-selftest.sh` — expect
-   `selftest: PASS (122 checks)`. Their split total stays 288. The Codex cases
+   `selftest: PASS (200 checks)`. Their split total is 366. The Codex cases
    use python3 for secure state, argv, and fixture validation; python3 3.11+ is
    part of the repo toolchain.
 5. `bash skills/implementation-loop/backends/grok/selftest.sh` — expect
@@ -76,7 +76,7 @@ run):
    `bash skills/implementation-loop/tests/contract-negative.sh`, and
    `bash skills/implementation-loop/tests/shim-selftest.sh` — expect all green.
 8. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
-   — expect `selftest: PASS (122 checks)`.
+   — expect `selftest: PASS (200 checks)`.
 9. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
 10. Packaging checks: both marketplace JSON manifests must parse; every
    `SKILL.md` (under `skills/` and `cursor-implementation-loop/skills/`) must

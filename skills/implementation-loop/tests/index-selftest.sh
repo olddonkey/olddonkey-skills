@@ -153,6 +153,38 @@ field_from() { # $1=file $2=key
   sed -n "s/^$2=//p" "$1" | head -n 1
 }
 
+# Compare the gates loop-index printed (CASE_STDOUT) for one run against the
+# expected verdict/gate_exit of one group of cases, matched by position.
+expect_gate_verdicts() { # $1=run id $2=cases json $3=case group $4=description
+  if python3 - "$CASE_STDOUT" "$1" "$2" "$3" <<'PY'
+import json, sys
+path, run_id, cases_path, wanted = sys.argv[1:]
+doc = json.load(open(path, encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == run_id)
+cases = json.load(open(cases_path, encoding="utf-8"))
+gates = run["gates"]
+if len(gates) != len(cases):
+    raise SystemExit(f"{len(gates)} gates for {len(cases)} cases")
+for gate, (group, label, verdict, gate_exit) in zip(gates, cases):
+    if group != wanted:
+        continue
+    if gate.get("verdict") != verdict:
+        raise SystemExit(f"{label}: verdict {gate.get('verdict')!r}, expected {verdict!r}")
+    if gate_exit is None:
+        if "gate_exit" in gate:
+            raise SystemExit(f"{label}: non-int gate_exit passed through: {gate}")
+    elif type(gate.get("gate_exit")) is not int or gate["gate_exit"] != gate_exit:
+        raise SystemExit(f"{label}: gate_exit {gate.get('gate_exit')!r}, expected {gate_exit}")
+    if gate.get("totals") != "exit=0":
+        raise SystemExit(f"{label}: totals {gate}")
+PY
+  then
+    pass "$4"
+  else
+    fail "$4"
+  fi
+}
+
 inventory_list() { # $1=backend $2=class
   python3 - "$1" "$2" <<PY
 import sys
@@ -474,6 +506,20 @@ then
   pass "pipeline: JSON has run status, review, dispatch, gate, newest-first"
 else
   fail "pipeline: JSON has run status, review, dispatch, gate, newest-first"
+fi
+if python3 - "$CASE_STDOUT" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+gate = doc["runs"][0]["gates"][0]
+if gate.get("totals") != "exit=0":
+    raise SystemExit(f"totals {gate}")
+if gate.get("verdict") != "unknown" or "gate_exit" in gate:
+    raise SystemExit(f"legacy gate {gate}")
+PY
+then
+  pass "pipeline: legacy gate.result without verdict reads unknown despite totals=exit=0"
+else
+  fail "pipeline: legacy gate.result without verdict reads unknown despite totals=exit=0"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1017,6 +1063,68 @@ then
 else
   fail "checkpoint: recent dispatch/gate events do not make the axis fresh"
 fi
+
+# ---------------------------------------------------------------------------
+# 11. Gate verdict normalization
+# ---------------------------------------------------------------------------
+# Raw lines, not loop-journal appends: the append validator would refuse most
+# of these, but the index reads stored JSON without payload validation.
+WS_VERDICT="$(workspace gate-verdict)"
+RUN_VERDICT="20260817T190000Z-9a7e01"
+GATE_CASES="$TMP_ROOT/gate-verdict-cases.json"
+python3 - "$WS_VERDICT" "$HOME" "$RUN_VERDICT" "$GATE_CASES" <<'PY'
+import hashlib, json, os, sys
+
+ws, home, run_id, cases_path = sys.argv[1:]
+key = hashlib.sha256(os.path.realpath(ws).encode("utf-8")).hexdigest()
+runs_dir = os.path.join(home, ".config", "olddonkey-loop", "journal", key, "runs")
+os.makedirs(runs_dir, exist_ok=True)
+absent = object()
+# (group, label, journaled verdict, journaled gate_exit, expected verdict,
+#  expected gate_exit or None when it must not be passed through)
+cases = [
+    ("exact", "green/0", "green", 0, "green", 0),
+    ("exact", "red/1", "red", 1, "red", 1),
+    ("exact", "red/137", "red", 137, "red", 137),
+    ("inconsistent", "green/1", "green", 1, "unknown", 1),
+    ("inconsistent", "red/0", "red", 0, "unknown", 0),
+    ("inconsistent", "green without gate_exit", "green", absent, "unknown", None),
+    ("inconsistent", "green with gate_exit false", "green", False, "unknown", None),
+    ("inconsistent", "red with gate_exit true", "red", True, "unknown", None),
+    ("inconsistent", "green with gate_exit 0.0", "green", 0.0, "unknown", None),
+    ("inconsistent", "red with gate_exit 1.0", "red", 1.0, "unknown", None),
+    ("inconsistent", 'green with gate_exit "0"', "green", "0", "unknown", None),
+    ("malformed", "verdict maybe/0", "maybe", 0, "unknown", 0),
+    ("malformed", "verdict GREEN/0", "GREEN", 0, "unknown", 0),
+    ("malformed", "verdict list/0", ["green"], 0, "unknown", 0),
+    ("malformed", "no verdict, totals exit=0", absent, absent, "unknown", None),
+]
+with open(os.path.join(runs_dir, run_id + ".jsonl"), "w", encoding="utf-8") as handle:
+    for index, (_, label, verdict, gate_exit, _, _) in enumerate(cases, 1):
+        row = {
+            "schema": 1, "seq": index, "run": run_id, "ts": "2026-08-17T19:00:00Z",
+            "event": "gate.result", "policy": "strict", "purpose": "unit-final",
+            "binding": "clean", "totals": "exit=0",
+        }
+        if verdict is not absent:
+            row["verdict"] = verdict
+        if gate_exit is not absent:
+            row["gate_exit"] = gate_exit
+        handle.write(json.dumps(row, ensure_ascii=True, separators=(",", ":")) + "\n")
+json.dump(
+    [[group, label, verdict, gate_exit] for group, label, _, _, verdict, gate_exit in cases],
+    open(cases_path, "w", encoding="utf-8"),
+)
+PY
+
+run_cmd verdict-index "$INDEX" --workspace "$WS_VERDICT"
+expect_status 0 "gate verdict: loop-index exits 0"
+expect_gate_verdicts "$RUN_VERDICT" "$GATE_CASES" exact \
+  "gate verdict: green/0 reads green and red/1, red/137 read red, gate_exit passed through"
+expect_gate_verdicts "$RUN_VERDICT" "$GATE_CASES" inconsistent \
+  "gate verdict: green/1, red/0, missing gate_exit, and bool/float/string gate_exit read unknown"
+expect_gate_verdicts "$RUN_VERDICT" "$GATE_CASES" malformed \
+  "gate verdict: malformed or absent verdict reads unknown; never inferred from totals=exit=0"
 
 # ---------------------------------------------------------------------------
 # CLI / contract extras

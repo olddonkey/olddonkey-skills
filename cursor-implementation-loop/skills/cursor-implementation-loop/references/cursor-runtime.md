@@ -119,11 +119,11 @@ remains:
 model-agnostic: real exit codes, ANSI-stripped bytewise parsing, unittest +
 pytest verdicts, baseline comparison, log-swap detection. Everything in
 references/gate.md applies unchanged. `scripts/gate-selftest.sh` (also
-extracted from the original, 122 checks) verifies the gate's behavior on the
+extracted from the original, 200 checks) verifies the gate's behavior on the
 machine it runs on:
 
 ```bash
-bash scripts/gate-selftest.sh   # expect: selftest: PASS (122 checks)
+bash scripts/gate-selftest.sh   # expect: selftest: PASS (200 checks)
 ```
 
 Run it once when installing this plugin on a new machine — the gate's

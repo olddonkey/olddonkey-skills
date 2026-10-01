@@ -284,14 +284,21 @@ journal_helper_ok() {
   [[ -n "${JOURNAL_HELPER:-}" && -f "$JOURNAL_HELPER" && -x "$JOURNAL_HELPER" ]]
 }
 
-journal_gate_result() { # $1=suite exit
+# The verdict is the gate's own exit code; totals keeps the suite's raw exit
+# for legacy readers. The two differ whenever a policy overrides the suite
+# (exit-zero runs judged red, baseline-matched failures judged green).
+journal_gate_result() { # $1=gate exit $2=suite exit
   journal_helper_ok || return 0
-  local suite_exit="$1" workspace=""
+  local gate_exit="$1" suite_exit="$2" verdict="red" workspace=""
+  if [[ "$gate_exit" -eq 0 ]]; then
+    verdict="green"
+  fi
   workspace="$(pwd -P 2>/dev/null || pwd)"
   local -a args
   args=(append --workspace "$workspace" --event gate.result
     --field "policy=$GATE_POLICY" --field "purpose=$PURPOSE"
-    --field "binding=$BINDING" --field "totals=exit=${suite_exit}")
+    --field "binding=$BINDING" --field "totals=exit=${suite_exit}"
+    --field "verdict=$verdict" --field "gate_exit=$gate_exit")
   if [[ "$PRE_CAPTURE_OK" == "ok" ]]; then
     args+=(--field "pre_head=$PRE_HEAD" --field "pre_tree=$PRE_TREE")
   fi
@@ -315,7 +322,7 @@ emit_result() { # $1=exit code $2=RESULT line
     printf 'binding reason: %s\n' "$BINDING_REASON"
   fi
   printf '%s\n' "$line"
-  journal_gate_result "$STATUS"
+  journal_gate_result "$code" "$STATUS"
   exit "$code"
 }
 
