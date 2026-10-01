@@ -6,6 +6,11 @@ Findings per round 10 → 10 → 9 → 7 → 3 (all minor at round 5). Dispositi
 §8–§12. Rounds 2–5 were mostly about the implementer harness (§4), not the
 product direction.
 
+**Amended 2026-10-01** by `plans/collab-canvas-v1.md` at three points, listed
+in its §6: who the first user is, multi-user access, and where S5 comes in the
+order. S1–S3 stand as shipped work. S4–S6 are paused while that plan's units
+and falsifier stages run.
+
 What implementation-loop is becoming, in product terms, and the first four
 units that move it there. It sits **above** `plans/task-graph-v1.md` (the
 accepted, effect-free control plane) and does not amend it: where the two
