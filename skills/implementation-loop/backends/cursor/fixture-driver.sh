@@ -87,10 +87,13 @@ export CONTRACT_CASE="$CASE_NAME"
 unset CODEX_LOOP_MODEL CODEX_LOOP_EFFORT CODEX_LOOP_EXTRA_ARGS
 unset GROK_LOOP_MODEL GROK_LOOP_EFFORT GROK_LOOP_EXTRA_ARGS
 unset CURSOR_LOOP_MODEL CURSOR_LOOP_EFFORT CURSOR_LOOP_EXTRA_ARGS
+unset CLAUDE_LOOP_MODEL CLAUDE_LOOP_EFFORT CLAUDE_LOOP_EXTRA_ARGS
 
 case "$CASE_NAME" in
   env-own) export CURSOR_LOOP_MODEL="cursor-contract-xhigh" ;;
   env-foreign)
+    export CLAUDE_LOOP_MODEL="foreign-poison-model"
+    export CLAUDE_LOOP_EXTRA_ARGS="--foreign-poison"
     export CODEX_LOOP_MODEL="foreign-poison-model"
     export CODEX_LOOP_EXTRA_ARGS="--foreign-poison"
     export GROK_LOOP_MODEL="foreign-poison-model"

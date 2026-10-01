@@ -15,7 +15,7 @@
 
 目前包含三个 Claude Code skill，外加一个内含两个工程 skill 的 Cursor Plugin：
 
-- [`implementation-loop`](#implementation-loop) —— 把实现交给 **Codex、grok 或 cursor-agent**，但不把判断交出去：Claude 亲自审查真实 diff、跑全量测试门禁，只发布自己敢签名的改动。实现后端是一个可选档位，三者的审查与发布纪律完全一致。
+- [`implementation-loop`](#implementation-loop) —— 把实现交给 **Codex、grok 或 cursor-agent**，但不把判断交出去：Claude 亲自审查真实 diff、跑全量测试门禁，只发布自己敢签名的改动。这三个是 agent 驱动循环的 `backend` 档位；另有供协调器使用的第四个 Claude Code 后端模块。
 - `engineering-mode` —— 目标先行的工程主导模式：先调查、定设计、写计划，再逐单元驱动 `implementation-loop`。
 - [`cursor-implementation-loop`](#cursor-implementation-loop) —— Cursor Plugin 内含计划先行的实现循环和目标先行的 `cursor-engineering-mode` 包装器；父 agent 负责 review / 门禁 / 发布，implementer 子 agent 写代码。
 - [`web-slides`](#web-slides) —— 把素材 / 提纲做成点击驱动的 16:9 HTML 幻灯片，用于现场放映；内置 24 套主题 + 演讲者窗口，投屏时口播稿对观众不可见。
@@ -34,7 +34,7 @@
 /reload-plugins
 ```
 
-由于实现循环现在支持 Codex、grok 和 cursor-agent 后端，这两个插件已去掉 `codex-` 前缀并改用新名称。已安装旧 Codex 前缀插件 ID 的用户应先卸载旧 ID，再安装 `implementation-loop` 和 `engineering-mode`。
+实现循环加入 Codex、grok 和 cursor-agent 后端时，这两个插件去掉了 `codex-` 前缀并改用新名称；现在另有 Claude Code 协调器后端模块。已安装旧 Codex 前缀插件 ID 的用户应先卸载旧 ID，再安装 `implementation-loop` 和 `engineering-mode`。
 
 0.4.x 版本把 implementation-loop 的 adapter 脚本从 `scripts/` 移到了
 `backends/<name>/`。旧可执行路径会在这一版继续转发，现有 harness 不会立刻中断；
@@ -120,17 +120,18 @@ Codex 侧依赖链：`engineering-mode` → `implementation-loop` → 已登录�
 
 ## implementation-loop
 
-**把实现交给 Codex、grok 或 cursor-agent，但不把判断交出去。**
+**agent 驱动循环把实现交给 Codex、grok 或 cursor-agent；协调器也可调用 Claude Code 后端模块。**
 
 实现者负责实现并跑聚焦测试；Claude 亲自审查真实 diff、跑全量门禁，只发布自己敢签名的改动。
 
-**后端是一个可选档位。** 默认是 Codex（见下方环境准备）；无论哪个后端实现，都是同一套循环、同样的审查与门禁纪律。每个后端的 git 与发布边界机制不同，各有独立的 runtime 文档——首次派发前请先读所选后端的：
+**agent 驱动循环的后端档位是 Codex、grok 和 cursor-agent。** 默认是 Codex（见下方环境准备）；无论哪个后端实现，都是同一套循环、同样的审查与门禁纪律。每个后端的 git 与发布边界机制不同，各有独立的 runtime 文档——首次派发前请先读所选后端的：
 
+- **Claude Code（协调器模块）** —— 无 Git 元数据的副本、固定工具列表、CLI 的 OS 沙箱和校验后的补丁；不属于 agent 驱动循环的 `backend` 档位。见 [`backends/claude/runtime.md`](./skills/implementation-loop/backends/claude/runtime.md)。
 - **Codex** —— 固定 `codex exec` 策略、loop 自有的 exact-id 状态、policy banner 校验。见 [`backends/codex/runtime.md`](./skills/implementation-loop/backends/codex/runtime.md)。
 - **grok** —— fail-closed 自定义沙箱、linked-worktree 定位、按机器的 tuple allowlist。见 [`backends/grok/runtime.md`](./skills/implementation-loop/backends/grok/runtime.md)。
 - **cursor-agent** —— git-less-copy 架构：实现者在一个无 `.git`、禁网络的沙箱拷贝里改文件，编排者再把捕获的 patch 应用到真仓库（绝不带 `--force`/`--yolo`，那会绕过沙箱）。见 [`backends/cursor/runtime.md`](./skills/implementation-loop/backends/cursor/runtime.md)。
 
-grok 与 cursor-agent 的默认实现模型都是 Grok 4.6 / `xhigh`，但 `--model` 在每个后端都是透传的——cursor-agent 尤其可以用到账号目录里的全部模型（Claude、GPT-5.x、Gemini、Composer、各档 Grok），其中 effort 档位是写在模型 id 里的。
+grok 与 cursor-agent 的默认实现模型都是 Grok 4.6 / `xhigh`；Claude Code 适配器没有默认 model 或 effort。`--model` 在每个后端都是透传的——cursor-agent 尤其可以用到账号目录里的全部模型（Claude、GPT-5.x、Gemini、Composer、各档 Grok），其中 effort 档位是写在模型 id 里的。
 
 ### 环境准备
 
@@ -196,7 +197,7 @@ Skill 为首次运行准备了保守选择；只需要指定你想改变的部�
 ### 兼容性与限制
 
 - 指令采用开放的 `SKILL.md` 格式。Claude marketplace 承载这个 skill，而 Codex 后端通过 plain `codex exec` 直接调用已登录的 `codex` CLI。
-- 其他 agent 可以使用已附带的 grok、cursor-agent 适配器，或实现同一派发契约的新适配器。
+- 其他 agent 可以使用已附带的 Claude Code、grok、cursor-agent 适配器，或实现同一派发契约的新适配器。
 - 脚本需要 Bash、Python 3.11+、所选后端的 CLI 和常见 Unix 命令行工具；开发环境为 macOS。
 - Codex 与 Claude Code 使用同一份 checkout 和本机环境，其用量计入你的 ChatGPT 或 API 限额；详见 [Codex 定价](https://developers.openai.com/codex/pricing)。
 

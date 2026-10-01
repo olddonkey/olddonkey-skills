@@ -15,7 +15,7 @@
 
 Three Claude Code skills so far, plus a Cursor Plugin that ships two engineering skills:
 
-- [`implementation-loop`](#implementation-loop) — delegate implementation to **Codex, grok, or cursor-agent** without delegating judgment: Claude reviews the real diff, runs the full test gate, and ships only what it would sign its name to. The implementer backend is a dial; the review-and-ship discipline is identical for all three.
+- [`implementation-loop`](#implementation-loop) — delegate implementation to **Codex, grok, or cursor-agent** without delegating judgment: Claude reviews the real diff, runs the full test gate, and ships only what it would sign its name to. Those three are the agent-driven `backend` dial; Claude Code is also shipped as a fourth backend module for coordinator use.
 - `engineering-mode` — goal-first engineering ownership: investigate, design, and plan, then drive `implementation-loop` unit by unit.
 - [`cursor-implementation-loop`](#cursor-implementation-loop) — Cursor Plugin with the plan-first implementation loop and the goal-first `cursor-engineering-mode` wrapper; the parent agent reviews, gates, and publishes while an implementer subagent writes code.
 - [`web-slides`](#web-slides) — turn material or outlines into click-driven 16:9 HTML slide decks for live presenting, with 24 built-in themes and a presenter view that keeps speaker notes off the shared screen.
@@ -34,7 +34,7 @@ Inside Claude Code, add the marketplace once, then install the skills you want:
 /reload-plugins
 ```
 
-These plugins were renamed by dropping the `codex-` prefix because the loop now supports Codex, grok, and cursor-agent backends. If the former Codex-prefixed plugin IDs are installed, uninstall them and install `implementation-loop` and `engineering-mode` instead.
+These plugins were renamed by dropping the `codex-` prefix when the loop gained Codex, grok, and cursor-agent backends. A Claude Code coordinator backend module is also available. If the former Codex-prefixed plugin IDs are installed, uninstall them and install `implementation-loop` and `engineering-mode` instead.
 
 The implementation-loop adapter scripts moved from `scripts/` into
 `backends/<name>/` for the 0.4.x release. The old executable paths forward for
@@ -121,17 +121,18 @@ Codex prerequisites: `engineering-mode` → `implementation-loop` → authentica
 
 ## implementation-loop
 
-**Delegate implementation to Codex, grok, or cursor-agent without delegating judgment.**
+**The agent-driven loop delegates to Codex, grok, or cursor-agent. A coordinator can also use the Claude Code backend module.**
 
 The implementer implements and runs focused tests. Claude reviews the real diff, runs the full gate, and ships only what it would sign its name to.
 
-**Backend is a dial.** The default is Codex (setup below); the same loop and the same review-and-gate discipline apply whichever backend implements. Each backend's git and publication boundary works differently and is documented in its own runtime reference — read the selected backend's before its first dispatch:
+**The agent-driven backend dial offers Codex, grok, and cursor-agent.** The default is Codex (setup below); the same loop and the same review-and-gate discipline apply whichever backend implements. Each backend's git and publication boundary works differently and is documented in its own runtime reference — read the selected backend's before its first dispatch:
 
+- **Claude Code (coordinator module)** — git-less copies, a fixed tool list, the CLI OS sandbox, and a checked patch. It is not a choice of the agent-driven loop’s `backend` dial. [`backends/claude/runtime.md`](./skills/implementation-loop/backends/claude/runtime.md).
 - **Codex** — pinned `codex exec` policy, loop-owned exact-id state, and policy-banner verification. [`backends/codex/runtime.md`](./skills/implementation-loop/backends/codex/runtime.md).
 - **grok** — a fail-closed custom sandbox, linked-worktree placement, and a per-machine tuple allowlist. [`backends/grok/runtime.md`](./skills/implementation-loop/backends/grok/runtime.md).
 - **cursor-agent** — a git-less-copy architecture: the implementer edits a `.git`-free copy inside a network-denied sandbox, and the orchestrator applies the captured patch to the real repo (it never runs with `--force`/`--yolo`, which would bypass the sandbox). [`backends/cursor/runtime.md`](./skills/implementation-loop/backends/cursor/runtime.md).
 
-grok and cursor-agent both default to Grok 4.6 at `xhigh` as the implementer model, but `--model` is a passthrough on every backend — cursor-agent in particular reaches its whole account catalog (Claude, GPT-5.x, Gemini, Composer, Grok tiers), where the effort level is part of the model id.
+grok and cursor-agent both default to Grok 4.6 at `xhigh` as the implementer model; Claude Code has no adapter model or effort default. `--model` is a passthrough on every backend — cursor-agent in particular reaches its whole account catalog (Claude, GPT-5.x, Gemini, Composer, Grok tiers), where the effort level is part of the model id.
 
 ### Setup
 
@@ -197,7 +198,7 @@ Model and effort inherit the user's Codex configuration unless explicitly overri
 ### Compatibility and limits
 
 - The instructions use the open `SKILL.md` format. The Claude marketplace hosts the skill, while the Codex backend calls an authenticated `codex` CLI directly through plain `codex exec`.
-- Other agents can reuse the workflow through the shipped grok and cursor-agent adapters or an adapter implementing the same dispatch contract.
+- Other agents can reuse the workflow through the shipped Claude Code, grok, and cursor-agent adapters or an adapter implementing the same dispatch contract.
 - The scripts require Bash, Python 3.11+, the selected backend CLI, and common Unix command-line tools. They were developed on macOS.
 - Codex runs on the same checkout and machine-local environment as Claude Code. Its usage counts toward your ChatGPT or API limits; see [Codex pricing](https://developers.openai.com/codex/pricing).
 

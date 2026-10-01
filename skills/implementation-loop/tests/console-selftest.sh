@@ -1759,17 +1759,17 @@ function nodeLabels(root) {
   });
 }
 
-check("flow: implementer nodes exist only for backends present in counts, in the order codex, cursor, grok, then unknown backend (headless)", function () {
+check("flow: implementer nodes exist only for backends present in counts, in the order claude, codex, cursor, grok, then unknown backend (headless)", function () {
   const root = flowRoot();
   const run = flowRun("A", busy(1, 4));
-  run.counts.all.dispatches = { grok: tally(1), unknown: tally(2), codex: tally(0, 1) };
+  run.counts.all.dispatches = { grok: tally(1), unknown: tally(2), codex: tally(0, 1), claude: tally(1) };
   liveSandbox.drawFlow(root, flowState("A", run));
   const labels = nodeLabels(root).join(",");
-  if (labels !== "Judge,codex,grok,unknown backend,Review,Gate,Publication") {
+  if (labels !== "Judge,claude,codex,grok,unknown backend,Review,Gate,Publication") {
     throw new Error("nodes " + labels);
   }
   const edges = Object.keys(root._parts.edges._byId).sort().join(",");
-  if (edges !== "gate,impl-codex,impl-grok,impl-unknown,publish,review") {
+  if (edges !== "gate,impl-claude,impl-codex,impl-grok,impl-unknown,publish,review") {
     throw new Error("edges " + edges);
   }
   const bare = flowRoot();
@@ -1780,11 +1780,11 @@ check("flow: implementer nodes exist only for backends present in counts, in the
     throw new Error("dispatch-free nodes " + nodeLabels(bare).join(","));
   }
   const all = flowRoot();
-  const three = flowRun("C", []);
-  three.counts.all.dispatches = { grok: tally(1), cursor: tally(1), codex: tally(1) };
-  liveSandbox.drawFlow(all, flowState("C", three));
-  if (nodeLabels(all).join(",") !== "Judge,codex,cursor,grok,Review,Gate,Publication") {
-    throw new Error("three-backend nodes " + nodeLabels(all).join(","));
+  const four = flowRun("C", []);
+  four.counts.all.dispatches = { grok: tally(1), cursor: tally(1), codex: tally(1), claude: tally(1) };
+  liveSandbox.drawFlow(all, flowState("C", four));
+  if (nodeLabels(all).join(",") !== "Judge,claude,codex,cursor,grok,Review,Gate,Publication") {
+    throw new Error("four-backend nodes " + nodeLabels(all).join(","));
   }
 });
 
@@ -1892,7 +1892,7 @@ check("flow: run.*, unit.*, round.begin, checkpoint, journal.repaired, and unkno
     dispatchEv(12, "dispatch.start", "unknown"),
     dispatchEv(13, "dispatch.end", "unknown", { exit: 1 }),
     ev(14, "dispatch.end", { exit: 1, attribution: "none" }),
-    ev(15, "dispatch.start", { dispatch_id: "d-x", backend: "claude", attribution: "none" }),
+    ev(15, "dispatch.start", { dispatch_id: "d-x", backend: "nonesuch", attribution: "none" }),
   ]);
   liveSandbox.drawFlow(root, flowState("A", flowRun("A", quiet)));
   if (packetsOf(root).length !== 0) {
@@ -2341,16 +2341,16 @@ check("flow: a dispatch with no usable start draws an unknown backend node after
   liveSandbox.drawFlow(root, flowState("A", flowRun("A", more, { counts: counts, counts_complete: false })));
   expectUnknown("partial", true, "partial: 1 failed · 1 abandoned");
 
-  // Three backends and unknown: four rows, all inside the viewBox, none overlapping.
+  // Four backends and unknown: five rows, all inside the viewBox, none overlapping.
   const four = flowRoot();
   const wide = flowRun("B", []);
-  wide.counts.all.dispatches = { unknown: tally(1), grok: tally(1), cursor: tally(1), codex: tally(1) };
+  wide.counts.all.dispatches = { unknown: tally(1), grok: tally(1), cursor: tally(1), codex: tally(1), claude: tally(1) };
   liveSandbox.drawFlow(four, flowState("B", wide));
-  if (nodeLabels(four).join(",") !== "Judge,codex,cursor,grok,unknown backend,Review,Gate,Publication") {
+  if (nodeLabels(four).join(",") !== "Judge,claude,codex,cursor,grok,unknown backend,Review,Gate,Publication") {
     throw new Error("four-row nodes " + nodeLabels(four).join(","));
   }
   let floor = -Infinity;
-  ["codex", "cursor", "grok", "unknown"].forEach(function (name) {
+  ["claude", "codex", "cursor", "grok", "unknown"].forEach(function (name) {
     const box = four._parts.nodes._byId["impl-" + name]._box;
     const top = Number(box.getAttribute("y"));
     const bottom = top + Number(box.getAttribute("height"));
@@ -2632,7 +2632,7 @@ else
   fail "update: stampUpdated writes #updated-at through txt and is quiet on the same second (headless)"
   fail "flow: svgEl creates each allowlisted tag in the SVG namespace and refuses every other tag"
   fail "flow: svgAttr sets each allowlisted attribute and refuses every other name and any url( / javascript: / < value"
-  fail "flow: implementer nodes exist only for backends present in counts, in the order codex, cursor, grok, then unknown backend (headless)"
+  fail "flow: implementer nodes exist only for backends present in counts, in the order claude, codex, cursor, grok, then unknown backend (headless)"
   fail "flow: the first render animates nothing; two new events make exactly two packets with their recorded classes; a repeat makes none (headless)"
   fail "flow: packet variants are recorded outcomes: exit 0, pass, green, and unknown are neutral; nonzero exit, red, and abandoned are danger; iterate is caution; nothing is is-ok (headless)"
   fail "flow: run.*, unit.*, round.begin, checkpoint, journal.repaired, and unknown-backend dispatches make no packet (headless)"
@@ -4231,9 +4231,13 @@ PY
 run_cmd begin-src "$RUN" begin --workspace "$WS_SRC"
 expect_status 0 "srcsel: loop-run begin"
 SRC_KEY="$(workspace_key "$WS_SRC")"
+SRC_CLAUDE="20260818T120000Z-srclaud"
 SRC_CODEX="20260818T120000Z-srcodex"
 SRC_CURSOR="20260818T120000Z-srcursor"
 SRC_GROK="20260818T120000Z-srgrok"
+run_cmd src-claude "$JOURNAL" append --workspace "$WS_SRC" --event dispatch.start \
+  --field "dispatch_id=$SRC_CLAUDE" --field backend=claude --field mode=implement
+expect_status 0 "srcsel: claude dispatch is in the journal"
 run_cmd src-codex "$JOURNAL" append --workspace "$WS_SRC" --event dispatch.start \
   --field "dispatch_id=$SRC_CODEX" --field backend=codex --field mode=implement
 expect_status 0 "srcsel: codex dispatch is in the journal"
@@ -4244,11 +4248,12 @@ run_cmd src-grok "$JOURNAL" append --workspace "$WS_SRC" --event dispatch.start 
   --field "dispatch_id=$SRC_GROK" --field backend=grok --field mode=implement
 expect_status 0 "srcsel: grok dispatch is in the journal"
 
+SRC_CLAUDE_DIR="$SRC_COMMON/olddonkey-loop/claude/$SRC_CLAUDE"
 SRC_CODEX_DIR="$HOME/.config/olddonkey-loop/codex/$SRC_KEY/$SRC_CODEX"
 SRC_CURSOR_DIR="$SRC_COMMON/olddonkey-loop/cursor/$SRC_CURSOR"
 SRC_GROK_DIR="$SRC_COMMON/olddonkey-loop/grok/$SRC_GROK"
-mkdir -p "$SRC_CODEX_DIR" "$SRC_CURSOR_DIR" "$SRC_GROK_DIR"
-if python3 - "$SRC_CODEX_DIR" "$SRC_CURSOR_DIR" "$SRC_GROK_DIR" <<'PY'
+mkdir -p "$SRC_CLAUDE_DIR" "$SRC_CODEX_DIR" "$SRC_CURSOR_DIR" "$SRC_GROK_DIR"
+if python3 - "$SRC_CLAUDE_DIR" "$SRC_CODEX_DIR" "$SRC_CURSOR_DIR" "$SRC_GROK_DIR" <<'PY'
 import os, sys
 
 base = 1700000000
@@ -4266,6 +4271,14 @@ def plant(directory, rows):
 plant(
     sys.argv[1],
     (
+        ("stream.jsonl", 0, "claude-preferred\n"),
+        ("stderr.log", 100, "claude-fallback\n"),
+        ("prompt.txt", 200, "claude-decoy-prompt\n"),
+    ),
+)
+plant(
+    sys.argv[2],
+    (
         ("transcript.log", 0, "codex-preferred\n"),
         ("prompt.txt", 200, "codex-decoy-prompt\n"),
         ("last-message.txt", 300, "codex-newest-decoy\n"),
@@ -4273,7 +4286,7 @@ plant(
     ),
 )
 plant(
-    sys.argv[2],
+    sys.argv[3],
     (
         ("stderr.log", 0, "cursor-preferred\n"),
         ("output.json", 100, "cursor-fallback\n"),
@@ -4282,7 +4295,7 @@ plant(
     ),
 )
 plant(
-    sys.argv[3],
+    sys.argv[4],
     (
         ("transition.jsonl", 0, "grok-preferred\n"),
         ("output.json", 100, "grok-fallback\n"),
@@ -4315,8 +4328,8 @@ SRC_TOKEN="${SRC_FIELDS#*	}"
 if [[ -n "$SRC_PORT" && -n "$SRC_TOKEN" && "$SRC_PORT" != "$SRC_FIELDS" ]]; then
   SRC_TAP="$TMP_ROOT/srcsel.tap"
   if python3 - "$SRC_PORT" "$SRC_TOKEN" \
-    "$SRC_CODEX" "$SRC_CURSOR" "$SRC_GROK" \
-    "$SRC_CODEX_DIR" "$SRC_CURSOR_DIR" "$SRC_GROK_DIR" \
+    "$SRC_CLAUDE" "$SRC_CODEX" "$SRC_CURSOR" "$SRC_GROK" \
+    "$SRC_CLAUDE_DIR" "$SRC_CODEX_DIR" "$SRC_CURSOR_DIR" "$SRC_GROK_DIR" \
     >"$SRC_TAP" 2>"$TMP_ROOT/srcsel-http.err" <<'PY'
 import http.client
 import json
@@ -4326,8 +4339,8 @@ from urllib.parse import quote
 
 port = int(sys.argv[1])
 token = sys.argv[2]
-codex_id, cursor_id, grok_id = sys.argv[3], sys.argv[4], sys.argv[5]
-codex_dir, cursor_dir, grok_dir = sys.argv[6], sys.argv[7], sys.argv[8]
+claude_id, codex_id, cursor_id, grok_id = sys.argv[3:7]
+claude_dir, codex_dir, cursor_dir, grok_dir = sys.argv[7:11]
 host = "127.0.0.1:%d" % port
 origin = "http://127.0.0.1:%d" % port
 
@@ -4409,6 +4422,10 @@ def expect_404(dispatch_id):
 
 
 check(
+    "transcript source: claude prefers stream.jsonl over a newer decoy",
+    lambda: expect_path(claude_id, claude_dir, "stream.jsonl"),
+)
+check(
     "transcript source: codex prefers transcript.log over a newer decoy",
     lambda: expect_path(codex_id, codex_dir, "transcript.log"),
 )
@@ -4421,9 +4438,14 @@ check(
     lambda: expect_path(grok_id, grok_dir, "transition.jsonl"),
 )
 
+os.remove(os.path.join(claude_dir, "stream.jsonl"))
 os.remove(os.path.join(cursor_dir, "stderr.log"))
 os.remove(os.path.join(grok_dir, "transition.jsonl"))
 
+check(
+    "transcript source: claude falls back to stderr.log when stream.jsonl is gone",
+    lambda: expect_path(claude_id, claude_dir, "stderr.log"),
+)
 check(
     "transcript source: cursor falls back to output.json when stderr.log is gone",
     lambda: expect_path(cursor_id, cursor_dir, "output.json"),
@@ -4433,10 +4455,15 @@ check(
     lambda: expect_path(grok_id, grok_dir, "output.json"),
 )
 
+os.remove(os.path.join(claude_dir, "stderr.log"))
 os.remove(os.path.join(codex_dir, "transcript.log"))
 os.remove(os.path.join(cursor_dir, "output.json"))
 os.remove(os.path.join(grok_dir, "output.json"))
 
+check(
+    "transcript source: 404 when no claude candidate remains (decoys ignored)",
+    lambda: expect_404(claude_id),
+)
 check(
     "transcript source: 404 when no codex candidate remains (decoys ignored)",
     lambda: expect_404(codex_id),
@@ -4469,22 +4496,28 @@ PY
       esac
     done < "$SRC_TAP"
   else
+    fail "transcript source: claude prefers stream.jsonl over a newer decoy"
     fail "transcript source: codex prefers transcript.log over a newer decoy"
     fail "transcript source: cursor prefers stderr.log over a newer decoy"
     fail "transcript source: grok prefers transition.jsonl over a newer decoy"
+    fail "transcript source: claude falls back to stderr.log when stream.jsonl is gone"
     fail "transcript source: cursor falls back to output.json when stderr.log is gone"
     fail "transcript source: grok falls back to output.json when transition.jsonl is gone"
+    fail "transcript source: 404 when no claude candidate remains (decoys ignored)"
     fail "transcript source: 404 when no codex candidate remains (decoys ignored)"
     fail "transcript source: 404 when no cursor candidate remains (decoys ignored)"
     fail "transcript source: 404 when no grok candidate remains (decoys ignored)"
   fi
 else
   fail "srcsel: URL is http://127.0.0.1:<port>/#token"
+  fail "transcript source: claude prefers stream.jsonl over a newer decoy"
   fail "transcript source: codex prefers transcript.log over a newer decoy"
   fail "transcript source: cursor prefers stderr.log over a newer decoy"
   fail "transcript source: grok prefers transition.jsonl over a newer decoy"
+  fail "transcript source: claude falls back to stderr.log when stream.jsonl is gone"
   fail "transcript source: cursor falls back to output.json when stderr.log is gone"
   fail "transcript source: grok falls back to output.json when transition.jsonl is gone"
+  fail "transcript source: 404 when no claude candidate remains (decoys ignored)"
   fail "transcript source: 404 when no codex candidate remains (decoys ignored)"
   fail "transcript source: 404 when no cursor candidate remains (decoys ignored)"
   fail "transcript source: 404 when no grok candidate remains (decoys ignored)"

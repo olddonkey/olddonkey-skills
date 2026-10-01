@@ -460,7 +460,7 @@ def contained(root: str, path: str) -> bool:
 def backend_root(backend: str, home: str, key: str, workspace: str) -> str | None:
     if backend == "codex":
         return os.path.join(home, ".config", "olddonkey-loop", "codex", key)
-    if backend in {"grok", "cursor"}:
+    if backend in {"claude", "grok", "cursor"}:
         common = git_common_dir(workspace)
         if common is None:
             return None
@@ -503,10 +503,12 @@ def derive_state_dir(
 # Preferred transcript source per backend, then the documented fallback.
 # First candidate that passes the existing regular-file safety checks wins.
 # There is no "newest file" fallback.
+#   claude  stream.jsonl, else stderr.log
 #   codex   transcript.log
 #   cursor  stderr.log, else output.json
 #   grok    transition.jsonl, else output.json
 TRANSCRIPT_CANDIDATES = {
+    "claude": ("stream.jsonl", "stderr.log"),
     "codex": ("transcript.log",),
     "cursor": ("stderr.log", "output.json"),
     "grok": ("transition.jsonl", "output.json"),

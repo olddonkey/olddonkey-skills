@@ -57,7 +57,7 @@
     refused: /url\s*\(|java[\s\x00-\x1f]*script[\s\x00-\x1f]*:|</i,
   };
   var FLOW = {
-    backends: ["codex", "cursor", "grok"],
+    backends: ["claude", "codex", "cursor", "grok"],
     unknown: "unknown",
     owned: [
       "dispatch.start",
@@ -1076,7 +1076,7 @@
   function flowLayout(backends) {
     var mid = FLOW.height / 2;
     var half = FLOW.nodeW / 2;
-    // Four implementer rows (three backends and unknown) close up to fit.
+    // Five implementer rows (four backends and unknown) close up to fit.
     var row =
       backends.length > 1
         ? Math.min(FLOW.row, (FLOW.height - FLOW.nodeH - FLOW.pad * 2) / (backends.length - 1))
