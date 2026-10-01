@@ -82,9 +82,9 @@ counted for no unit.
 
 Every journal-sourced string in markdown is escaped: CR, LF, and tab
 become a space; & < > " ' become HTML entities; then each of
-\\ ` * _ { } [ ] ( ) # + - . ! | ~ is backslash-escaped. Nothing
-journal-sourced is emitted as a link, image, or raw HTML. json carries
-the same data with no escaping beyond JSON's own.
+\\ ` * _ { } [ ] ( ) # + - . ! | ~ : is backslash-escaped. Nothing
+journal-sourced is emitted as a link, autolink, image, or raw HTML.
+json carries the same data with no escaping beyond JSON's own.
 
 The journal is local and unauthenticated: any process running as this
 user can append to it. The card is a record, not a proof.
@@ -349,7 +349,12 @@ def build_card(run: dict, unit: str) -> dict:
             "declared" if final_gate else "none",
             gate=final_gate,
         ),
-        row("later_adverse_gates", "recorded", "declared", gates=later),
+        row(
+            "later_adverse_gates",
+            "recorded" if final_gate else "unknown",
+            "declared" if final_gate else "none",
+            gates=later,
+        ),
         row(
             "recorded_shas",
             "values match" if comparison == "values match" else "unknown",
@@ -382,7 +387,7 @@ def build_card(run: dict, unit: str) -> dict:
 # never does.
 # ---------------------------------------------------------------------------
 
-BACKSLASH_ESCAPED = frozenset("\\`*_{}[]()#+-.!|~")
+BACKSLASH_ESCAPED = frozenset("\\`*_{}[]()#+-.!|~:")
 
 
 def escape_text(value: str) -> str:
@@ -395,7 +400,7 @@ def escape_text(value: str) -> str:
         ("<", "&lt;"),
         (">", "&gt;"),
         ('"', "&quot;"),
-        ("'", "&#39;"),
+        ("'", "&apos;"),
     ):
         value = value.replace(char, entity)
     return "".join("\\" + char if char in BACKSLASH_ESCAPED else char for char in value)
