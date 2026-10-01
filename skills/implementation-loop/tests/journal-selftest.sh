@@ -33,6 +33,8 @@ trap 'cleanup 143' TERM
 export HOME="$TMP_ROOT/home"
 mkdir -p "$HOME" || exit 1
 export LC_ALL=C
+# A caller's declared attribution must not leak into fixture events.
+unset LOOP_UNIT LOOP_ROUND
 
 CHECKS=0
 FAILED_CHECKS=0
@@ -118,6 +120,46 @@ expect_no_output() { # $1=stream $2=fixed string $3=description
 
 field_from() { # $1=file $2=key
   sed -n "s/^$2=//p" "$1" | head -n 1
+}
+
+file_sums() { # remaining=paths; one sha256 (or "missing") per path
+  python3 - "$@" <<'PY'
+import hashlib, sys
+for path in sys.argv[1:]:
+    try:
+        print(hashlib.sha256(open(path, "rb").read()).hexdigest())
+    except FileNotFoundError:
+        print("missing")
+PY
+}
+
+# Every event of $2 in segment $1 must carry exactly the given label; "-"
+# means the key must be absent.
+expect_labels() { # $1=segment $2=event $3=unit $4=round $5=description
+  if python3 - "$1" "$2" "$3" "$4" <<'PY'
+import json, sys
+path, kind, unit, round_n = sys.argv[1:]
+events = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
+matching = [event for event in events if event.get("event") == kind]
+if not matching:
+    raise SystemExit(f"no {kind} event")
+for event in matching:
+    if unit == "-":
+        if "unit" in event:
+            raise SystemExit(f"unexpected unit {event}")
+    elif event.get("unit") != unit:
+        raise SystemExit(f"unit {event}")
+    if round_n == "-":
+        if "round" in event:
+            raise SystemExit(f"unexpected round {event}")
+    elif type(event.get("round")) is not int or event["round"] != int(round_n):
+        raise SystemExit(f"round {event}")
+PY
+  then
+    pass "$5"
+  else
+    fail "$5"
+  fi
 }
 
 D2A='Supplying --acknowledge <dispatch-id> asserts that the dispatch and its descendants have terminated or otherwise cannot produce further side effects. Mere notice that the event is missing is insufficient and must not retire the run.'
@@ -895,6 +937,266 @@ then
 else
   fail "gate.result: only the valid append lands, with gate_exit stored as an int"
 fi
+
+# --- 12. Declared attribution from LOOP_UNIT / LOOP_ROUND ---
+WS_ENV="$(workspace attr-env)"
+run_cmd env-begin "$RUN" begin --workspace "$WS_ENV"
+RUN_ENV="$(field_from "$CASE_STDOUT" run)"
+SEG_ENV="$(store_dir "$WS_ENV")/runs/${RUN_ENV}.jsonl"
+ENV_STATUSES=""
+run_cmd env-start env LOOP_UNIT=uX LOOP_ROUND=2 "$JOURNAL" append --workspace "$WS_ENV" \
+  --event dispatch.start --field dispatch_id=d-env --field backend=codex --field mode=implement
+ENV_STATUSES+="$CASE_STATUS"
+run_cmd env-end env LOOP_UNIT=uX LOOP_ROUND=2 "$JOURNAL" append --workspace "$WS_ENV" \
+  --event dispatch.end --field dispatch_id=d-env --field exit=0
+ENV_STATUSES+="$CASE_STATUS"
+run_cmd env-abandoned env LOOP_UNIT=uX LOOP_ROUND=2 "$JOURNAL" append --workspace "$WS_ENV" \
+  --event dispatch.abandoned --field dispatch_id=d-env-2 --field attested_by=user
+ENV_STATUSES+="$CASE_STATUS"
+run_cmd env-gate env LOOP_UNIT=uX LOOP_ROUND=2 "$JOURNAL" append --workspace "$WS_ENV" \
+  --event gate.result "${GATE_FIELDS[@]}" --field verdict=green --field gate_exit=0
+ENV_STATUSES+="$CASE_STATUS"
+if [[ "$ENV_STATUSES" == 0000 ]]; then
+  pass "attribution/env: the four attributed events append with LOOP_UNIT/LOOP_ROUND set"
+else
+  fail "attribution/env: the four attributed events append with LOOP_UNIT/LOOP_ROUND set (statuses $ENV_STATUSES)"
+fi
+expect_labels "$SEG_ENV" dispatch.start uX 2 "attribution/env: dispatch.start carries unit=uX round=2"
+expect_labels "$SEG_ENV" dispatch.end uX 2 "attribution/env: dispatch.end carries unit=uX round=2"
+expect_labels "$SEG_ENV" dispatch.abandoned uX 2 "attribution/env: dispatch.abandoned carries unit=uX round=2"
+expect_labels "$SEG_ENV" gate.result uX 2 "attribution/env: gate.result carries unit=uX round=2"
+
+WS_EXPL="$(workspace attr-explicit)"
+run_cmd expl-begin "$RUN" begin --workspace "$WS_EXPL"
+RUN_EXPL="$(field_from "$CASE_STDOUT" run)"
+SEG_EXPL="$(store_dir "$WS_EXPL")/runs/${RUN_EXPL}.jsonl"
+run_cmd expl-start env LOOP_UNIT=env-unit LOOP_ROUND=3 "$JOURNAL" append --workspace "$WS_EXPL" \
+  --event dispatch.start --field dispatch_id=d-expl --field backend=grok --field mode=read-only \
+  --field unit=explicit --field round=5
+expect_status 0 "attribution/explicit: --field unit/round on dispatch.start is accepted"
+expect_labels "$SEG_EXPL" dispatch.start explicit 5 "attribution/explicit: --field values win over both variables"
+run_cmd expl-end env LOOP_UNIT=env-unit LOOP_ROUND=3 "$JOURNAL" append --workspace "$WS_EXPL" \
+  --event dispatch.end --json '{"dispatch_id":"d-expl","exit":0,"unit":"explicit"}'
+expect_status 0 "attribution/explicit: --json unit on dispatch.end is accepted"
+expect_labels "$SEG_EXPL" dispatch.end explicit 3 \
+  "attribution/explicit: an explicit unit wins while the absent round still comes from LOOP_ROUND"
+run_cmd expl-gate env LOOP_UNIT=env-unit LOOP_ROUND=3 "$JOURNAL" append --workspace "$WS_EXPL" \
+  --event gate.result "${GATE_FIELDS[@]}" --field round=7
+expect_status 0 "attribution/explicit: --field round on gate.result is accepted"
+expect_labels "$SEG_EXPL" gate.result env-unit 7 \
+  "attribution/explicit: an explicit round wins while the absent unit still comes from LOOP_UNIT"
+
+WS_OTHER="$(workspace attr-other)"
+run_cmd other-begin "$RUN" begin --workspace "$WS_OTHER"
+RUN_OTHER="$(field_from "$CASE_STDOUT" run)"
+SEG_OTHER="$(store_dir "$WS_OTHER")/runs/${RUN_OTHER}.jsonl"
+OTHER_STATUSES=""
+run_cmd other-check env LOOP_UNIT=env-unit LOOP_ROUND=9 "$JOURNAL" append --workspace "$WS_OTHER" \
+  --event checkpoint --field note=ignores-env
+OTHER_STATUSES+="$CASE_STATUS"
+run_cmd other-unit env LOOP_UNIT=env-unit LOOP_ROUND=9 "$RUN" unit-begin --unit u1 --workspace "$WS_OTHER"
+OTHER_STATUSES+="$CASE_STATUS"
+run_cmd other-round env LOOP_UNIT=env-unit LOOP_ROUND=9 "$RUN" round-begin --unit u1 --round 1 --workspace "$WS_OTHER"
+OTHER_STATUSES+="$CASE_STATUS"
+run_cmd other-review env LOOP_UNIT=env-unit LOOP_ROUND=9 "$RUN" review --unit u1 --round 1 \
+  --verdict pass --workspace "$WS_OTHER"
+OTHER_STATUSES+="$CASE_STATUS"
+run_cmd other-publish env LOOP_UNIT=env-unit LOOP_ROUND=9 "$RUN" publish --unit u1 --workspace "$WS_OTHER"
+OTHER_STATUSES+="$CASE_STATUS"
+run_cmd other-invalid env LOOP_UNIT= LOOP_ROUND=abc "$RUN" unit-end --unit u1 --status done --workspace "$WS_OTHER"
+OTHER_STATUSES+="$CASE_STATUS"
+if [[ "$OTHER_STATUSES" == 000000 ]]; then
+  pass "attribution/other-events: appends succeed and invalid variables are ignored"
+else
+  fail "attribution/other-events: appends succeed and invalid variables are ignored (statuses $OTHER_STATUSES)"
+fi
+if python3 - "$SEG_OTHER" <<'PY'
+import json, sys
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+by_kind = {event["event"]: event for event in events}
+assert "unit" not in by_kind["checkpoint"] and "round" not in by_kind["checkpoint"], by_kind["checkpoint"]
+assert by_kind["unit.begin"]["unit"] == "u1" and "round" not in by_kind["unit.begin"]
+assert by_kind["round.begin"]["unit"] == "u1" and by_kind["round.begin"]["round"] == 1
+assert by_kind["review.recorded"]["unit"] == "u1" and by_kind["review.recorded"]["round"] == 1
+assert by_kind["publish.recorded"]["unit"] == "u1" and "round" not in by_kind["publish.recorded"]
+assert by_kind["unit.end"]["unit"] == "u1" and "round" not in by_kind["unit.end"]
+assert all("env-unit" not in json.dumps(event) for event in events)
+PY
+then
+  pass "attribution/other-events: no other event reads LOOP_UNIT or LOOP_ROUND"
+else
+  fail "attribution/other-events: no other event reads LOOP_UNIT or LOOP_ROUND"
+fi
+
+WS_BADENV="$(workspace attr-invalid)"
+run_cmd badenv-begin "$RUN" begin --workspace "$WS_BADENV"
+RUN_BADENV="$(field_from "$CASE_STDOUT" run)"
+SEG_BADENV="$(store_dir "$WS_BADENV")/runs/${RUN_BADENV}.jsonl"
+SUM_BADENV_BEFORE="$(file_sums "$SEG_BADENV")"
+BAD_START=(--event dispatch.start --field dispatch_id=d-bad --field backend=cursor --field mode=implement)
+run_cmd badenv-unit-empty env LOOP_UNIT= "$JOURNAL" append --workspace "$WS_BADENV" "${BAD_START[@]}"
+expect_status 2 "attribution/invalid: empty LOOP_UNIT exits 2"
+expect_output stderr "LOOP_UNIT must be a non-empty single-line string" \
+  "attribution/invalid: empty LOOP_UNIT names the variable"
+run_cmd badenv-unit-newline env "LOOP_UNIT=u1"$'\n'"u2" "$JOURNAL" append --workspace "$WS_BADENV" "${BAD_START[@]}"
+expect_status 2 "attribution/invalid: LOOP_UNIT with a newline exits 2"
+run_cmd badenv-unit-cr env "LOOP_UNIT=u1"$'\r' "$JOURNAL" append --workspace "$WS_BADENV" "${BAD_START[@]}"
+expect_status 2 "attribution/invalid: LOOP_UNIT with a carriage return exits 2"
+BAD_ROUND_CASE=0
+for BAD_ROUND in 0 -1 abc 1.5 " 2" ""; do
+  BAD_ROUND_CASE=$((BAD_ROUND_CASE + 1))
+  run_cmd "badenv-round-$BAD_ROUND_CASE" env "LOOP_ROUND=$BAD_ROUND" "$JOURNAL" append \
+    --workspace "$WS_BADENV" "${BAD_START[@]}"
+  expect_status 2 "attribution/invalid: LOOP_ROUND='$BAD_ROUND' exits 2"
+done
+expect_output stderr "LOOP_ROUND must be a positive integer" \
+  "attribution/invalid: an invalid LOOP_ROUND names the variable"
+run_cmd badenv-gate env LOOP_ROUND=0 "$JOURNAL" append --workspace "$WS_BADENV" \
+  --event gate.result "${GATE_FIELDS[@]}"
+expect_status 2 "attribution/invalid: gate.result with LOOP_ROUND=0 exits 2"
+run_cmd badenv-end env LOOP_UNIT= "$JOURNAL" append --workspace "$WS_BADENV" \
+  --event dispatch.end --field dispatch_id=d-bad --field exit=0
+expect_status 2 "attribution/invalid: dispatch.end with an empty LOOP_UNIT exits 2"
+run_cmd badenv-explicit-empty "$JOURNAL" append --workspace "$WS_BADENV" \
+  --event dispatch.abandoned --field dispatch_id=d-bad --field attested_by=user --field unit=
+expect_status 2 "attribution/invalid: an explicit empty unit exits 2"
+run_cmd badenv-explicit-round "$JOURNAL" append --workspace "$WS_BADENV" \
+  --event dispatch.start --field dispatch_id=d-bad --field backend=cursor --field mode=implement \
+  --field round=0
+expect_status 2 "attribution/invalid: an explicit round=0 exits 2"
+if [[ "$(file_sums "$SEG_BADENV")" == "$SUM_BADENV_BEFORE" ]]; then
+  pass "attribution/invalid: no refused append reached the segment"
+else
+  fail "attribution/invalid: no refused append reached the segment"
+fi
+WS_BADENV_NOCTX="$(workspace attr-invalid-noctx)"
+run_cmd badenv-noctx env LOOP_UNIT= "$JOURNAL" append --workspace "$WS_BADENV_NOCTX" "${BAD_START[@]}"
+expect_status 2 "attribution/invalid: an invalid variable exits 2 even without a context"
+if [[ ! -e "$(store_dir "$WS_BADENV_NOCTX")/unattributed.jsonl" ]]; then
+  pass "attribution/invalid: the refused event is not written to unattributed.jsonl"
+else
+  fail "attribution/invalid: the refused event is not written to unattributed.jsonl"
+fi
+
+run_cmd attr-unknown-key env LOOP_UNIT=uX LOOP_ROUND=2 "$JOURNAL" append --workspace "$WS_BADENV" \
+  "${BAD_START[@]}" --field outcome=green
+expect_status 2 "attribution/unknown-key: an unknown key still exits 2 with the variables set"
+expect_output stderr "unknown payload key(s): outcome" \
+  "attribution/unknown-key: the rejection names the key"
+run_cmd attr-unit-on-checkpoint "$JOURNAL" append --workspace "$WS_BADENV" \
+  --event checkpoint --field unit=u1
+expect_status 2 "attribution/unknown-key: unit is still unknown on events outside the four"
+expect_output stderr "unknown payload key(s): unit" \
+  "attribution/unknown-key: checkpoint rejection names unit"
+
+# --- 13. Recover: declared attribution and duplicate dispatch ids ---
+WS_RCOPY="$(workspace recover-copy)"
+run_cmd rcopy-begin "$RUN" begin --workspace "$WS_RCOPY"
+RUN_RCOPY="$(field_from "$CASE_STDOUT" run)"
+SEG_RCOPY="$(store_dir "$WS_RCOPY")/runs/${RUN_RCOPY}.jsonl"
+run_cmd rcopy-labelled env LOOP_UNIT=u-rec LOOP_ROUND=4 "$JOURNAL" append --workspace "$WS_RCOPY" \
+  --event dispatch.start --field dispatch_id=d-labelled --field backend=codex --field mode=implement
+run_cmd rcopy-plain "$JOURNAL" append --workspace "$WS_RCOPY" \
+  --event dispatch.start --field dispatch_id=d-plain --field backend=grok --field mode=implement
+run_cmd rcopy-recover env -u LOOP_UNIT -u LOOP_ROUND "$RUN" recover --workspace "$WS_RCOPY" \
+  --acknowledge d-labelled --acknowledge d-plain
+expect_status 0 "recover/attribution: acknowledge succeeds with no LOOP_UNIT/LOOP_ROUND set"
+if python3 - "$SEG_RCOPY" <<'PY'
+import json, sys
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+abandoned = {e["dispatch_id"]: e for e in events if e["event"] == "dispatch.abandoned"}
+assert abandoned["d-labelled"]["unit"] == "u-rec", abandoned
+assert type(abandoned["d-labelled"]["round"]) is int and abandoned["d-labelled"]["round"] == 4
+assert abandoned["d-labelled"]["attested_by"] == "user"
+assert "unit" not in abandoned["d-plain"] and "round" not in abandoned["d-plain"], abandoned
+PY
+then
+  pass "recover/attribution: abandonment copies the start's unit/round, and writes neither when it had none"
+else
+  fail "recover/attribution: abandonment copies the start's unit/round, and writes neither when it had none"
+fi
+
+WS_RDECOY="$(workspace recover-decoy)"
+run_cmd rdecoy-begin "$RUN" begin --workspace "$WS_RDECOY"
+RUN_RDECOY="$(field_from "$CASE_STDOUT" run)"
+SEG_RDECOY="$(store_dir "$WS_RDECOY")/runs/${RUN_RDECOY}.jsonl"
+run_cmd rdecoy-start "$JOURNAL" append --workspace "$WS_RDECOY" \
+  --event dispatch.start --field dispatch_id=d-plain --field backend=cursor --field mode=implement
+run_cmd rdecoy-recover env LOOP_UNIT=decoy LOOP_ROUND=9 "$RUN" recover --workspace "$WS_RDECOY" \
+  --acknowledge d-plain
+expect_status 0 "recover/attribution: acknowledge succeeds with decoy variables set"
+expect_labels "$SEG_RDECOY" dispatch.abandoned - - \
+  "recover/attribution: recovery never reads LOOP_UNIT/LOOP_ROUND"
+
+# Each fixture ends with a torn tail, so a refusal that repaired, appended, or
+# retired anything would change a checksum.
+expect_recover_refused() { # $1=name $2=workspace $3=dispatch id
+  local name="$1" ws="$2" did="$3" store run seg before after
+  store="$(store_dir "$ws")"
+  run="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["run"])' "$store/context")"
+  seg="$store/runs/${run}.jsonl"
+  printf '%s' '{"torn"' >> "$seg"
+  before="$(file_sums "$seg" "$store/context" "$store/context.retired-$run")"
+  run_cmd "$name-plain" "$RUN" recover --workspace "$ws"
+  expect_status 2 "recover/$name: refused with exit 2 without --acknowledge"
+  expect_output stderr "more than one dispatch.start or more than one dispatch.end/dispatch.abandoned: $did" \
+    "recover/$name: refusal without --acknowledge names the duplicated id"
+  run_cmd "$name-ack" "$RUN" recover --workspace "$ws" --acknowledge "$did"
+  expect_status 2 "recover/$name: refused with exit 2 with --acknowledge"
+  expect_output stderr "more than one dispatch.start or more than one dispatch.end/dispatch.abandoned: $did" \
+    "recover/$name: refusal with --acknowledge names the duplicated id"
+  after="$(file_sums "$seg" "$store/context" "$store/context.retired-$run")"
+  if [[ "$before" == "$after" ]]; then
+    pass "recover/$name: segment and context byte-identical; context not retired"
+  else
+    fail "recover/$name: segment and context byte-identical; context not retired"
+  fi
+}
+
+dup_start() { # $1=workspace, remaining=env arguments
+  local ws="$1"
+  shift
+  run_cmd dup-start env "$@" "$JOURNAL" append --workspace "$ws" \
+    --event dispatch.start --field dispatch_id=d-dup --field backend=codex --field mode=implement
+}
+
+WS_DUP1="$(workspace dup-starts-equal)"
+run_cmd dup1-begin "$RUN" begin --workspace "$WS_DUP1"
+dup_start "$WS_DUP1" LOOP_UNIT=u1 LOOP_ROUND=1
+dup_start "$WS_DUP1" LOOP_UNIT=u1 LOOP_ROUND=1
+expect_recover_refused dup-starts-equal "$WS_DUP1" d-dup
+
+WS_DUP2="$(workspace dup-starts-conflict)"
+run_cmd dup2-begin "$RUN" begin --workspace "$WS_DUP2"
+dup_start "$WS_DUP2" LOOP_UNIT=u1 LOOP_ROUND=1
+dup_start "$WS_DUP2" LOOP_UNIT=u2 LOOP_ROUND=1
+expect_recover_refused dup-starts-conflict "$WS_DUP2" d-dup
+
+WS_DUP3="$(workspace dup-starts-one-end)"
+run_cmd dup3-begin "$RUN" begin --workspace "$WS_DUP3"
+dup_start "$WS_DUP3"
+dup_start "$WS_DUP3"
+run_cmd dup3-end "$JOURNAL" append --workspace "$WS_DUP3" \
+  --event dispatch.end --field dispatch_id=d-dup --field exit=0
+expect_recover_refused dup-starts-one-end "$WS_DUP3" d-dup
+
+WS_DUP4="$(workspace dup-ends)"
+run_cmd dup4-begin "$RUN" begin --workspace "$WS_DUP4"
+dup_start "$WS_DUP4"
+run_cmd dup4-end-a "$JOURNAL" append --workspace "$WS_DUP4" \
+  --event dispatch.end --field dispatch_id=d-dup --field exit=0
+run_cmd dup4-end-b "$JOURNAL" append --workspace "$WS_DUP4" \
+  --event dispatch.end --field dispatch_id=d-dup --field exit=1
+expect_recover_refused dup-ends "$WS_DUP4" d-dup
+
+WS_DUP5="$(workspace dup-end-abandoned)"
+run_cmd dup5-begin "$RUN" begin --workspace "$WS_DUP5"
+dup_start "$WS_DUP5"
+run_cmd dup5-end "$JOURNAL" append --workspace "$WS_DUP5" \
+  --event dispatch.end --field dispatch_id=d-dup --field exit=0
+run_cmd dup5-abandoned "$JOURNAL" append --workspace "$WS_DUP5" \
+  --event dispatch.abandoned --field dispatch_id=d-dup --field attested_by=user
+expect_recover_refused dup-end-abandoned "$WS_DUP5" d-dup
 
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' "$FAILED_CHECKS" "$CHECKS" >&2

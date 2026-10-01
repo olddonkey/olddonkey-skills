@@ -5,6 +5,8 @@
 
 set -uo pipefail
 umask 077
+# A case declares attribution only when it sets these itself.
+unset LOOP_UNIT LOOP_ROUND
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 LOOP_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)"
@@ -279,6 +281,44 @@ PY
   fi
 }
 
+# Both events of the case's one dispatch carry the declared label; "-" means
+# neither event may carry unit or round.
+expect_dispatch_labels() { # $1=case $2=unit $3=round $4=description
+  local case_name="$1" unit="$2" round_n="$3" description="$4"
+  local home workspace store
+  home="$(case_home "$case_name")"
+  workspace="$(case_workspace "$case_name")"
+  store="$(journal_store "$home" "$workspace")"
+  if python3 - "$store" "$unit" "$round_n" <<'PY'
+import json, os, sys
+
+store, unit, round_n = sys.argv[1:]
+runs = os.path.join(store, "runs")
+events = []
+if os.path.isdir(runs):
+    for name in sorted(os.listdir(runs)):
+        if name.endswith(".jsonl"):
+            for line in open(os.path.join(runs, name), encoding="utf-8"):
+                line = line.strip()
+                if line:
+                    events.append(json.loads(line))
+pair = [event for event in events if event.get("event") in {"dispatch.start", "dispatch.end"}]
+if [event["event"] for event in pair] != ["dispatch.start", "dispatch.end"]:
+    raise SystemExit(1)
+for event in pair:
+    if unit == "-":
+        if "unit" in event or "round" in event:
+            raise SystemExit(1)
+    elif event.get("unit") != unit or type(event.get("round")) is not int or event["round"] != int(round_n):
+        raise SystemExit(1)
+PY
+  then
+    pass "$description"
+  else
+    fail "$description"
+  fi
+}
+
 expect_unattributed() { # $1=case $2=reason $3=description
   local case_name="$1" reason="$2" description="$3"
   local home workspace store
@@ -513,10 +553,12 @@ run_backend() {
 
   if rule_enabled journal-events; then
     CURRENT_RULE="journal-events"
-    run_case journal-events --prompt journal
+    LOOP_UNIT=uX LOOP_ROUND=2 run_case journal-events --prompt journal
     expect_status 0 "attributed journal dispatch succeeds"
     expect_dispatch_pair journal-events "$BACKEND" implement 0 \
       "run segment records matching dispatch.start then dispatch.end exit=0"
+    expect_dispatch_labels journal-events uX 2 \
+      "LOOP_UNIT=uX LOOP_ROUND=2 reach both dispatch.start and dispatch.end"
   fi
 
   if rule_enabled journal-unattributed; then
@@ -553,6 +595,8 @@ run_backend() {
     expect_status 0 "read-only journal dispatch succeeds"
     expect_dispatch_pair journal-readonly-mode "$BACKEND" read-only 0 \
       "read-only dispatch.start records mode=read-only"
+    expect_dispatch_labels journal-readonly-mode - - \
+      "without LOOP_UNIT/LOOP_ROUND neither dispatch.start nor dispatch.end carries unit or round"
   fi
 }
 

@@ -40,7 +40,7 @@ After installing, verify the gate on your machine:
 
 ```bash
 bash skills/cursor-implementation-loop/scripts/gate-selftest.sh
-# expect: selftest: PASS (200 checks)
+# expect: selftest: PASS (207 checks)
 ```
 
 ## Pin your implementer model

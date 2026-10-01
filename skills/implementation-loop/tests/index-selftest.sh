@@ -28,6 +28,8 @@ export HOME="$TMP_ROOT/home"
 mkdir -p "$HOME/.config/olddonkey-loop" || exit 1
 chmod 700 "$HOME/.config" "$HOME/.config/olddonkey-loop" || exit 1
 export LC_ALL=C
+# A caller's declared attribution must not leak into fixture events.
+unset LOOP_UNIT LOOP_ROUND
 
 CHECKS=0
 FAILED_CHECKS=0
@@ -1127,6 +1129,616 @@ expect_gate_verdicts "$RUN_VERDICT" "$GATE_CASES" malformed \
   "gate verdict: malformed or absent verdict reads unknown; never inferred from totals=exit=0"
 
 # ---------------------------------------------------------------------------
+# 12. Declared attribution, run totals, and the timeline
+# ---------------------------------------------------------------------------
+# Free text must never reach the timeline or the totals. The marker sits in
+# every free-text field the fixtures can carry.
+MARKER="FREE-TEXT-MARKER-5c1e"
+WS_ATTR="$(workspace attribution)"
+run_cmd attr-begin "$RUN" begin --workspace "$WS_ATTR" --plan "plan $MARKER"
+RUN_ATTR="$(field_from "$CASE_STDOUT" run)"
+SEG_ATTR="$(store_dir "$WS_ATTR")/runs/${RUN_ATTR}.jsonl"
+ATTR_STATUSES="$CASE_STATUS"
+attr_step() { # $1=case name, remaining=command
+  local name="$1"
+  shift
+  run_cmd "attr-$name" "$@"
+  ATTR_STATUSES+="$CASE_STATUS"
+}
+attr_step unit "$RUN" unit-begin --unit u-a --workspace "$WS_ATTR"
+attr_step ds-a env LOOP_UNIT=u-a LOOP_ROUND=1 "$JOURNAL" append --workspace "$WS_ATTR" \
+  --event dispatch.start --field dispatch_id=d-a --field backend=codex --field mode=implement
+attr_step de-a env LOOP_UNIT=u-a LOOP_ROUND=1 "$JOURNAL" append --workspace "$WS_ATTR" \
+  --event dispatch.end --field dispatch_id=d-a --field exit=0 --field "session=session $MARKER"
+attr_step ds-b "$JOURNAL" append --workspace "$WS_ATTR" \
+  --event dispatch.start --field dispatch_id=d-b --field backend=grok --field mode=implement
+attr_step de-b "$JOURNAL" append --workspace "$WS_ATTR" \
+  --event dispatch.end --field dispatch_id=d-b --field exit=3
+attr_step gate-a env LOOP_UNIT=u-a LOOP_ROUND=1 "$JOURNAL" append --workspace "$WS_ATTR" \
+  --event gate.result --field policy=strict --field purpose=unit-final --field binding=unavailable \
+  --field "reason=reason $MARKER" --field totals=exit=0 --field verdict=green --field gate_exit=0
+attr_step gate-b "$JOURNAL" append --workspace "$WS_ATTR" \
+  --event gate.result --field policy=passthrough --field purpose=focused --field binding=clean \
+  --field totals=exit=1 --field verdict=red --field gate_exit=1
+attr_step review "$RUN" review --unit u-a --round 1 --verdict iterate \
+  --findings "findings $MARKER" --workspace "$WS_ATTR"
+attr_step publish "$RUN" publish --unit u-a --branch "branch-$MARKER" \
+  --pr "https://example.invalid/$MARKER" --sha "sha-$MARKER" --note "note $MARKER" \
+  --workspace "$WS_ATTR"
+attr_step checkpoint "$RUN" checkpoint --note "note $MARKER" --workspace "$WS_ATTR"
+attr_step ds-c env LOOP_UNIT=u-a LOOP_ROUND=2 "$JOURNAL" append --workspace "$WS_ATTR" \
+  --event dispatch.start --field dispatch_id=d-c --field backend=cursor --field mode=read-only
+attr_step recover "$RUN" recover --acknowledge d-c --workspace "$WS_ATTR"
+if [[ "$ATTR_STATUSES" =~ ^0+$ && ${#ATTR_STATUSES} -eq 13 ]]; then
+  pass "attribution: writer fixture with labelled and unlabelled dispatches and gates appends"
+else
+  fail "attribution: writer fixture with labelled and unlabelled dispatches and gates appends (statuses $ATTR_STATUSES)"
+fi
+run_cmd attr-index "$INDEX" --workspace "$WS_ATTR"
+expect_status 0 "attribution: loop-index exits 0"
+if python3 - "$CASE_STDOUT" "$RUN_ATTR" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+items = {item["dispatch_id"]: item for item in run["dispatches"]}
+a, b, c = items["d-a"], items["d-b"], items["d-c"]
+if (a.get("unit"), a.get("round"), a.get("attribution")) != ("u-a", 1, "declared"):
+    raise SystemExit(f"labelled dispatch {a}")
+if "unit" in b or "round" in b or b.get("attribution") != "none":
+    raise SystemExit(f"unlabelled dispatch {b}")
+if (c.get("unit"), c.get("round"), c.get("attribution"), c.get("state")) != ("u-a", 2, "declared", "abandoned"):
+    raise SystemExit(f"recovered dispatch {c}")
+gates = run["gates"]
+if (gates[0].get("unit"), gates[0].get("round"), gates[0].get("attribution")) != ("u-a", 1, "declared"):
+    raise SystemExit(f"labelled gate {gates[0]}")
+if "unit" in gates[1] or "round" in gates[1] or gates[1].get("attribution") != "none":
+    raise SystemExit(f"unlabelled gate {gates[1]}")
+if [unit["unit"] for unit in run["units"]] != ["u-a"]:
+    raise SystemExit(f"units {run['units']}")
+PY
+then
+  pass "attribution: dispatch and gate objects carry declared unit/round, or attribution none"
+else
+  fail "attribution: dispatch and gate objects carry declared unit/round, or attribution none"
+fi
+if python3 - "$CASE_STDOUT" "$RUN_ATTR" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+expected = {
+    "d-a": {"backend": "codex", "unit": "u-a", "round": 1, "attribution": "declared"},
+    "d-b": {"backend": "grok", "attribution": "none"},
+    "d-c": {"backend": "cursor", "unit": "u-a", "round": 2, "attribution": "declared"},
+}
+seen = set()
+for item in run["timeline"]:
+    kind = item["event"]
+    if kind.startswith("dispatch."):
+        want = expected[item["dispatch_id"]]
+        got = {key: item[key] for key in ("backend", "unit", "round", "attribution") if key in item}
+        if got != want:
+            raise SystemExit(f"{kind} {item}")
+    elif kind == "gate.result":
+        got = {key: item[key] for key in ("unit", "round", "attribution") if key in item}
+        want = (
+            {"unit": "u-a", "round": 1, "attribution": "declared"}
+            if item["gate_verdict"] == "green"
+            else {"attribution": "none"}
+        )
+        if got != want:
+            raise SystemExit(f"gate {item}")
+    elif kind in ("review.recorded", "publish.recorded"):
+        if item.get("unit") != "u-a" or item.get("attribution") != "declared":
+            raise SystemExit(f"{kind} {item}")
+    else:
+        continue
+    seen.add(kind)
+wanted = {
+    "dispatch.start", "dispatch.end", "dispatch.abandoned",
+    "gate.result", "review.recorded", "publish.recorded",
+}
+if seen != wanted:
+    raise SystemExit(f"packet-bearing kinds {sorted(seen)}")
+PY
+then
+  pass "timeline: every packet-bearing event type carries unit and attribution as specified"
+else
+  fail "timeline: every packet-bearing event type carries unit and attribution as specified"
+fi
+if python3 - "$CASE_STDOUT" "$RUN_ATTR" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+
+def bucket(ok=0, failed=0, open_=0, abandoned=0):
+    return {"ok": ok, "failed": failed, "open": open_, "abandoned": abandoned}
+
+def counts(dispatches=None, reviews=(0, 0), gates=(0, 0, 0), publishes=0):
+    return {
+        "dispatches": dispatches or {},
+        "reviews": {"iterate": reviews[0], "pass": reviews[1]},
+        "gates": {"green": gates[0], "red": gates[1], "unknown": gates[2]},
+        "publishes": publishes,
+    }
+
+expected = {
+    "all": counts(
+        {"codex": bucket(ok=1), "grok": bucket(failed=1), "cursor": bucket(abandoned=1)},
+        reviews=(1, 0), gates=(1, 1, 0), publishes=1,
+    ),
+    "units": {
+        "u-a": counts(
+            {"codex": bucket(ok=1), "cursor": bucket(abandoned=1)},
+            reviews=(1, 0), gates=(1, 0, 0), publishes=1,
+        ),
+    },
+    "unattributed": counts({"grok": bucket(failed=1)}, gates=(0, 1, 0)),
+}
+if run["counts"] != expected:
+    raise SystemExit(json.dumps(run["counts"], indent=1))
+if run["counts_complete"] is not True or run["timeline_truncated"] is not False:
+    raise SystemExit("flags")
+seqs = [item["seq"] for item in run["timeline"]]
+if seqs != list(range(1, 15)):
+    raise SystemExit(f"seqs {seqs}")
+PY
+then
+  pass "counts: writer fixture totals split by declared unit and unattributed"
+else
+  fail "counts: writer fixture totals split by declared unit and unattributed"
+fi
+
+# Raw lines carry free text the writer's enums refuse (attested_by) as well.
+WS_FREE="$(workspace free-text)"
+RUN_FREE="20260817T200000Z-f7ee01"
+python3 - "$WS_FREE" "$HOME" "$RUN_FREE" "$MARKER" <<'PY'
+import hashlib, json, os, sys
+ws, home, run_id, marker = sys.argv[1:]
+key = hashlib.sha256(os.path.realpath(ws).encode("utf-8")).hexdigest()
+runs_dir = os.path.join(home, ".config", "olddonkey-loop", "journal", key, "runs")
+os.makedirs(runs_dir, exist_ok=True)
+text = f"text {marker}"
+events = [
+    {"event": "run.begin", "generation": 1, "workspace": ws, "workspace_key": key, "plan": text},
+    {"event": "unit.begin", "unit": "u-m"},
+    {"event": "dispatch.start", "dispatch_id": "d-m", "backend": "codex", "mode": "implement",
+     "unit": "u-m", "round": 1},
+    {"event": "dispatch.end", "dispatch_id": "d-m", "exit": 0, "session": text, "unit": "u-m", "round": 1},
+    {"event": "dispatch.start", "dispatch_id": "d-n", "backend": "grok", "mode": "read-only"},
+    {"event": "dispatch.abandoned", "dispatch_id": "d-n", "attested_by": text},
+    {"event": "gate.result", "policy": "strict", "purpose": "unit-final", "binding": "unavailable",
+     "reason": text, "totals": text, "pre_head": text, "pre_tree": text, "post_head": text,
+     "post_tree": text, "verdict": "green", "gate_exit": 0, "unit": "u-m"},
+    {"event": "review.recorded", "unit": "u-m", "round": 1, "verdict": "pass", "findings": text},
+    {"event": "publish.recorded", "unit": "u-m", "branch": f"branch-{marker}",
+     "pr": f"https://example.invalid/{marker}", "sha": f"sha-{marker}", "note": text},
+    {"event": "checkpoint", "note": text},
+    {"event": "unit.end", "unit": "u-m", "status": "done"},
+    {"event": "run.end", "status": "completed"},
+]
+with open(os.path.join(runs_dir, run_id + ".jsonl"), "w", encoding="utf-8") as handle:
+    for seq, event in enumerate(events, 1):
+        row = {"schema": 1, "seq": seq, "ts": "2026-08-17T20:00:00Z", "run": run_id}
+        row.update(event)
+        handle.write(json.dumps(row, ensure_ascii=True, separators=(",", ":")) + "\n")
+PY
+SEG_FREE="$(store_dir "$WS_FREE")/runs/${RUN_FREE}.jsonl"
+run_cmd free-index "$INDEX" --workspace "$WS_FREE"
+expect_status 0 "timeline: free-text fixture indexes with exit 0"
+if python3 - "$MARKER" "$TMP_ROOT/attr-index.stdout" "$RUN_ATTR" "$SEG_ATTR" \
+  "$CASE_STDOUT" "$RUN_FREE" "$SEG_FREE" <<'PY'
+import json, sys
+marker = sys.argv[1]
+for output, run_id, segment in (sys.argv[2:5], sys.argv[5:8]):
+    raw = open(segment, encoding="utf-8").read()
+    if raw.count(marker) < 8:
+        raise SystemExit(f"fixture too weak: {raw.count(marker)} markers in {segment}")
+    doc = json.load(open(output, encoding="utf-8"))
+    run = next(item for item in doc["runs"] if item["run_id"] == run_id)
+    projected = json.dumps({"timeline": run["timeline"], "counts": run["counts"]})
+    if marker in projected:
+        raise SystemExit(f"free text leaked into timeline/counts of {run_id}")
+    if len(run["timeline"]) < 10:
+        raise SystemExit("timeline unexpectedly short")
+free_raw = open(sys.argv[7], encoding="utf-8").read()
+if f'"attested_by":"text {marker}"' not in free_raw or f'"pr":"https://example.invalid/{marker}"' not in free_raw:
+    raise SystemExit("fixture lacks attested_by/pr markers")
+PY
+then
+  pass "timeline: free-text fields (findings, note, plan, reason, attested_by, branch, pr, sha) appear nowhere in timeline or counts"
+else
+  fail "timeline: free-text fields (findings, note, plan, reason, attested_by, branch, pr, sha) appear nowhere in timeline or counts"
+fi
+if python3 - "$TMP_ROOT/attr-index.stdout" "$RUN_ATTR" "$CASE_STDOUT" "$RUN_FREE" <<'PY'
+import json, sys
+allowed = {
+    "seq", "ts", "event", "dispatch_id", "mode", "exit", "binding", "purpose",
+    "gate_verdict", "review_verdict", "backend", "unit", "round", "attribution",
+}
+for output, run_id in (sys.argv[1:3], sys.argv[3:5]):
+    doc = json.load(open(output, encoding="utf-8"))
+    run = next(item for item in doc["runs"] if item["run_id"] == run_id)
+    for item in run["timeline"]:
+        extra = set(item) - allowed
+        if extra:
+            raise SystemExit(f"non-whitelisted keys {sorted(extra)} in {item}")
+        if not {"seq", "ts", "event"} <= set(item):
+            raise SystemExit(f"missing envelope {item}")
+PY
+then
+  pass "timeline: every event is projected to the closed whitelist"
+else
+  fail "timeline: every event is projected to the closed whitelist"
+fi
+
+# 600 events, file order shuffled: totals cover all of them, the timeline the
+# last 500 by seq.
+WS_WINDOW="$(workspace timeline-window)"
+RUN_WINDOW="20260817T200000Z-a11b01"
+python3 - "$WS_WINDOW" "$HOME" "$RUN_WINDOW" <<'PY'
+import hashlib, json, os, random, sys
+ws, home, run_id = sys.argv[1:]
+key = hashlib.sha256(os.path.realpath(ws).encode("utf-8")).hexdigest()
+runs_dir = os.path.join(home, ".config", "olddonkey-loop", "journal", key, "runs")
+os.makedirs(runs_dir, exist_ok=True)
+events = [
+    {"event": "run.begin", "generation": 1, "workspace": ws, "workspace_key": key},
+    # seq 2: its end (seq 595) is in the window, the start is not.
+    {"event": "dispatch.start", "dispatch_id": "d-early", "backend": "grok", "mode": "implement",
+     "unit": "u-w", "round": 1},
+]
+for index in range(100):  # seq 3-102: 60 green, 30 red, 10 unknown, all u-w
+    gate = {"event": "gate.result", "policy": "strict", "purpose": "unit-final", "binding": "clean",
+            "unit": "u-w", "round": 1}
+    if index % 10 < 6:
+        gate.update(verdict="green", gate_exit=0)
+    elif index % 10 < 9:
+        gate.update(verdict="red", gate_exit=1)
+    events.append(gate)
+# seq 103: start of a dispatch whose end (seq 594) declares a different unit.
+events.append({"event": "dispatch.start", "dispatch_id": "d-conf", "backend": "codex",
+               "mode": "implement", "unit": "u-1", "round": 1})
+for index in range(100):  # seq 104-203: 50 pass, 50 iterate
+    events.append({"event": "review.recorded", "unit": "u-w", "round": 1,
+                   "verdict": "pass" if index % 2 == 0 else "iterate"})
+for _ in range(50):  # seq 204-253
+    events.append({"event": "publish.recorded", "unit": "u-x"})
+for _ in range(50):  # seq 254-303: unattributed red gates
+    events.append({"event": "gate.result", "policy": "passthrough", "purpose": "focused",
+                   "binding": "dirty", "verdict": "red", "gate_exit": 2})
+while len(events) < 593:  # seq 304-593
+    events.append({"event": "checkpoint", "note": "filler"})
+events += [
+    {"event": "dispatch.end", "dispatch_id": "d-conf", "exit": 0, "unit": "u-2", "round": 1},
+    {"event": "dispatch.end", "dispatch_id": "d-early", "exit": 0, "unit": "u-w", "round": 1},
+    {"event": "dispatch.end", "dispatch_id": "d-partial", "exit": 1, "unit": "u-p", "round": 2},
+    {"event": "dispatch.start", "dispatch_id": "d-open", "backend": "cursor", "mode": "read-only"},
+    {"event": "dispatch.start", "dispatch_id": "d-ab", "backend": "codex", "mode": "implement",
+     "unit": "u-w", "round": 2},
+    {"event": "dispatch.abandoned", "dispatch_id": "d-ab", "attested_by": "user",
+     "unit": "u-w", "round": 2},
+    {"event": "review.recorded", "unit": "u-w", "round": 2, "verdict": "maybe"},
+]
+assert len(events) == 600
+lines = []
+for seq, event in enumerate(events, 1):
+    row = {"schema": 1, "seq": seq, "ts": "2026-08-17T20:00:00Z", "run": run_id}
+    row.update(event)
+    lines.append(json.dumps(row, ensure_ascii=True, separators=(",", ":")) + "\n")
+random.Random(20260817).shuffle(lines)
+with open(os.path.join(runs_dir, run_id + ".jsonl"), "w", encoding="utf-8") as handle:
+    handle.writelines(lines)
+PY
+run_cmd window-index "$INDEX" --workspace "$WS_WINDOW"
+expect_status 0 "timeline: 600-event run indexes with exit 0"
+if python3 - "$CASE_STDOUT" "$RUN_WINDOW" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+if len(run["timeline"]) != 500 or run["timeline_truncated"] is not True:
+    raise SystemExit(f"{len(run['timeline'])} events, truncated={run['timeline_truncated']}")
+seqs = [item["seq"] for item in run["timeline"]]
+if seqs != list(range(101, 601)):
+    raise SystemExit(f"not the last 500 in seq order: {seqs[:5]}...{seqs[-5:]}")
+PY
+then
+  pass "timeline: a 600-event run keeps the last 500 in seq order despite shuffled file order, and sets timeline_truncated"
+else
+  fail "timeline: a 600-event run keeps the last 500 in seq order despite shuffled file order, and sets timeline_truncated"
+fi
+if python3 - "$CASE_STDOUT" "$RUN_WINDOW" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+
+def bucket(ok=0, failed=0, open_=0, abandoned=0):
+    return {"ok": ok, "failed": failed, "open": open_, "abandoned": abandoned}
+
+def counts(dispatches=None, reviews=(0, 0), gates=(0, 0, 0), publishes=0):
+    return {
+        "dispatches": dispatches or {},
+        "reviews": {"iterate": reviews[0], "pass": reviews[1]},
+        "gates": {"green": gates[0], "red": gates[1], "unknown": gates[2]},
+        "publishes": publishes,
+    }
+
+expected = {
+    "all": counts(
+        {
+            "grok": bucket(ok=1),
+            "codex": bucket(ok=1, abandoned=1),
+            "unknown": bucket(failed=1),
+            "cursor": bucket(open_=1),
+        },
+        reviews=(50, 50), gates=(60, 80, 10), publishes=50,
+    ),
+    "units": {
+        "u-w": counts(
+            {"grok": bucket(ok=1), "codex": bucket(abandoned=1)},
+            reviews=(50, 50), gates=(60, 30, 10),
+        ),
+        "u-x": counts(publishes=50),
+    },
+    "unattributed": counts(
+        {"codex": bucket(ok=1), "cursor": bucket(open_=1), "unknown": bucket(failed=1)},
+        gates=(0, 50, 0),
+    ),
+}
+if run["counts"] != expected:
+    raise SystemExit(json.dumps(run["counts"], indent=1))
+if run["counts_complete"] is not True:
+    raise SystemExit("counts_complete")
+PY
+then
+  pass "counts: totals over all 600 events equal the true totals, not the 500-event window"
+else
+  fail "counts: totals over all 600 events equal the true totals, not the 500-event window"
+fi
+if python3 - "$CASE_STDOUT" "$RUN_WINDOW" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+record = next(item for item in run["dispatches"] if item["dispatch_id"] == "d-conf")
+if record.get("attribution") != "conflict" or "unit" in record or "round" in record:
+    raise SystemExit(f"dispatch {record}")
+events = [item for item in run["timeline"] if item.get("dispatch_id") == "d-conf"]
+if [item["event"] for item in events] != ["dispatch.start", "dispatch.end"]:
+    raise SystemExit(f"events {events}")
+for item in events:
+    if item.get("attribution") != "conflict" or "unit" in item or "round" in item:
+        raise SystemExit(f"timeline {item}")
+    if item.get("backend") != "codex":
+        raise SystemExit(f"backend {item}")
+if {"u-1", "u-2", "u-p"} & {unit["unit"] for unit in run["units"]}:
+    raise SystemExit(f"a dispatch label created a unit row: {run['units']}")
+PY
+then
+  pass "attribution: conflicting start/end is conflict, with no unit or round on the dispatch or any of its timeline events"
+else
+  fail "attribution: conflicting start/end is conflict, with no unit or round on the dispatch or any of its timeline events"
+fi
+if python3 - "$CASE_STDOUT" "$RUN_WINDOW" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+record = next(item for item in run["dispatches"] if item["dispatch_id"] == "d-partial")
+want = {"backend": "unknown", "unit": "u-p", "round": 2, "attribution": "partial"}
+if {key: record.get(key) for key in want} != want:
+    raise SystemExit(f"dispatch {record}")
+item = next(item for item in run["timeline"] if item.get("dispatch_id") == "d-partial")
+if {key: item.get(key) for key in want} != want:
+    raise SystemExit(f"timeline {item}")
+PY
+then
+  pass "attribution: an end without a start is partial and keeps what its events declare"
+else
+  fail "attribution: an end without a start is partial and keeps what its events declare"
+fi
+if python3 - "$CASE_STDOUT" "$RUN_WINDOW" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+if any(item.get("dispatch_id") == "d-early" and item["event"] == "dispatch.start" for item in run["timeline"]):
+    raise SystemExit("start should be outside the window")
+item = next(item for item in run["timeline"] if item.get("dispatch_id") == "d-early")
+want = {"seq": 595, "event": "dispatch.end", "backend": "grok", "unit": "u-w", "round": 1,
+        "attribution": "declared", "exit": 0}
+if {key: item.get(key) for key in want} != want:
+    raise SystemExit(f"timeline {item}")
+PY
+then
+  pass "timeline: an end whose start fell outside the window still names its resolved backend"
+else
+  fail "timeline: an end whose start fell outside the window still names its resolved backend"
+fi
+if python3 - "$CASE_STDOUT" "$RUN_WINDOW" "$TMP_ROOT/attr-index.stdout" "$RUN_ATTR" <<'PY'
+import json, sys
+seen = {"gate.result": set(), "review.recorded": set()}
+for output, run_id in (sys.argv[1:3], sys.argv[3:5]):
+    doc = json.load(open(output, encoding="utf-8"))
+    run = next(item for item in doc["runs"] if item["run_id"] == run_id)
+    for item in run["timeline"]:
+        kind = item["event"]
+        if "verdict" in item:
+            raise SystemExit(f"raw verdict projected: {item}")
+        if ("gate_verdict" in item) != (kind == "gate.result"):
+            raise SystemExit(f"gate_verdict placement: {item}")
+        if ("review_verdict" in item) != (kind == "review.recorded"):
+            raise SystemExit(f"review_verdict placement: {item}")
+        if kind == "gate.result":
+            seen[kind].add(item["gate_verdict"])
+        if kind == "review.recorded":
+            seen[kind].add(item["review_verdict"])
+if seen["gate.result"] != {"green", "red", "unknown"}:
+    raise SystemExit(f"gate verdicts {seen}")
+if seen["review.recorded"] != {"pass", "iterate", "unknown"}:
+    raise SystemExit(f"review verdicts {seen}")
+PY
+then
+  pass "timeline: review events carry review_verdict and gate events gate_verdict, never each other's"
+else
+  fail "timeline: review events carry review_verdict and gate events gate_verdict, never each other's"
+fi
+
+# A unit owns a count only through a declared attribution: a partial dispatch
+# that still carries uA, and a conflicted one whose start says uA, are both
+# unattributed. Distinct backends keep each dispatch's bucket identifiable.
+WS_OWN="$(workspace count-ownership)"
+RUN_OWN="20260817T200000Z-0c0a01"
+python3 - "$WS_OWN" "$HOME" "$RUN_OWN" <<'PY'
+import hashlib, json, os, sys
+ws, home, run_id = sys.argv[1:]
+key = hashlib.sha256(os.path.realpath(ws).encode("utf-8")).hexdigest()
+runs_dir = os.path.join(home, ".config", "olddonkey-loop", "journal", key, "runs")
+os.makedirs(runs_dir, exist_ok=True)
+events = [
+    {"event": "run.begin", "generation": 1, "workspace": ws, "workspace_key": key},
+    {"event": "unit.begin", "unit": "uA"},
+    # (a) declared: start and end agree on uA.
+    {"event": "dispatch.start", "dispatch_id": "d-own-decl", "backend": "codex",
+     "mode": "implement", "unit": "uA", "round": 1},
+    {"event": "dispatch.end", "dispatch_id": "d-own-decl", "exit": 0, "unit": "uA", "round": 1},
+    # (b) partial: an end with no start, declaring uA.
+    {"event": "dispatch.end", "dispatch_id": "d-own-part", "exit": 1, "unit": "uA", "round": 1},
+    # (c) conflict: start declares uA, end declares uB.
+    {"event": "dispatch.start", "dispatch_id": "d-own-conf", "backend": "grok",
+     "mode": "implement", "unit": "uA", "round": 1},
+    {"event": "dispatch.end", "dispatch_id": "d-own-conf", "exit": 0, "unit": "uB", "round": 1},
+]
+with open(os.path.join(runs_dir, run_id + ".jsonl"), "w", encoding="utf-8") as handle:
+    for seq, event in enumerate(events, 1):
+        row = {"schema": 1, "seq": seq, "ts": "2026-08-17T20:00:00Z", "run": run_id}
+        row.update(event)
+        handle.write(json.dumps(row, ensure_ascii=True, separators=(",", ":")) + "\n")
+PY
+run_cmd own-index "$INDEX" --workspace "$WS_OWN"
+expect_status 0 "counts: count-ownership fixture indexes with exit 0"
+if python3 - "$CASE_STDOUT" "$RUN_OWN" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+records = {item["dispatch_id"]: item for item in run["dispatches"]}
+fixture = {
+    "d-own-decl": ("declared", "uA"),
+    "d-own-part": ("partial", "uA"),
+    "d-own-conf": ("conflict", None),
+}
+for dispatch_id, (attribution, unit) in fixture.items():
+    record = records[dispatch_id]
+    if (record.get("attribution"), record.get("unit")) != (attribution, unit):
+        raise SystemExit(f"fixture premise: {record}")
+
+def bucket(ok=0, failed=0, open_=0, abandoned=0):
+    return {"ok": ok, "failed": failed, "open": open_, "abandoned": abandoned}
+
+counts = run["counts"]
+if sorted(counts["units"]) != ["uA"]:
+    raise SystemExit(f"unit keys {sorted(counts['units'])}")
+if counts["units"]["uA"]["dispatches"] != {"codex": bucket(ok=1)}:
+    raise SystemExit(f"uA dispatches {counts['units']['uA']['dispatches']}")
+want_unattributed = {"unknown": bucket(failed=1), "grok": bucket(ok=1)}
+if counts["unattributed"]["dispatches"] != want_unattributed:
+    raise SystemExit(f"unattributed dispatches {counts['unattributed']['dispatches']}")
+want_all = {"codex": bucket(ok=1), "unknown": bucket(failed=1), "grok": bucket(ok=1)}
+if counts["all"]["dispatches"] != want_all:
+    raise SystemExit(f"all dispatches {counts['all']['dispatches']}")
+PY
+then
+  pass "counts: only a declared dispatch counts under its unit; partial and conflicted ones are unattributed, and all counts every one"
+else
+  fail "counts: only a declared dispatch counts under its unit; partial and conflicted ones are unattributed, and all counts every one"
+fi
+
+# counts_complete: a discarded torn tail, a kept valid tail, a corrupt middle.
+WS_COMPLETE="$(workspace counts-complete)"
+RUN_TORN="20260817T210000Z-7a0001"
+RUN_VALID_TAIL="20260817T210000Z-7a0002"
+RUN_MIDBAD="20260817T210000Z-7a0003"
+python3 - "$WS_COMPLETE" "$HOME" "$RUN_TORN" "$RUN_VALID_TAIL" "$RUN_MIDBAD" <<'PY'
+import hashlib, json, os, sys
+ws, home, torn, valid_tail, midbad = sys.argv[1:]
+key = hashlib.sha256(os.path.realpath(ws).encode("utf-8")).hexdigest()
+runs_dir = os.path.join(home, ".config", "olddonkey-loop", "journal", key, "runs")
+os.makedirs(runs_dir, exist_ok=True)
+
+def line(run_id, seq, event):
+    row = {"schema": 1, "seq": seq, "ts": "2026-08-17T21:00:00Z", "run": run_id}
+    row.update(event)
+    return json.dumps(row, ensure_ascii=True, separators=(",", ":"))
+
+def gate(verdict, gate_exit):
+    return {"event": "gate.result", "policy": "strict", "purpose": "unit-final",
+            "binding": "clean", "verdict": verdict, "gate_exit": gate_exit}
+
+def begin(generation):
+    return {"event": "run.begin", "generation": generation, "workspace": ws, "workspace_key": key}
+
+def write(run_id, data):
+    with open(os.path.join(runs_dir, run_id + ".jsonl"), "wb") as handle:
+        handle.write(data.encode("utf-8"))
+
+write(torn, line(torn, 1, begin(1)) + "\n" + line(torn, 2, gate("green", 0)) + "\n"
+      + line(torn, 3, gate("red", 1))[:40])
+write(valid_tail, line(valid_tail, 1, begin(2)) + "\n" + line(valid_tail, 2, gate("green", 0))
+      + "\n" + line(valid_tail, 3, gate("red", 1)))
+write(midbad, line(midbad, 1, begin(3)) + "\n" + line(midbad, 2, gate("green", 0)) + "\n"
+      + "this is not json\n" + line(midbad, 4, gate("red", 1)) + "\n"
+      + line(midbad, 5, {"event": "review.recorded", "unit": "u", "round": 1, "verdict": "pass"})
+      + "\n" + line(midbad, 6, {"event": "publish.recorded", "unit": "u"}) + "\n")
+PY
+run_cmd complete-index "$INDEX" --workspace "$WS_COMPLETE"
+expect_status 0 "counts_complete: loop-index exits 0"
+if python3 - "$CASE_STDOUT" "$RUN_TORN" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+if run["counts_complete"] is not False:
+    raise SystemExit("torn tail must make counts partial")
+if run["status"] != "active":
+    raise SystemExit(f"a torn tail is not corruption: {run['status']}")
+if run["counts"]["all"]["gates"] != {"green": 1, "red": 0, "unknown": 0}:
+    raise SystemExit(run["counts"])
+PY
+then
+  pass "counts_complete: a discarded torn tail reads false while the run stays active"
+else
+  fail "counts_complete: a discarded torn tail reads false while the run stays active"
+fi
+if python3 - "$CASE_STDOUT" "$RUN_VALID_TAIL" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+if run["counts_complete"] is not True:
+    raise SystemExit("a valid unterminated tail is kept, not discarded")
+if run["counts"]["all"]["gates"] != {"green": 1, "red": 1, "unknown": 0}:
+    raise SystemExit(run["counts"])
+PY
+then
+  pass "counts_complete: a valid unterminated tail is counted and complete"
+else
+  fail "counts_complete: a valid unterminated tail is counted and complete"
+fi
+if python3 - "$CASE_STDOUT" "$RUN_MIDBAD" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+run = next(item for item in doc["runs"] if item["run_id"] == sys.argv[2])
+if run["status"] != "degraded" or run["counts_complete"] is not False:
+    raise SystemExit(f"status={run['status']} counts_complete={run['counts_complete']}")
+totals = run["counts"]["all"]
+if totals["gates"] != {"green": 1, "red": 0, "unknown": 0}:
+    raise SystemExit(totals)
+if totals["reviews"] != {"iterate": 0, "pass": 0} or totals["publishes"] != 0:
+    raise SystemExit(totals)
+if [item["seq"] for item in run["timeline"]] != [1, 2]:
+    raise SystemExit(run["timeline"])
+PY
+then
+  pass "counts_complete: a corrupt middle reads false and events after the damaged line are uncounted"
+else
+  fail "counts_complete: a corrupt middle reads false and events after the damaged line are uncounted"
+fi
+
+# ---------------------------------------------------------------------------
 # CLI / contract extras
 # ---------------------------------------------------------------------------
 run_cmd help-index "$INDEX" --help
@@ -1225,6 +1837,30 @@ then
   pass "schema: checkpoint axis documents words, evidence, and classification"
 else
   fail "schema: checkpoint axis documents words, evidence, and classification"
+fi
+
+if python3 - "$SCHEMA" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+needed = (
+    "LOOP_UNIT",
+    "LOOP_ROUND",
+    "declaration, not proof",
+    "`declared`",
+    "`partial`",
+    "`conflict`",
+    "counts_complete",
+    "timeline_truncated",
+    "`attested_by`",
+)
+missing = [word for word in needed if word not in text]
+if missing:
+    raise SystemExit("missing " + ",".join(missing))
+PY
+then
+  pass "schema: declared attribution, run totals, and timeline are documented"
+else
+  fail "schema: declared attribution, run totals, and timeline are documented"
 fi
 
 if [[ $FAILED_CHECKS -gt 0 ]]; then
