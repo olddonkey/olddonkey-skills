@@ -38,10 +38,21 @@ or deletion of an existing path under `.claude/`. A tracked symlink named
 anything under a `.claude/` directory and refuses to change or delete what
 is already there.
 
+`git check-ignore` cannot answer for a path beneath a symlink in the real
+worktree, so those paths are never sent to it. When the real symlink is itself
+ignored, the directory the agent created in its place is dropped whole and
+counted once; the real symlink and its target are untouched. When the agent
+replaces a snapshotted symlink with a directory, the paths beneath it are
+applied unfiltered and each is reported on stderr as `note: ignore rules not
+checked beyond a real-worktree symlink: <path>` (the first 20, then a count).
+A new symlink among them is still refused.
+
 In implement mode, `git diff --no-index --binary --no-renames` creates one raw
 `changes.patch` from `pristine/` to `frozen/`. The adapter checks it with
-`git apply -p2 --check --binary`, then applies it with
-`git apply -p2 --binary` under umask 022. There is no patch rewrite. It never
+`git apply -p2 --check --binary --whitespace=nowarn`, then applies it with
+`git apply -p2 --binary --whitespace=nowarn` under umask 022. The whitespace
+flag overrides a configured `apply.whitespace`, which would otherwise rewrite
+or refuse the agent's lines. There is no patch rewrite. It never
 stages or commits. An empty patch succeeds. Failures keep the state and
 copies. Successful dispatches clean the copies unless
 `CLAUDE_LOOP_KEEP_COPIES=1` is set.

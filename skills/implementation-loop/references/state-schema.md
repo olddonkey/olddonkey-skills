@@ -367,9 +367,9 @@ for a nonempty patch on the apply path.
 | stream.jsonl | backends/claude/dispatch.sh:338 | absent | present | present | present | present | child stream JSONL; created at :338 |
 | stderr.log | backends/claude/dispatch.sh:338 | absent | present | present | present | present | child stderr; created at :338 |
 | last-message.txt | backends/claude/dispatch.sh:398 | absent | absent | present | present | present | exact result string, no added newline; written at :398 |
-| changes.patch | backends/claude/dispatch.sh:701 | absent | absent | absent | present | present | raw pristine-vs-frozen patch; implement-only |
-| apply-check.log | backends/claude/dispatch.sh:713 | absent | absent | absent | absent | present | git apply --check output; nonempty patch only |
-| apply.log | backends/claude/dispatch.sh:719 | absent | absent | absent | absent | present | git apply output; nonempty patch only |
+| changes.patch | backends/claude/dispatch.sh:722 | absent | absent | absent | present | present | raw pristine-vs-frozen patch; implement-only |
+| apply-check.log | backends/claude/dispatch.sh:736 | absent | absent | absent | absent | present | git apply --check output; nonempty patch only |
+| apply.log | backends/claude/dispatch.sh:742 | absent | absent | absent | absent | present | git apply output; nonempty patch only |
 
 ---
 

@@ -122,6 +122,20 @@ elif action == "ignored":
     (cache / "x.pyc").write_bytes(b"cache")
     (cache / "link").symlink_to("../tracked.txt")
     (work / "ignored.txt").write_text("agent ignored change\n")
+elif action == "ignored-symlink":
+    (work / "tracked.txt").write_text("base\nclaude-change\n")
+    (work / "cache" / "deep").mkdir(parents=True)
+    (work / "cache" / "deep" / "out.o").write_text("built\n")
+elif action in ("symlink-to-dir", "symlink-to-dir-link"):
+    (work / "tracked.txt").write_text("base\nclaude-change\n")
+    (work / "dirlink").unlink()
+    (work / "dirlink").mkdir()
+    (work / "dirlink" / "new.txt").write_text("beyond-the-real-symlink\n")
+    if action == "symlink-to-dir-link":
+        (work / "dirlink" / "inner-link").symlink_to("new.txt")
+elif action == "trailing-space":
+    (work / "tracked.txt").write_text("base\nclaude-change  \t\n\n\n")
+    (work / "added.txt").write_text("added-by-claude \n\n")
 elif action == "unreadable":
     path = work / "unreadable"
     path.mkdir()
@@ -422,6 +436,68 @@ PY
 check 'ignored paths are absent in frozen copy' missing "$(summary 'work copy')/../frozen/__pycache__/link"
 INVOKE_ENV=()
 
+# git check-ignore dies on a path beyond a symlink in the real worktree, so
+# those paths are never sent to it. An ignored symlink the agent shadows with
+# a directory is dropped whole, and the real symlink's target stays untouched.
+init_fixture ignored-symlink
+printf 'cache\n' >> "$REPO/.gitignore"
+git -C "$REPO" commit -qam ignore-cache
+mkdir "$TMP_ROOT/ignored-symlink-target"
+ln -s "$TMP_ROOT/ignored-symlink-target" "$REPO/cache"
+snapshot_fixture ignored-symlink
+INVOKE_ENV=(CLAUDE_LOOP_KEEP_COPIES=1)
+invoke ignored-symlink ignored-symlink normal
+check 'directory shadowing an ignored real symlink does not fail dispatch' status_is 0
+check 'ordinary edit applies beside the shadowed symlink' contains claude-change "$REPO/tracked.txt"
+check 'ignored real symlink is untouched' test "$(readlink "$REPO/cache")" = "$TMP_ROOT/ignored-symlink-target"
+check 'ignored real symlink target stays empty' test -z "$(ls -A "$TMP_ROOT/ignored-symlink-target")"
+check 'shadowing directory is named in a note' grep -Fxq 'note: ignored path not applied: cache' "$ERR"
+check 'paths beneath the shadowing directory get no note of their own' bash -c '! grep -Fq cache/deep "$1"' _ "$ERR"
+check 'summary counts the shadowing directory once' contains 'ignored paths dropped: 1' "$OUT"
+check 'shadowing directory is absent in frozen copy' missing "$(summary 'work copy')/../frozen/cache"
+INVOKE_ENV=()
+
+# A tracked symlink the agent replaces with a directory still applies. Ignore
+# rules cannot be asked about the paths beneath it, and a note says so. A new
+# symlink among those paths is refused like any other.
+for action in symlink-to-dir symlink-to-dir-link; do
+  init_fixture "$action"
+  mkdir "$REPO/realdir"
+  printf 'real\n' > "$REPO/realdir/f.txt"
+  ln -s realdir "$REPO/dirlink"
+  git -C "$REPO" add realdir dirlink
+  git -C "$REPO" commit -qm symlink-base
+  snapshot_fixture "$action"
+  invoke "$action" "$action" normal
+  check "$action names the unchecked path in a note" grep -Fxq 'note: ignore rules not checked beyond a real-worktree symlink: dirlink/new.txt' "$ERR"
+  check "$action leaves the former symlink target alone" test "$(ls -A "$REPO/realdir")" = f.txt
+  if [[ "$action" == symlink-to-dir ]]; then
+    check 'tracked symlink replaced by a directory still applies' status_is 0
+    check 'replacement directory is not a symlink in the real worktree' test ! -L "$REPO/dirlink"
+    check 'file beneath the replacement directory reaches the real worktree' contains beyond-the-real-symlink "$REPO/dirlink/new.txt"
+  else
+    check 'new symlink beneath a replaced symlink exits 10' status_is 10
+    check 'new symlink beneath a replaced symlink is named in the refusal' contains 'boundary: new or changed symlink: dirlink/inner-link' "$ERR"
+    check 'new symlink beneath a replaced symlink leaves worktree unchanged' clean_repo
+  fi
+done
+
+# A configured apply.whitespace must not rewrite the agent's lines on apply.
+init_fixture whitespace-fix
+git -C "$REPO" config apply.whitespace fix
+INVOKE_ENV=(CLAUDE_LOOP_KEEP_COPIES=1)
+invoke whitespace-fix trailing-space normal
+check 'apply.whitespace=fix dispatch succeeds' status_is 0
+check 'changed file keeps trailing whitespace and blank lines' cmp -s "$REPO/tracked.txt" "$(summary 'work copy')/../frozen/tracked.txt"
+check 'added file keeps trailing whitespace and blank lines' cmp -s "$REPO/added.txt" "$(summary 'work copy')/../frozen/added.txt"
+init_fixture whitespace-error
+git -C "$REPO" config apply.whitespace error
+INVOKE_ENV=(CLAUDE_LOOP_KEEP_COPIES=1)
+invoke whitespace-error trailing-space normal
+check 'apply.whitespace=error does not refuse the patch' status_is 0
+check 'apply.whitespace=error still applies the edit unchanged' cmp -s "$REPO/tracked.txt" "$(summary 'work copy')/../frozen/tracked.txt"
+INVOKE_ENV=()
+
 # New .claude paths are dropped, while changes to pristine paths refuse.
 for action in settings claude-added claude-nested claude-mixed claude-link; do
   init_fixture "$action"
@@ -641,7 +717,7 @@ check 'failed dispatch.end does not change dispatch exit' status_is 0
 check 'failed dispatch.end warns' contains 'warning: loop-journal dispatch.end failed' "$ERR"
 INVOKE_ENV=()
 
-EXPECTED_CHECKS=280
+EXPECTED_CHECKS=303
 if [[ $CHECKS -ne $EXPECTED_CHECKS || $FAILURES -ne 0 ]]; then
   printf 'selftest: FAIL (%d/%d checks failed; expected %d checks)\n' "$FAILURES" "$CHECKS" "$EXPECTED_CHECKS" >&2
   exit 1

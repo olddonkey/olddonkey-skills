@@ -484,22 +484,36 @@ def paths(root):
             found.append(os.path.relpath(os.path.join(directory, name), root))
     return found
 
+def beyond_symlink(path):
+    # git check-ignore dies on a path whose parent is a symlink in the real
+    # worktree. The symlink itself is still asked about, and dropping it
+    # drops everything the agent put beneath that name.
+    parent = os.path.dirname(path)
+    while parent:
+        if os.path.islink(os.path.join(workspace, parent)):
+            return True
+        parent = os.path.dirname(parent)
+    return False
+
+def shown(path):
+    return path.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
 try:
     baseline = set(paths(pristine))
     new_paths = [path for path in paths(frozen) if path not in baseline]
-    if not new_paths:
-        print(0)
-        raise SystemExit(0)
-    payload = b"\0".join(os.fsencode(path) for path in new_paths) + b"\0"
-    checked = subprocess.run(
-        ["git", "-C", workspace, "check-ignore", "-z", "--stdin"],
-        input=payload, capture_output=True,
-    )
-    if checked.returncode not in (0, 1):
-        raise OSError(f"git check-ignore failed ({checked.returncode}): {checked.stderr.decode(errors='replace')}")
-    ignored = {os.fsdecode(path) for path in checked.stdout.split(b"\0") if path}
-    if not ignored.issubset(set(new_paths)):
-        raise OSError("git check-ignore returned an unexpected path")
+    askable = {path for path in new_paths if not beyond_symlink(path)}
+    ignored = set()
+    if askable:
+        payload = b"\0".join(os.fsencode(path) for path in sorted(askable)) + b"\0"
+        checked = subprocess.run(
+            ["git", "-C", workspace, "check-ignore", "-z", "--stdin"],
+            input=payload, capture_output=True,
+        )
+        if checked.returncode not in (0, 1):
+            raise OSError(f"git check-ignore failed ({checked.returncode}): {checked.stderr.decode(errors='replace')}")
+        ignored = {os.fsdecode(path) for path in checked.stdout.split(b"\0") if path}
+        if not ignored.issubset(askable):
+            raise OSError("git check-ignore returned an unexpected path")
     for path in sorted(ignored, key=lambda value: (value.count(os.sep), value)):
         target = os.path.join(frozen, path)
         if os.path.islink(target) or not os.path.isdir(target):
@@ -508,10 +522,17 @@ try:
         elif os.path.lexists(target):
             shutil.rmtree(target)
     for path in sorted(ignored)[:20]:
-        shown = path.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-        print(f"note: ignored path not applied: {shown}", file=sys.stderr)
+        print(f"note: ignored path not applied: {shown(path)}", file=sys.stderr)
     if len(ignored) > 20:
         print(f"note: ignored paths not applied: {len(ignored) - 20} more (total {len(ignored)})", file=sys.stderr)
+    unchecked = sorted(
+        path for path in new_paths
+        if path not in askable and os.path.lexists(os.path.join(frozen, path))
+    )
+    for path in unchecked[:20]:
+        print(f"note: ignore rules not checked beyond a real-worktree symlink: {shown(path)}", file=sys.stderr)
+    if len(unchecked) > 20:
+        print(f"note: ignore rules not checked beyond a real-worktree symlink: {len(unchecked) - 20} more (total {len(unchecked)})", file=sys.stderr)
     print(len(ignored))
 except Exception as exc:
     print(f"boundary: could not filter ignored paths: {exc}", file=sys.stderr)
@@ -709,13 +730,15 @@ if [[ $READ_ONLY -eq 0 && $FINAL_STATUS -eq 0 ]]; then
     PATCH_DESCRIPTION="$PATCH_PATH"
     FILES_CHANGED="$(LC_ALL=C grep -c '^diff --git ' "$PATCH_PATH" || true)"
     if [[ -s "$PATCH_PATH" ]]; then
-      if ! (umask 022; cd "$WORKSPACE" && git apply -p2 --check --binary "$PATCH_PATH") \
+      # --whitespace=nowarn overrides a configured apply.whitespace, which
+      # would otherwise rewrite (fix) or refuse (error) the agent's lines.
+      if ! (umask 022; cd "$WORKSPACE" && git apply -p2 --check --binary --whitespace=nowarn "$PATCH_PATH") \
         > "$STATE_DIR/apply-check.log" 2>&1; then
         echo "error: captured claude patch does not apply cleanly; real worktree was not changed" >&2
         FINAL_STATUS=12
       else
         APPLIED=yes
-        if ! (umask 022; cd "$WORKSPACE" && git apply -p2 --binary "$PATCH_PATH") \
+        if ! (umask 022; cd "$WORKSPACE" && git apply -p2 --binary --whitespace=nowarn "$PATCH_PATH") \
           > "$STATE_DIR/apply.log" 2>&1; then
           echo "error: captured claude patch failed during apply after a successful check" >&2
           FINAL_STATUS=13
