@@ -197,7 +197,7 @@ fi
 IFS=$'\t' read -r CODEX_EXPECTED_ALWAYS CODEX_EXPECTED_MANAGED < "$CODEX_MANIFEST_COUNTS"
 
 codex_expected() { # $1=id
-  LC_ALL=C awk -F '\t' -v wanted="$1" '
+  env LC_ALL=C awk -F '\t' -v wanted="$1" '
     $0 !~ /^#/ && $1 == wanted { print $3; found = 1; exit }
     END { if (!found) exit 1 }
   ' "$CODEX_CASES"
@@ -210,7 +210,7 @@ codex_recorded() { # $1=id
 record_codex_case() { # $1=id $2=actual outcome|skip $3=detail
   local id="$1" actual="$2" detail="$3" expected="" existing=""
   if codex_recorded "$id"; then
-    existing="$(LC_ALL=C grep "^$id"$'\t' "$CODEX_RESULTS" | head -n 1)"
+    existing="$(env LC_ALL=C grep "^$id"$'\t' "$CODEX_RESULTS" | head -n 1)"
     fail "codex case $id produced a duplicate result (existing=$existing new_actual=$actual new_detail=$detail)"
     return
   fi
@@ -264,9 +264,9 @@ record_codex_file_output_case() { # id output dispatch-status label path before 
   local tag seen_id child_outcome child_detail base
   base="target=$label path=$path dispatch_exit=$dispatch_status host_before_sha256=${before:-missing} host_after_sha256=${after:-missing}"
 
-  matches="$(LC_ALL=C grep -E "^CODEX_CASE $id (allow|deny|skip) " "$output" || true)"
-  unique_count="$(printf '%s\n' "$matches" | LC_ALL=C sort -u | awk 'NF { count++ } END { print count + 0 }')"
-  line="$(printf '%s\n' "$matches" | LC_ALL=C sort -u | awk 'NF { print; exit }')"
+  matches="$(env LC_ALL=C grep -E "^CODEX_CASE $id (allow|deny|skip) " "$output" || true)"
+  unique_count="$(printf '%s\n' "$matches" | env LC_ALL=C sort -u | awk 'NF { count++ } END { print count + 0 }')"
+  line="$(printf '%s\n' "$matches" | env LC_ALL=C sort -u | awk 'NF { print; exit }')"
 
   if [[ -n "$before" && -n "$after" && "$before" != "$after" ]]; then
     record_codex_case "$id" allow \
@@ -670,7 +670,7 @@ codex_provenance_diagnostic() {
     terminal_sha256 cli_version adapter_version adapter_sha256 \
     host_side_channels effective_policy_fingerprint; do
     if [[ ! -s "$CODEX_PROVENANCE" ]] ||
-       ! LC_ALL=C grep -q "^$key"$'\t''[^[:space:]]' "$CODEX_PROVENANCE"; then
+       ! env LC_ALL=C grep -q "^$key"$'\t''[^[:space:]]' "$CODEX_PROVENANCE"; then
       missing="${missing:+$missing,}$key"
     fi
   done
@@ -877,7 +877,7 @@ run_codex_backend() {
   # without making the release decision circular.
   if LC_ALL=C grep -q '^RESUME_RELEASE_ENABLED=0$' "$CODEX_DISPATCH"; then
     resume_dispatch="$TMP_ROOT/codex-dispatch-resume-enabled.sh"
-    if [[ "$(LC_ALL=C grep -c '^RESUME_RELEASE_ENABLED=0$' "$CODEX_DISPATCH")" != 1 ]] ||
+    if [[ "$(env LC_ALL=C grep -c '^RESUME_RELEASE_ENABLED=0$' "$CODEX_DISPATCH")" != 1 ]] ||
        ! sed 's/^RESUME_RELEASE_ENABLED=0$/RESUME_RELEASE_ENABLED=1/' \
          "$CODEX_DISPATCH" > "$resume_dispatch"; then
       fail "codex recalibration resume adapter is prepared"
@@ -1132,7 +1132,7 @@ EOF
       [[ -n "$id" ]] || continue
       record_codex_case "$id" "$actual" "$detail"
     done < "$probe_results"
-    approval_line="$(LC_ALL=C grep '^approval:' "$output" | head -n 1 || true)"
+    approval_line="$(env LC_ALL=C grep '^approval:' "$output" | head -n 1 || true)"
     if [[ "$approval_line" == "approval: never" ]]; then
       record_codex_case config-approval-pin pass "banner resolved approval never"
     elif [[ -z "$approval_line" ]]; then

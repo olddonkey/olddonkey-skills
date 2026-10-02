@@ -728,7 +728,7 @@ if [[ $READ_ONLY -eq 0 && $FINAL_STATUS -eq 0 ]]; then
   else
     chmod 600 "$PATCH_PATH"
     PATCH_DESCRIPTION="$PATCH_PATH"
-    FILES_CHANGED="$(LC_ALL=C grep -c '^diff --git ' "$PATCH_PATH" || true)"
+    FILES_CHANGED="$(env LC_ALL=C grep -c '^diff --git ' "$PATCH_PATH" || true)"
     if [[ -s "$PATCH_PATH" ]]; then
       # --whitespace=nowarn overrides a configured apply.whitespace, which
       # would otherwise rewrite (fix) or refuse (error) the agent's lines.

@@ -671,7 +671,7 @@ expect_output "FAILED t.py::test_x [AssertionError]" \
 # sed with an empty parse view, hiding a masked failure — parsing must be
 # bytewise regardless of the ambient locale. Force a UTF-8 locale when the
 # host offers one so the regression actually exercises that environment.
-UTF8_LOCALE="$(locale -a 2>/dev/null | LC_ALL=C grep -i -m1 -E '^(en_US|C)\.utf-?8$' || true)"
+UTF8_LOCALE="$(locale -a 2>/dev/null | env LC_ALL=C grep -i -m1 -E '^(en_US|C)\.utf-?8$' || true)"
 [[ -n "$UTF8_LOCALE" ]] || UTF8_LOCALE=C
 run_case gate-invalid-byte-masked env LC_ALL="$UTF8_LOCALE" bash "$GATE" \
   --log "$TMP_ROOT/gate-invalid-byte-masked.log" -- \

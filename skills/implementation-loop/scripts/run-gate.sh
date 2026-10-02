@@ -86,6 +86,10 @@ fi
 # empty parse view would then hide a failed summary behind a masked exit
 # code. Bytewise processing is the only locale that can't be poisoned by
 # log content. strip_ansi failures are checked by callers and fail closed.
+#
+# A parser that runs inside a command substitution uses `env LC_ALL=C`, not a
+# bare `LC_ALL=C` prefix: after a bare prefix the forked shell restores its
+# own locale, and Homebrew bash on macOS can segfault there (status 139).
 PARSE_LOG="$(mktemp -t gate-parse.XXXXXX)" || exit 2
 BASELINE_PARSE="$(mktemp -t gate-parse.XXXXXX)" || exit 2
 trap 'rm -f "$PARSE_LOG" "$BASELINE_PARSE"' EXIT
@@ -386,7 +390,7 @@ RUNNER_VERDICT_AWK='
 # while the parent FAILED line stays constant, so SUBFAILED lines carry the
 # real identity and must be fingerprinted too.
 extract_failures() { # $1=log path
-  LC_ALL=C awk '
+  env LC_ALL=C awk '
     /^FAIL: / || /^ERROR: / { print; next }
     /^FAILED \(/ || /^ERROR \(/ { next }
     /^FAILED / || /^ERROR / || /^SUBFAILED/ {
@@ -496,7 +500,7 @@ if [[ -n "$BASELINE" && -f "$BASELINE" ]]; then
     echo "error: could not normalize baseline for parsing: $BASELINE" >&2
     exit 2
   fi
-  BASELINE_FAILURES_AT_START="$(extract_failures "$BASELINE_PARSE" | LC_ALL=C sort -u || true)"
+  BASELINE_FAILURES_AT_START="$(extract_failures "$BASELINE_PARSE" | env LC_ALL=C sort -u || true)"
 fi
 
 START=$SECONDS
@@ -560,9 +564,9 @@ fi
 NEW_FAILURES=""
 if [[ -n "$BASELINE" && $BASELINE_EXISTS_AT_START -eq 1 ]]; then
   echo "--- failures not present in baseline ($BASELINE) ---"
-  NEW_FAILURES="$(LC_ALL=C comm -13 \
-    <(printf '%s\n' "$BASELINE_FAILURES_AT_START" | LC_ALL=C sort -u) \
-    <(printf '%s\n' "$CURRENT_FAILURES"           | LC_ALL=C sort -u) \
+  NEW_FAILURES="$(env LC_ALL=C comm -13 \
+    <(printf '%s\n' "$BASELINE_FAILURES_AT_START" | env LC_ALL=C sort -u) \
+    <(printf '%s\n' "$CURRENT_FAILURES"           | env LC_ALL=C sort -u) \
     || true)"
   [[ -z "$NEW_FAILURES" ]] || printf '%s\n' "$NEW_FAILURES"
 elif [[ -n "$BASELINE" ]]; then

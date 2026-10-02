@@ -85,7 +85,7 @@ worktree_manifest() { # $1=repo; main .git directory is administrative state
   local repo="$1"
   (
     cd "$repo" || exit 1
-    LC_ALL=C find . -path './.git' -prune -o -print | LC_ALL=C sort |
+    env LC_ALL=C find . -path './.git' -prune -o -print | env LC_ALL=C sort |
       while IFS= read -r path; do
         if [[ -L "$path" ]]; then
           printf 'link\t%s\t%s\n' "$path" "$(readlink "$path")" || exit 1

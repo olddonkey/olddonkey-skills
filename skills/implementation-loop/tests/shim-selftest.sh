@@ -48,7 +48,7 @@ PY
 
 expect_deprecation_lines() { # $1=stderr $2=count $3=description
   local count
-  count="$(LC_ALL=C grep -c '^deprecated: ' "$1" || true)"
+  count="$(env LC_ALL=C grep -c '^deprecated: ' "$1" || true)"
   if [[ "$count" == "$2" ]] && LC_ALL=C grep -q 'release 0.5.0' "$1"; then
     pass "$3"
   else
@@ -106,11 +106,11 @@ expect_deprecation_lines "$INTEGRATION_STDERR" 1 "integration shim emits one dep
 
 SHIM_TARGET_LOG="$INTEGRATION_LOG" "$INTEGRATION_ROOT/scripts/integration-test.sh" 2> "$INTEGRATION_STDERR"
 expect_args "$INTEGRATION_LOG" "bare legacy integration call selects only grok and cursor" --backend grok --backend cursor
-if [[ "$(LC_ALL=C grep -c '^compatibility: translated ' "$INTEGRATION_STDERR" || true)" == 1 ]]; then pass "bare integration translation emits one compatibility line"; else fail "bare integration translation emits one compatibility line"; fi
+if [[ "$(env LC_ALL=C grep -c '^compatibility: translated ' "$INTEGRATION_STDERR" || true)" == 1 ]]; then pass "bare integration translation emits one compatibility line"; else fail "bare integration translation emits one compatibility line"; fi
 
 SHIM_TARGET_LOG="$INTEGRATION_LOG" "$INTEGRATION_ROOT/scripts/integration-test.sh" --backend all --require codex 2> "$INTEGRATION_STDERR"
 expect_args "$INTEGRATION_LOG" "explicit legacy all expands to two repeatable selectors" --backend grok --backend cursor --require codex
-if [[ "$(LC_ALL=C grep -c '^compatibility: translated ' "$INTEGRATION_STDERR" || true)" == 1 ]]; then pass "explicit all translation emits one compatibility line"; else fail "explicit all translation emits one compatibility line"; fi
+if [[ "$(env LC_ALL=C grep -c '^compatibility: translated ' "$INTEGRATION_STDERR" || true)" == 1 ]]; then pass "explicit all translation emits one compatibility line"; else fail "explicit all translation emits one compatibility line"; fi
 
 set +e
 SHIM_TARGET_ACTION=exit SHIM_TARGET_LOG="$INTEGRATION_LOG" "$INTEGRATION_ROOT/scripts/integration-test.sh" --backend grok 2> "$INTEGRATION_STDERR"

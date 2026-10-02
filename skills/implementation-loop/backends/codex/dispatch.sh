@@ -217,7 +217,7 @@ if [[ $TOOL_SCAN_FAILED -eq 1 ]]; then
 fi
 if [[ -n "$EXTERNAL_TOOLS" ]]; then
   EXTERNAL_TOOL_LIST="$(printf '%s\n' "$EXTERNAL_TOOLS" \
-    | LC_ALL=C tr -d '[]' | LC_ALL=C paste -sd, - | LC_ALL=C sed 's/,/, /g')"
+    | env LC_ALL=C tr -d '[]' | env LC_ALL=C paste -sd, - | env LC_ALL=C sed 's/,/, /g')"
   if [[ "$BLOCK_EXTERNAL_TOOLS" == "1" ]]; then
     echo "error: dispatch blocked (CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1) — Codex config enables external tools:" >&2
     echo "        $EXTERNAL_TOOL_LIST" >&2
@@ -230,7 +230,7 @@ fi
 
 top_level_value() { # $1=config path $2=key
   [[ -f "$1" ]] || return 0
-  LC_ALL=C awk -v key="$2" '
+  env LC_ALL=C awk -v key="$2" '
     /^[[:space:]]*\[/ { exit }
     $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
       sub(/^[^=]*=[[:space:]]*/, "")
