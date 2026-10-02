@@ -129,19 +129,48 @@ For each fresh dispatch:
    run state. Parse the calibrated `is_error`, `result`, and `session_id`
    fields. A nonzero process exit, invalid JSON, `is_error: true`, or a
    post-run `.git` entry is a hard failure.
-6. In implement mode, run `git diff --no-index --binary` from `pristine/` to
-   `work/`, normalize its headers to ordinary `a/<relative>` and
-   `b/<relative>` paths, and retain `changes.patch` as the reviewable artifact.
-7. Only on a successful agent result, run `git apply --check --binary` against
-   the real unit worktree. A failed check leaves it untouched and retains both
-   copies for forensics. A passing check is followed by `git apply --binary`.
-8. Clean the copies after success unless `CURSOR_LOOP_KEEP_COPIES=1` was chosen
+6. In implement mode, on a successful agent result, list the paths that exist
+   in `work/` but not in `pristine/`, ask the **real** repository which of them
+   it ignores (`git check-ignore -z --stdin`), and delete those from `work/`.
+   Each one is reported on stderr as `note: ignored path not applied: <path>`
+   (the first 20, then a count) and the summary's `ignored paths dropped:`
+   line carries the total.
+7. Run `git diff --no-index --binary --no-renames --no-ext-diff --no-textconv
+   --no-color` from `pristine/` to `work/` and retain the raw output as
+   `changes.patch`. Nothing rewrites it: its headers keep the copy-root
+   components (`a/pristine/<relative>`, `b/work/<relative>`), and a rename is
+   recorded as a delete plus an add.
+8. Only on a successful agent result, run `git apply -p2 --check --binary`
+   against the real unit worktree. A failed check leaves it untouched and
+   retains both copies for forensics. A passing check is followed by
+   `git apply -p2 --binary`.
+9. Clean the copies after success unless `CURSOR_LOOP_KEEP_COPIES=1` was chosen
    for debugging. Failures retain copies, JSON, stderr, and any forensic patch.
 
 The script runs no `git add`, `commit`, `push`, worktree registration, or other
 Git-state mutation. Applying the captured patch is its only real-worktree
 write. The orchestrator reviews `git status` and `git diff`, then exclusively
 owns commit, gate, and publication.
+
+Limits of the ignored-path filter in step 6:
+
+- It uses the real repository's rules as they stand before the patch applies.
+  A `.gitignore` edit made in the same dispatch does not change what is
+  dropped: a file the agent adds together with a new rule that ignores it is
+  still applied, and a file it adds while removing the rule that ignored it
+  is still dropped.
+- A dropped path is deleted from `work/`, so its content is gone once the
+  copies are cleaned. Only paths absent from `pristine/` are candidates; a
+  tracked file that matches an ignore rule is diffed and applied as usual.
+- `git check-ignore` cannot answer for a path beneath a symlink in the real
+  worktree. When the agent replaces a snapshotted symlink with a directory,
+  the paths beneath it are applied unfiltered and each is reported as `note:
+  ignore rules not checked beyond a real-worktree symlink: <path>`. When the
+  real symlink is itself ignored, the directory the agent created in its
+  place is dropped whole.
+- If the filter itself fails, the dispatch exits 11 and applies nothing.
+- A failed dispatch is not filtered. Its work copy stays whole and its
+  forensic `changes.patch` can include ignored paths.
 
 ## Read-only and iterate
 

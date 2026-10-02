@@ -71,7 +71,7 @@ run):
 5. `bash skills/implementation-loop/backends/grok/selftest.sh` — expect
    `selftest: PASS (276 checks)`.
 6. `bash skills/implementation-loop/backends/cursor/selftest.sh` — expect
-   `selftest: PASS (97 checks)`.
+   `selftest: PASS (142 checks)`.
    `bash skills/implementation-loop/backends/claude/selftest.sh` — expect
    `selftest: PASS (280 checks)`.
 7. `bash skills/implementation-loop/tests/journal-selftest.sh` — expect
