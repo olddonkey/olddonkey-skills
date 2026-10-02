@@ -73,7 +73,7 @@ run):
 6. `bash skills/implementation-loop/backends/cursor/selftest.sh` — expect
    `selftest: PASS (142 checks)`.
    `bash skills/implementation-loop/backends/claude/selftest.sh` — expect
-   `selftest: PASS (280 checks)`.
+   `selftest: PASS (303 checks)`.
 7. `bash skills/implementation-loop/tests/journal-selftest.sh` — expect
    `selftest: PASS (237 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
    — expect `selftest: PASS (103 checks)`; and
