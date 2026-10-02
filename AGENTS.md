@@ -99,6 +99,16 @@ run):
    Cursor copy — expect `selftest: PASS (202 checks)` each. Keep these scripts
    portable across GNU and BSD userlands.
 
+## Shell gotcha: locale prefixes in forked shells
+
+Inside `$(...)`, `( ... )`, `<( ... )`, or a function called from one of them,
+write `env LC_ALL=C cmd`, never a bare `LC_ALL=C cmd` (same for `LANG` and other
+`LC_*`). After a bare prefix the forked shell restores its own locale; with
+Homebrew bash 5.3 on macOS and no `LANG`/`LC_*` in the environment that restore
+can segfault, so the substitution returns 139 and `set -e` ends the script.
+A bare prefix in a script's own main shell is safe. `env` runs external
+commands only, not shell functions or builtins.
+
 ## Manual backend integration gate
 
 `skills/implementation-loop/tests/integration-test.sh` is the manual,

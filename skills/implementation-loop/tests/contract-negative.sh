@@ -164,7 +164,7 @@ for RULE in $RULES; do
   if LC_ALL=C grep -qE "^not ok [0-9]+ - backend=codex rule=$RULE " "$OUTPUT" && \
      ! LC_ALL=C grep '^not ok ' "$OUTPUT" | grep -qv " rule=$RULE " && \
      { [[ "$RULE" != final-message ]] || {
-       [[ "$(LC_ALL=C grep -c '^not ok ' "$OUTPUT")" -eq 1 ]] &&
+       [[ "$(env LC_ALL=C grep -c '^not ok ' "$OUTPUT")" -eq 1 ]] &&
        LC_ALL=C grep -qE '^not ok [0-9]+ - backend=codex rule=final-message manifest final-message bytes equal the scripted message' "$OUTPUT" &&
        LC_ALL=C grep -qE '^ok [0-9]+ - backend=codex rule=final-message journaled final-message dispatch succeeds' "$OUTPUT" &&
        LC_ALL=C grep -qE '^ok [0-9]+ - backend=codex rule=final-message case run has exactly one indexed dispatch' "$OUTPUT" &&

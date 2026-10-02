@@ -156,7 +156,7 @@ validate_overlay_inventory() {
 
   (
     cd "$ROOT"
-    find hosts/cursor -type l -print | LC_ALL=C sort
+    find hosts/cursor -type l -print | env LC_ALL=C sort
   ) > "$WORK_ROOT/overlay.symlinks"
   [[ ! -s "$WORK_ROOT/overlay.symlinks" ]] || {
     sed 's/^/build: symlink input: /' "$WORK_ROOT/overlay.symlinks" >&2
@@ -165,7 +165,7 @@ validate_overlay_inventory() {
 
   (
     cd "$ROOT"
-    find hosts/cursor ! -type d ! -type f ! -type l -print | LC_ALL=C sort
+    find hosts/cursor ! -type d ! -type f ! -type l -print | env LC_ALL=C sort
   ) > "$WORK_ROOT/overlay.other"
   [[ ! -s "$WORK_ROOT/overlay.other" ]] || {
     sed 's/^/build: unsupported input: /' "$WORK_ROOT/overlay.other" >&2
@@ -174,7 +174,7 @@ validate_overlay_inventory() {
 
   (
     cd "$ROOT"
-    find hosts/cursor -type f -print | LC_ALL=C sort
+    find hosts/cursor -type f -print | env LC_ALL=C sort
   ) > "$WORK_ROOT/overlay.actual"
   awk '/^hosts\/cursor\//' "$WORK_ROOT/inputs.declared" \
     > "$WORK_ROOT/overlay.expected"
@@ -187,7 +187,7 @@ validate_overlay_inventory() {
     'hosts/cursor' "$WORK_ROOT/overlay-directories.expected"
   (
     cd "$ROOT"
-    find hosts/cursor -type d ! -path hosts/cursor -print | LC_ALL=C sort
+    find hosts/cursor -type d ! -path hosts/cursor -print | env LC_ALL=C sort
   ) > "$WORK_ROOT/overlay-directories.actual"
   if ! cmp -s "$WORK_ROOT/overlay-directories.expected" \
       "$WORK_ROOT/overlay-directories.actual"; then
@@ -212,7 +212,7 @@ validate_output() { # $1=assembled tree $2=sorted mapping
 
   (
     cd "$tree"
-    find . -type l -print | sed 's#^\./##' | LC_ALL=C sort
+    find . -type l -print | sed 's#^\./##' | env LC_ALL=C sort
   ) > "$WORK_ROOT/output.symlinks"
   [[ ! -s "$WORK_ROOT/output.symlinks" ]] || \
     fail 'generated output contains a symlink'
@@ -220,7 +220,7 @@ validate_output() { # $1=assembled tree $2=sorted mapping
   (
     cd "$tree"
     find . ! -type d ! -type f ! -type l -print | sed 's#^\./##' | \
-      LC_ALL=C sort
+      env LC_ALL=C sort
   ) > "$WORK_ROOT/output.other"
   [[ ! -s "$WORK_ROOT/output.other" ]] || \
     fail 'generated output contains an unsupported entry type'
@@ -228,7 +228,7 @@ validate_output() { # $1=assembled tree $2=sorted mapping
   cut -f1 "$mapping" > "$WORK_ROOT/outputs.expected"
   (
     cd "$tree"
-    find . -type f -print | sed 's#^\./##' | LC_ALL=C sort
+    find . -type f -print | sed 's#^\./##' | env LC_ALL=C sort
   ) > "$WORK_ROOT/outputs.actual"
   if ! cmp -s "$WORK_ROOT/outputs.expected" "$WORK_ROOT/outputs.actual"; then
     diff -u "$WORK_ROOT/outputs.expected" "$WORK_ROOT/outputs.actual" >&2 || true
@@ -239,7 +239,7 @@ validate_output() { # $1=assembled tree $2=sorted mapping
     "$WORK_ROOT/output-directories.expected"
   (
     cd "$tree"
-    find . -type d ! -path . -print | sed 's#^\./##' | LC_ALL=C sort
+    find . -type d ! -path . -print | sed 's#^\./##' | env LC_ALL=C sort
   ) > "$WORK_ROOT/output-directories.actual"
   if ! cmp -s "$WORK_ROOT/output-directories.expected" \
       "$WORK_ROOT/output-directories.actual"; then
@@ -302,7 +302,7 @@ assemble() { # $1=new empty destination $2=sorted mapping
 
   while IFS= read -r directory; do
     chmod 0755 "$directory"
-  done < <(find "$destination" -type d -print | LC_ALL=C sort)
+  done < <(find "$destination" -type d -print | env LC_ALL=C sort)
 
   validate_output "$destination" "$mapping"
 }

@@ -282,7 +282,7 @@ PY
 }
 
 latest_run_state() { # $1=stderr path
-  LC_ALL=C sed -n 's/^run state: //p' "$1" | tail -1
+  env LC_ALL=C sed -n 's/^run state: //p' "$1" | tail -1
 }
 
 BIN_DIR="$TMP_ROOT/bin"
@@ -514,7 +514,7 @@ expect_argv_count "$RESUME_LOG" --json 0 "resume argv omits --json"
 expect_argv_no_forbidden "$RESUME_LOG" "resume constructed argv contains no policy broadener"
 expect_first_line "$RESUME_STDIN" devnull "resume codex exec stdin is /dev/null"
 
-if [[ "$(LC_ALL=C grep -c '^def build_codex_argv(' "$DISPATCH")" == "1" ]] &&
+if [[ "$(env LC_ALL=C grep -c '^def build_codex_argv(' "$DISPATCH")" == "1" ]] &&
    LC_ALL=C grep -q 'Build both calibrated forms from one mode-parameterized function' "$DISPATCH"; then
   pass "fresh and resume argv are produced by one mode-parameterized function"
 else
@@ -820,8 +820,8 @@ if [[ $SYMLINKED_STATUS -eq 5 && $SYMLINKED_REVERSED_STATUS -eq 5 ]]; then
 else
   fail "symlinked state record refuses dispatch in both entry-creation orders"
 fi
-SYMLINKED_REASON="$(LC_ALL=C sed -n 's#^\(error: unexpected entry in dispatch state\): .*#\1#p' "$SYMLINKED_STDERR")"
-SYMLINKED_REVERSED_REASON="$(LC_ALL=C sed -n 's#^\(error: unexpected entry in dispatch state\): .*#\1#p' "$SYMLINKED_REVERSED_STDERR")"
+SYMLINKED_REASON="$(env LC_ALL=C sed -n 's#^\(error: unexpected entry in dispatch state\): .*#\1#p' "$SYMLINKED_STDERR")"
+SYMLINKED_REVERSED_REASON="$(env LC_ALL=C sed -n 's#^\(error: unexpected entry in dispatch state\): .*#\1#p' "$SYMLINKED_REVERSED_STDERR")"
 if [[ "$SYMLINKED_REASON" == "error: unexpected entry in dispatch state" &&
       "$SYMLINKED_REVERSED_REASON" == "$SYMLINKED_REASON" ]]; then
   pass "symlinked record refusal reason is independent of entry-creation order"
