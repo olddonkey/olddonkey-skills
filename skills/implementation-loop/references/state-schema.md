@@ -24,7 +24,7 @@ The five lifecycle classes are moments on the production path:
 Authority is `scripts/loop-journal`. This section is a reader index, not a
 second store spec.
 
-**Readers.** `scripts/loop-journal read-run` and `find-run` are the exact
+**Readers.** `scripts/loop-journal read-context`, `read-run`, and `find-run` are the exact
 segment read interface described below. `scripts/loop-index` is the derived
 reader of the store. The following readers consume its JSON document and
 open no segment, cache, context, or repository file themselves:
@@ -72,9 +72,18 @@ a newline-terminated invalid line mid-file or at the tail is mid-file
 corruption. The index uses this classification and never repairs; a
 discarded torn tail makes that run's `counts_complete` false.
 
-**Exact read interface.** Both commands take `--workspace`, hold `meta.lock`
+**Exact read interface.** These commands take `--workspace`, hold `meta.lock`
 only to snapshot bytes, and never write, repair, rebuild, or create a store.
 
+- `loop-journal read-context` prints `{"schema":1,"state":S,"run":R}`.
+  `S` is `none` for no store or context, `active` for a live context,
+  `stale` for a context naming an ended or missing run, and `malformed` for
+  malformed or wrong-workspace context. `R` is the context's run id when
+  readable, otherwise null. It skips the lock when there is no store or the
+  store has no `meta.lock`; a missing lock does not hide a present context.
+  `malformed` is stricter than `begin-run`, which would overwrite a malformed
+  context. Exits: 0 when printed, 2 for usage, 3 for a busy lock, 5 for a
+  context permission or symlink violation.
 - `loop-journal read-run --run ID` prints one JSON object with `schema: 1`,
   `run`, `ended`, `end_status`, `tail`, `complete`, and `events`. The events are
   the parsed segment objects in order, including a valid unterminated last

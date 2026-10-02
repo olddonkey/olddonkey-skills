@@ -9,6 +9,7 @@
 #   loop-journal end-run --status STATUS [--workspace DIR]
 #   loop-journal recover [--acknowledge ID]... [--workspace DIR]
 #   loop-journal read-run --run ID [--workspace DIR]
+#   loop-journal read-context [--workspace DIR]
 #   loop-journal find-run --plan TEXT [--workspace DIR]
 #
 # Store: $HOME/.config/olddonkey-loop/journal/<sha256(canonical workspace)>/
@@ -1348,6 +1349,28 @@ def cmd_read_run(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_read_context(args: argparse.Namespace) -> int:
+    canonical = resolve_workspace(args.workspace)
+    paths = store_paths(canonical)
+    if not os.path.lexists(paths["root"]):
+        print(dump_json({"schema": 1, "state": "none", "run": None}))
+        return EXIT_OK
+    if os.path.lexists(paths["lock"]):
+        with Lock(paths):
+            record, reason = load_context(paths, canonical)
+    else:
+        record, reason = load_context(paths, canonical)
+    state = {
+        None: "active",
+        "context missing": "none",
+        "context stale": "stale",
+        "context malformed": "malformed",
+        "wrong-workspace": "malformed",
+    }[reason]
+    print(dump_json({"schema": 1, "state": state, "run": record["run"] if record else None}))
+    return EXIT_OK
+
+
 def cmd_find_run(args: argparse.Namespace) -> int:
     if not args.plan or contains_newline(args.plan):
         fail("plan must be non-empty and contain no newline", EXIT_USAGE)
@@ -1379,6 +1402,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="loop-journal",
         description=(
             "Locked append-only loop journal. JSONL segments are authoritative. "
+            "read-context reports none, active, stale, or malformed without writing. "
             "LOOP_JOURNAL_GC_CAP_BYTES is a test-only gc cap override (default 52428800). "
             "LOOP_JOURNAL_LOCK_TIMEOUT_SEC is a test-only lock timeout override (default 5). "
             "Exit codes: 2 usage/missing read-run store or segment, 3 lock busy, "
@@ -1441,6 +1465,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_workspace(read_run)
     read_run.add_argument("--run", required=True)
     read_run.set_defaults(func=cmd_read_run)
+
+    read_context = sub.add_parser("read-context", help="read the active context without writing")
+    add_workspace(read_context)
+    read_context.set_defaults(func=cmd_read_context)
 
     find_run = sub.add_parser("find-run", help="find run.begin events by exact plan without writing")
     add_workspace(find_run)

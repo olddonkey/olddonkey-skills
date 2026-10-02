@@ -1,0 +1,1561 @@
+#!/usr/bin/env bash
+# Foreground, per-workspace coordinator. Python 3.11 standard library only.
+set -euo pipefail
+umask 077
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+exec python3 - "$SELF_DIR" "$@" <<'PY'
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import signal
+from pathlib import Path
+import re
+import secrets
+import shutil
+import stat
+import subprocess
+import sys
+import time
+import traceback
+from datetime import datetime, timezone
+
+SCRIPT = Path(sys.argv[1])
+ARGS = sys.argv[2:]
+WS = Path.cwd().resolve()
+KEY = hashlib.sha256(str(WS).encode()).hexdigest()
+HOME_VALUE = os.environ.get('HOME')
+if not HOME_VALUE or not os.path.isabs(HOME_VALUE) or not os.path.isdir(HOME_VALUE):
+    print('error: HOME must be an absolute directory', file=sys.stderr)
+    raise SystemExit(5)
+HOME = Path(HOME_VALUE)
+CDIR = HOME / '.config' / 'olddonkey-loop' / 'coordinator' / KEY
+JOURNAL_DIR = HOME / '.config' / 'olddonkey-loop' / 'journal' / KEY
+UNIT_RE = re.compile(r'[a-z][a-z0-9-]{0,39}\Z')
+AGENT_RE = re.compile(r'[a-z][a-z0-9-]{0,31}\Z')
+HEX64 = re.compile(r'[0-9a-f]{64}\Z')
+TERMINAL = {'checked', 'parked', 'blocked', 'abandoned', 'released'}
+UNREADABLE = object()
+HEADINGS = ['## Why', '## Change', '## Tests', '## Do not touch', '## Environment']
+DEFAULT_CAPS = {'rounds': 3, 'prompt_bytes': 120000, 'ignored_files': 5000, 'dispatch_seconds': 3600}
+REFS = ['coordinator-environment.md', 'coordinator-spec-prompt.md', 'coordinator-review-prompt.md']
+
+class Stop(Exception):
+    def __init__(self, code: int, message: str):
+        self.code, self.message = code, message
+
+class Outcome(Exception):
+    def __init__(self, kind: str, reason: str):
+        self.kind, self.reason = kind, reason
+
+
+def fail(code: int, message: str):
+    raise Stop(code, message)
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+def digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def json_bytes(obj: object) -> bytes:
+    return (json.dumps(obj, ensure_ascii=True, sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8')
+
+
+def atomic(path: Path, data: bytes):
+    try:
+        parts = path.parent.relative_to(CDIR).parts
+    except ValueError:
+        fail(5, f'private write escaped coordinator directory: {path}')
+    current = CDIR
+    for part in parts:
+        current = current / part
+        if not current.exists() and not current.is_symlink():
+            current.mkdir(mode=0o700)
+        info = current.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            fail(5, f'unsafe private directory: {current}')
+    temporary = path.with_name('.tmp-' + secrets.token_hex(12))
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def private_file(path: Path, required=True) -> bytes | None:
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    except FileNotFoundError:
+        if not required:
+            return None
+        fail(5, f'missing file: {path}')
+    except OSError as error:
+        fail(5, f'unsafe file: {path}: {error}')
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1:
+            fail(5, f'unsafe file: {path}; require owned regular 0600 file')
+        return stream.read()
+
+
+def validate_cdir():
+    if not CDIR.exists() and not CDIR.is_symlink():
+        fail(5, f'coordinator directory missing: {CDIR}; run loop-coordinator init')
+    for path in (HOME / '.config' / 'olddonkey-loop' / 'coordinator', CDIR):
+        try:
+            info = path.lstat()
+        except OSError:
+            fail(5, f'coordinator directory missing: {path}; run loop-coordinator init')
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            fail(5, f'unsafe coordinator directory: {path}; require owned real 0700 directory')
+
+
+def read_json(path: Path, code=5):
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, ValueError) as error:
+        fail(code, f'cannot read {path}: {error}')
+
+
+def write_state(state: dict):
+    state['updated_at'] = now()
+    atomic(CDIR / 'units' / state['unit'] / 'state.json', json_bytes(state))
+
+
+def unit_dir(unit: str) -> Path:
+    return CDIR / 'units' / unit
+
+
+def state_of(unit: str) -> dict | None:
+    path = unit_dir(unit) / 'state.json'
+    if not os.path.lexists(path):
+        return None
+    try:
+        obj = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, ValueError):
+        return UNREADABLE
+    if (not isinstance(obj, dict) or obj.get('unit') != unit or obj.get('schema') != 1 or
+        not isinstance(obj.get('step'), dict) or obj['step'].get('phase') not in ('begun', 'finished') or
+        not isinstance(obj['step'].get('name'), str)):
+        return UNREADABLE
+    return obj
+
+
+def state_kind(state: dict) -> str:
+    return state.get('state', '').split('(', 1)[0]
+
+
+def make_state(unit: str, judge: str | None, implementer: str | None, branch: str | None) -> dict:
+    timestamp = now()
+    return {'schema': 1, 'unit': unit, 'state': 'running', 'reason': None,
+            'run': None, 'attempt_token': secrets.token_hex(16), 'ambiguous_before': [],
+            'base_branch': None, 'base_sha': None, 'branch': branch, 'seq': 0,
+            'step': {'name': 'begin', 'phase': 'begun', 'target': None},
+            'last_dispatch': None, 'spec': {'digest': None, 'approved': False, 'approved_at': None},
+            'judge': judge, 'implementer': implementer, 'created_at': timestamp, 'updated_at': timestamp}
+
+
+def begun(state: dict, name: str, target: str | None = None):
+    state['state'] = 'running'
+    state['step'] = {'name': name, 'phase': 'begun', 'target': target}
+    write_state(state)
+
+
+def finished(state: dict):
+    state['step']['phase'] = 'finished'
+    write_state(state)
+
+
+def namespaces() -> dict[str, str]:
+    rows = {}
+    try:
+        lines = (SCRIPT / '../backends/backends.tsv').resolve().read_text().splitlines()
+        if lines[0] != '#schema=2':
+            raise ValueError('backend registry schema')
+        for line in lines[1:]:
+            cols = line.split('\t')
+            if len(cols) != 8:
+                raise ValueError('backend registry row')
+            rows[cols[0]] = (cols[2], cols[7])
+    except (OSError, ValueError, IndexError) as error:
+        fail(5, f'backend registry unavailable: {error}')
+    return rows
+
+
+REGISTRY = None
+
+
+def registry():
+    global REGISTRY
+    if REGISTRY is None:
+        REGISTRY = namespaces()
+    return REGISTRY
+
+
+def child_env(unit: str | None = None, round_n: int | None = None) -> dict:
+    prefixes = [item[0] for item in registry().values()]
+    git_redirects = {'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE',
+                     'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+                     'GIT_COMMON_DIR', 'GIT_NAMESPACE'}
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith('LOOP_') and key not in git_redirects and
+           (key == 'CODEX_LOOP_BLOCK_EXTERNAL_TOOLS' or
+                                    not any(key.startswith(prefix) for prefix in prefixes))}
+    env['GIT_OPTIONAL_LOCKS'] = '0'
+    if unit is not None:
+        env['LOOP_UNIT'] = unit
+    if round_n is not None:
+        env['LOOP_ROUND'] = str(round_n)
+    return env
+
+
+def call(argv: list[str | Path], unit: str | None = None, round_n: int | None = None,
+         timeout: float | None = None) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run([str(x) for x in argv], cwd=WS, env=child_env(unit, round_n),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return subprocess.CompletedProcess(argv, 127, b'', str(error).encode())
+
+
+def call_retry(argv: list[str | Path], unit: str | None = None, round_n: int | None = None) -> subprocess.CompletedProcess:
+    deadline = time.monotonic() + 10
+    while True:
+        result = call(argv, unit, round_n)
+        if result.returncode != 3 or time.monotonic() >= deadline:
+            return result
+        time.sleep(0.1)
+
+
+def error_text(result) -> str:
+    return result.stderr.decode('utf-8', errors='replace').strip() or result.stdout.decode('utf-8', errors='replace').strip()
+
+
+def git(*args) -> subprocess.CompletedProcess:
+    return call(['git', *args])
+
+
+def git_ok(*args) -> bytes:
+    result = git(*args)
+    if result.returncode:
+        raise Outcome('blocked', 'git-' + args[0])
+    return result.stdout
+
+
+def require_root():
+    result = git('rev-parse', '--show-toplevel')
+    if result.returncode or result.stdout.decode('utf-8', 'replace').strip() != str(WS):
+        fail(3, f'run from the git worktree root: {WS}')
+
+
+def lock():
+    path = CDIR / 'coordinator.lock'
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    except OSError as error:
+        fail(5, f'unsafe lock: {path}: {error}')
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1:
+        os.close(fd)
+        fail(5, f'unsafe lock: {path}; require owned regular 0600 file')
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        fail(3, 'coordinator lock busy')
+    return fd
+
+
+def release_lock(fd: int):
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+
+def config() -> dict:
+    raw = private_file(CDIR / 'config.json')
+    try:
+        obj = json.loads(raw)
+    except (ValueError, UnicodeError) as error:
+        fail(5, f'invalid config: {error}')
+    if not isinstance(obj, dict) or not {'schema', 'base_branch', 'remote', 'agents'} <= obj.keys() or set(obj) - {'schema','base_branch','remote','agents','caps','gate'} or obj['schema'] != 1:
+        fail(5, 'invalid config keys or schema')
+    for key in ('base_branch', 'remote'):
+        if not token(obj[key]):
+            fail(5, f'invalid {key}')
+    agents = obj['agents']
+    if not isinstance(agents, dict) or not agents:
+        fail(5, 'agents must be a nonempty object')
+    for name, agent in agents.items():
+        if not isinstance(name, str) or not AGENT_RE.fullmatch(name) or not isinstance(agent, dict) or set(agent) - {'backend','model','effort'} or not {'backend','model'} <= set(agent):
+            fail(5, f'invalid agent: {name}')
+        backend, model = agent['backend'], agent['model']
+        if not isinstance(backend, str) or backend not in registry() or not token(model):
+            fail(5, f'invalid backend/model for {name}')
+        if 'effort' in agent:
+            effort = agent['effort']
+            if not token(effort) or (backend == 'claude' and effort not in {'low','medium','high','xhigh','max'}) or (backend == 'cursor' and (effort not in {'low','medium','high','xhigh'} or not (model.endswith('-'+effort) or model.endswith('-'+effort+'-fast')))):
+                fail(5, f'invalid effort for {name}')
+    caps = obj.get('caps', {})
+    if not isinstance(caps, dict) or set(caps) - set(DEFAULT_CAPS):
+        fail(5, 'invalid caps')
+    for key, value in DEFAULT_CAPS.items():
+        caps.setdefault(key, value)
+    for key, low, high in [('rounds',1,10),('prompt_bytes',1000,120000),('ignored_files',0,100000),('dispatch_seconds',1,14400)]:
+        if type(caps[key]) is not int or not low <= caps[key] <= high:
+            fail(5, f'invalid caps.{key}')
+    gate = obj.get('gate')
+    if gate is not None:
+        if not isinstance(gate, dict) or set(gate) != {'argv','mode','runner_unsupported'} or not isinstance(gate['argv'], list) or not gate['argv'] or not all(isinstance(x, str) and x for x in gate['argv']) or not isinstance(gate['mode'], str) or gate['mode'] not in {'strict','passthrough'} or type(gate['runner_unsupported']) is not bool:
+            fail(5, 'invalid gate shape')
+    obj['caps'] = caps
+    return obj
+
+
+def token(value) -> bool:
+    if not isinstance(value, str) or not value or value.startswith('-') or re.search(r'\s', value):
+        return False
+    try:
+        value.encode('utf-8')
+    except UnicodeError:
+        return False
+    return True
+
+
+def references() -> dict:
+    result = {}
+    for name in REFS:
+        path = (SCRIPT / '../references' / name).resolve()
+        try:
+            raw = path.read_text(encoding='utf-8')
+            result[name] = raw.split('\n---\n', 1)[1]
+        except (OSError, UnicodeError, IndexError) as error:
+            fail(5, f'unreadable reference {path}: {error}')
+    return result
+
+
+def calibration() -> dict:
+    result = call([SCRIPT / 'loop-calibration', 'show', '--json'])
+    if result.returncode:
+        fail(5, f'calibration show failed: {error_text(result)}')
+    try:
+        obj = json.loads(result.stdout)
+        if obj['store'] == 'rejected':
+            fail(5, 'calibration store rejected')
+        _ = obj['dials']['depth']['value']
+        return obj
+    except (ValueError, KeyError, TypeError):
+        fail(5, 'invalid calibration document')
+
+
+def outside_file(raw: str, label: str) -> bytes:
+    lexical = Path(os.path.abspath(raw))
+    path = lexical.resolve()
+    if lexical == WS or WS in lexical.parents or path == WS or WS in path.parents:
+        fail(2, f'{label} must be outside workspace')
+    try:
+        if not path.is_file():
+            raise OSError('not a file')
+        return path.read_bytes()
+    except OSError as error:
+        fail(2, f'{label} unreadable: {error}')
+
+
+def unit_file(raw: str) -> dict:
+    data = outside_file(raw, 'unit file')
+    try:
+        obj = json.loads(data.decode('utf-8'))
+    except (ValueError, UnicodeError) as error:
+        fail(2, f'unit file invalid: {error}')
+    if not isinstance(obj, dict) or set(obj) != {'id','title','intent','implementer','judge'}:
+        fail(2, 'unit file keys invalid')
+    if not isinstance(obj['id'], str) or not UNIT_RE.fullmatch(obj['id']):
+        fail(2, 'unit id invalid')
+    if not isinstance(obj['title'], str) or not obj['title'] or len(obj['title']) > 200 or '\n' in obj['title'] or '\r' in obj['title']:
+        fail(2, 'unit title invalid')
+    if not isinstance(obj['intent'], str):
+        fail(2, 'unit intent invalid')
+    try:
+        obj['title'].encode('utf-8')
+        intent_size = len(obj['intent'].encode('utf-8'))
+    except UnicodeError:
+        fail(2, 'unit text is not valid UTF-8')
+    if intent_size > 20000:
+        fail(2, 'unit intent invalid')
+    if not isinstance(obj['judge'], str) or not isinstance(obj['implementer'], str):
+        fail(2, 'unit agents invalid')
+    return obj
+
+
+def journal(*args) -> subprocess.CompletedProcess:
+    return call_retry([SCRIPT / 'loop-journal', *args])
+
+
+def context() -> dict:
+    result = journal('read-context')
+    if result.returncode:
+        fail(3 if result.returncode == 3 else 5, f'read-context: {error_text(result)}')
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        fail(5, 'invalid read-context output')
+
+
+def segment_path(run: str) -> str:
+    return str(JOURNAL_DIR / 'runs' / (run + '.jsonl'))
+
+
+def quarantine(state: dict | None, reason: str, message: str, runs: list[str] | None = None):
+    run_list = runs if runs is not None else ([state['run']] if state and state.get('run') else [])
+    marker = {'schema': 1, 'id': secrets.token_hex(4), 'runs': run_list,
+              'unit': state['unit'] if state else None, 'reason': reason,
+              'message': message.splitlines()[0] if message else reason,
+              'segments': [segment_path(x) for x in run_list], 'since': now()}
+    atomic(CDIR / 'quarantine.json', json_bytes(marker))
+    if state:
+        state['state'], state['reason'] = 'quarantined', reason
+        write_state(state)
+    fail(4, marker['message'] + ('; segments: ' + ', '.join(marker['segments']) if marker['segments'] else ''))
+
+
+def read_run(state: dict, allow_incomplete=False) -> dict:
+    run = state.get('run')
+    if not run:
+        quarantine(state, 'run-missing', 'unit has no run id')
+    incomplete = 0
+    while True:
+        result = journal('read-run', '--run', run)
+        if result.returncode == 3:
+            fail(3, 'journal lock busy')
+        if result.returncode == 5:
+            fail(5, f'read-run: {error_text(result)}')
+        if result.returncode in (4, 6, 2):
+            quarantine(state, 'journal-unreadable', error_text(result))
+        if result.returncode:
+            fail(5, f'read-run: {error_text(result)}')
+        try:
+            obj = json.loads(result.stdout)
+        except ValueError:
+            quarantine(state, 'journal-unreadable', 'read-run returned invalid JSON')
+        if obj.get('complete') is True:
+            return obj
+        incomplete += 1
+        if incomplete == 2:
+            if allow_incomplete:
+                return obj
+            unknown(state, 'journal-tail')
+        time.sleep(0.1)
+
+
+def read_run_detached(run: str) -> dict:
+    for attempt in range(2):
+        result = journal('read-run', '--run', run)
+        if result.returncode == 3:
+            fail(3, 'journal lock busy')
+        if result.returncode == 5:
+            fail(5, f'read-run: {error_text(result)}')
+        if result.returncode in (2, 4, 6):
+            quarantine(None, 'journal-unreadable', error_text(result), [run])
+        if result.returncode:
+            fail(5, f'read-run: {error_text(result)}')
+        try:
+            doc = json.loads(result.stdout)
+        except ValueError:
+            quarantine(None, 'journal-unreadable', 'read-run returned invalid JSON', [run])
+        if doc.get('complete') is True or attempt == 1:
+            return doc
+        time.sleep(0.1)
+    raise AssertionError('unreachable')
+
+
+def unknown(state: dict, reason: str):
+    state['state'], state['reason'] = 'unknown-outcome', reason
+    write_state(state)
+    fail(9, f'unknown-outcome({reason}) for {state["unit"]}; use abandon --unit {state["unit"]}')
+
+
+def find_run(token_value: str, state: dict | None = None) -> dict:
+    result = journal('find-run', '--plan', 'coordinator:' + token_value)
+    if result.returncode:
+        if result.returncode in (4, 6) and state:
+            quarantine(state, 'journal-unreadable', error_text(result))
+        fail(3 if result.returncode == 3 else 5, f'find-run: {error_text(result)}')
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        fail(5, 'find-run returned invalid JSON')
+
+
+def new_events(state: dict, doc: dict) -> list[dict]:
+    return [x for x in doc['events'] if x['seq'] > state['seq'] and x['event'] != 'journal.repaired']
+
+
+def confirm_write(state: dict, event_name: str, fields: dict):
+    doc = read_run(state)
+    events = new_events(state, doc)
+    if len(events) != 1 or events[0]['event'] != event_name or any(
+        type(events[0].get(key)) is not type(value) or events[0].get(key) != value
+        for key, value in fields.items()
+    ):
+        state['seq'] = max((x['seq'] for x in doc['events']), default=state['seq'])
+        write_state(state)
+        raise Outcome('blocked', 'journal-write')
+    state['seq'] = max(x['seq'] for x in doc['events'])
+    write_state(state)
+
+
+def run_write(state: dict, step_name: str, command: list[str], event_name: str, fields: dict, terminal=False, target=None):
+    begun(state, step_name, target if terminal else None)
+    result = call_retry([SCRIPT / 'loop-run', *command], state['unit'])
+    if result.returncode:
+        if result.returncode == 3:
+            fail(3, f'{step_name}: journal lock busy')
+        if terminal:
+            quarantine(state, 'terminal-write', f'{step_name}: {error_text(result)}')
+        raise Outcome('blocked', step_name)
+    try:
+        confirm_write(state, event_name, fields)
+    except Outcome:
+        if terminal:
+            quarantine(state, 'terminal-write', f'{step_name}: missing or conflicting journal event')
+        raise
+    if not (terminal and step_name == 'end'):
+        finished(state)
+    return result
+
+
+def begin_run(state: dict):
+    state['ambiguous_before'] = find_run(state['attempt_token'])['ambiguous']
+    write_state(state)
+    result = call_retry([SCRIPT / 'loop-run', 'begin', '--plan', 'coordinator:' + state['attempt_token']], state['unit'])
+    if result.returncode:
+        if result.returncode == 3:
+            fail(3, 'begin: journal lock busy')
+        raise Outcome('blocked', 'begin')
+    match = re.search(rb'^run=([^\n]+)$', result.stdout, re.M)
+    if not match:
+        raise Outcome('blocked', 'begin')
+    state['run'] = match.group(1).decode('ascii')
+    write_state(state)
+    confirm_write(state, 'run.begin', {'plan': 'coordinator:' + state['attempt_token']})
+    finished(state)
+
+
+def active_precondition():
+    current = context()
+    if current['state'] not in ('none', 'stale'):
+        fail(3, f'journal context is {current["state"]}')
+
+
+def reconcile() -> list[dict]:
+    unknowns = []
+    root = CDIR / 'units'
+    known_runs = set()
+    unreadable_units = []
+    if root.exists():
+        for path in sorted(root.iterdir()):
+            if not path.is_dir() or not UNIT_RE.fullmatch(path.name):
+                continue
+            state = state_of(path.name)
+            if state is None:
+                continue
+            if state is UNREADABLE:
+                entry = {'unit': path.name, 'run': None, 'reason': 'state-unreadable', 'state': 'unknown-outcome'}
+                unknowns.append(entry)
+                unreadable_units.append(entry)
+                continue
+            if state.get('run'):
+                known_runs.add(state['run'])
+            if state_kind(state) in TERMINAL or state_kind(state) == 'quarantined':
+                continue
+            if state['step']['phase'] == 'begun' and state['step']['name'] == 'begin' and not state.get('run'):
+                found = find_run(state['attempt_token'], state)
+                fresh = set(found['ambiguous']) - set(state['ambiguous_before'])
+                matches = found['runs']
+                if not matches and not fresh:
+                    shutil.rmtree(path)
+                    continue
+                current = context()
+                if len(matches) != 1 or fresh or current.get('state') != 'active' or current.get('run') != matches[0]:
+                    quarantine(state, 'orphan-run', 'begin left a run without matching active context', matches + sorted(fresh))
+                state['run'] = matches[0]
+                known_runs.add(matches[0])
+                write_state(state)
+            doc = read_run(state, allow_incomplete=True)
+            if not doc.get('complete'):
+                state['state'], state['reason'] = 'unknown-outcome', 'journal-tail'
+                write_state(state)
+                unknowns.append(state)
+                continue
+            step = state['step']
+            if doc['ended'] and state_kind(state) != 'unknown-outcome' and step['phase'] == 'begun' and step.get('target'):
+                target = step['target']
+                if target in ('parked', 'blocked', 'abandoned') and state.get('base_sha') and state.get('base_branch'):
+                    cleanup_step(state, target)
+                else:
+                    state['state'] = target
+                    finished(state)
+                continue
+            if doc['ended']:
+                state['reason'] = 'run-ended-externally'
+                if state.get('base_sha') and state.get('base_branch'):
+                    cleanup_step(state, 'abandoned')
+                else:
+                    state['state'] = 'abandoned'
+                    finished(state)
+                continue
+            current = context()
+            if current.get('state') != 'active' or current.get('run') != state['run']:
+                quarantine(state, 'context-missing', 'active coordinator run has no matching context')
+            if step['phase'] == 'begun':
+                state['state'], state['reason'] = 'unknown-outcome', step['name']
+                write_state(state)
+            elif state_kind(state) == 'running':
+                state['state'], state['reason'] = 'unknown-outcome', step['name']
+                write_state(state)
+            if state_kind(state) == 'unknown-outcome':
+                unknowns.append(state)
+    current = context()
+    if current.get('state') == 'active':
+        run = current['run']
+        if run not in known_runs:
+            doc = read_run_detached(run)
+            begins = [x for x in doc['events'] if x['event'] == 'run.begin']
+            if begins and begins[0].get('plan', '').startswith('coordinator:'):
+                if len(unreadable_units) == 1:
+                    unreadable_units[0]['run'] = run
+                else:
+                    named = {e.get('unit') for e in doc['events'] if isinstance(e.get('unit'), str)}
+                    unknowns.append({'unit': next(iter(named)) if len(named) == 1 else None,
+                                     'run': run, 'state': 'unknown-outcome', 'reason': 'state-lost'})
+    return unknowns
+
+
+def can_agents(unit: dict, cfg: dict):
+    agents = cfg['agents']
+    if unit['judge'] not in agents or unit['implementer'] not in agents:
+        fail(3, 'unit names an agent absent from config')
+    judge, implementer = agents[unit['judge']], agents[unit['implementer']]
+    if judge['backend'] == implementer['backend']:
+        fail(3, 'judge and implementer backends must differ')
+    if implementer['backend'] == 'grok':
+        fail(3, 'grok cannot be the implementer')
+    return judge, implementer
+
+
+def new_unit_preconditions(unit: dict):
+    if unit_dir(unit['id']).exists():
+        fail(3, f'unit id already used: {unit["id"]}')
+    active_precondition()
+
+
+def group_alive(pgid: int) -> bool:
+    result = call(['ps', '-axo', 'pid=,pgid=,stat='])
+    if result.returncode == 0:
+        for line in result.stdout.decode('utf-8', 'replace').splitlines():
+            fields = line.split(maxsplit=2)
+            if len(fields) == 3 and fields[1] == str(pgid) and not fields[2].startswith('Z'):
+                return True
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def terminate_group(pgid: int, proc: subprocess.Popen | None = None) -> bool:
+    for sig, seconds in ((signal.SIGTERM, 10), (signal.SIGKILL, 2)):
+        if proc is not None:
+            proc.poll()
+        if not group_alive(pgid):
+            return True
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            # A restricted host can deny group signals even for a child.
+            # Stop the leader when permitted, then keep the outcome unknown
+            # unless the whole group can be observed empty.
+            try:
+                os.kill(pgid, sig)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                return False
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if proc is not None:
+                proc.poll()
+            if not group_alive(pgid):
+                return True
+            time.sleep(0.1)
+    if proc is not None:
+        proc.poll()
+    return not group_alive(pgid)
+
+
+def capture_dispatch(state: dict, agent: dict, label: str, prompt: str, cap: int, round_n=None, dispatch_seconds=3600):
+    data = prompt.encode('utf-8')
+    if len(data) > cap:
+        return None, 'too-large'
+    directory = unit_dir(state['unit'])
+    prompt_file = directory / (label + '.prompt')
+    # A fresh name is mandatory, even for retries.
+    if prompt_file.exists():
+        raise Outcome('blocked', 'prompt-file')
+    fd = os.open(prompt_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'wb') as stream:
+        stream.write(data)
+    original = digest(data)
+    doc = read_run(state)
+    state['seq'] = max((x['seq'] for x in doc['events']), default=0)
+    begun(state, label)
+    backend = agent['backend']
+    argv = [SCRIPT / '../backends' / backend / 'dispatch.sh', '--read-only', '--prompt-file', prompt_file, '--model', agent['model']]
+    if 'effort' in agent:
+        argv += ['--effort', agent['effort']]
+    stdout, stderr = directory / (label + '.stdout'), directory / (label + '.stderr')
+    with stdout.open('wb') as out, stderr.open('wb') as err:
+        proc = None
+        previous_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+        def interrupted(signum, _frame):
+            if proc is not None:
+                terminate_group(proc.pid, proc)
+            raise Stop(130, f'dispatch interrupted by signal {signum}')
+        try:
+            for sig in previous_handlers:
+                signal.signal(sig, interrupted)
+            try:
+                proc = subprocess.Popen([str(x) for x in argv], cwd=WS, env=child_env(state['unit'], round_n), stdout=out, stderr=err, start_new_session=True)
+            except OSError as error:
+                finished(state)
+                return None, f'adapter start failed: {error}'
+            state['last_dispatch'] = {'pid': proc.pid, 'pgid': proc.pid, 'backend': backend, 'dispatch_id': None}
+            write_state(state)
+            timed_out = False
+            try:
+                status = proc.wait(timeout=dispatch_seconds)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                if not terminate_group(proc.pid, proc):
+                    unknown(state, label)
+                try:
+                    status = proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    unknown(state, label)
+            if group_alive(proc.pid) and not terminate_group(proc.pid, proc):
+                unknown(state, label)
+        finally:
+            for sig, previous in previous_handlers.items():
+                signal.signal(sig, previous)
+    try:
+        changed = digest(prompt_file.read_bytes()) != original
+    except OSError:
+        changed = True
+    if changed:
+        observed = read_run(state)
+        state['seq'] = max((x['seq'] for x in observed['events']), default=state['seq'])
+        write_state(state)
+        raise Outcome('blocked', 'prompt-changed')
+    if timed_out:
+        observed = read_run(state)
+        state['seq'] = max((x['seq'] for x in observed['events']), default=state['seq'])
+        finished(state)
+        return None, 'timeout'
+    if status:
+        observed = read_run(state)
+        state['seq'] = max((x['seq'] for x in observed['events']), default=state['seq'])
+        finished(state)
+        return None, f'adapter exit {status}'
+    doc = read_run(state)
+    events = new_events(state, doc)
+    state['seq'] = max((x['seq'] for x in doc['events']), default=state['seq'])
+    write_state(state)
+    dispatch_events = [x for x in events if x['event'].startswith('dispatch.')]
+    starts = [x for x in dispatch_events if x['event'] == 'dispatch.start']
+    ends = [x for x in dispatch_events if x['event'] == 'dispatch.end']
+    if len(dispatch_events) != 2 or len(starts) != 1 or len(ends) != 1:
+        raise Outcome('blocked', 'dispatch-identity')
+    start, end = starts[0], ends[0]
+    dispatch_id = start.get('dispatch_id')
+    if not isinstance(dispatch_id, str) or not dispatch_id or start.get('backend') != backend or start.get('mode') != 'read-only' or start.get('unit') != state['unit'] or end.get('dispatch_id') != dispatch_id or type(end.get('exit')) is not int or end.get('exit') != 0 or end.get('unit') != state['unit']:
+        raise Outcome('blocked', 'dispatch-identity')
+    state['last_dispatch']['dispatch_id'] = dispatch_id
+    write_state(state)
+    index = call([SCRIPT / 'loop-index', '--workspace', WS])
+    if index.returncode:
+        raise Outcome('blocked', 'state-dir')
+    try:
+        runs = json.loads(index.stdout)['runs']
+        locations = [d['state_dir'] for r in runs if r['run_id'] == state['run'] for d in r['dispatches'] if d['dispatch_id'] == dispatch_id]
+        if len(locations) != 1 or not os.path.isabs(locations[0]) or not os.path.isdir(locations[0]):
+            raise ValueError('missing state directory')
+        location = Path(locations[0])
+    except (ValueError, KeyError, TypeError):
+        raise Outcome('blocked', 'state-dir')
+    locator = registry()[backend][1]
+    filename, sep, key = locator.partition('#')
+    try:
+        raw = (location / filename).read_bytes()
+        if sep:
+            obj = json.loads(raw.decode('utf-8'))
+            if not isinstance(obj, dict) or not isinstance(obj.get(key), str):
+                raise ValueError('message member invalid')
+            raw = obj[key].encode('utf-8')
+        message = raw.decode('utf-8')
+        if not message:
+            raise ValueError('empty message')
+    except (OSError, UnicodeError, ValueError):
+        raise Outcome('blocked', 'final-message')
+    finished(state)
+    return message, None
+
+
+def spec_parts(message: str):
+    if has_controls(message):
+        return None, 'invalid'
+    data = message.strip()
+    if len(data.encode('utf-8')) > 32768:
+        return None, 'invalid'
+    lines = data.splitlines()
+    if not lines or not lines[0].startswith('Unit: ') or not lines[0][6:].strip():
+        return None, 'invalid'
+    positions = []
+    if any(line != line.rstrip() and line.rstrip() in HEADINGS for line in lines):
+        return None, 'invalid'
+    for heading in HEADINGS:
+        found = [i for i, line in enumerate(lines) if line == heading]
+        if len(found) != 1:
+            return None, 'invalid'
+        positions.append(found[0])
+    if positions != sorted(positions):
+        return None, 'invalid'
+    bodies = [('\n'.join(lines[a+1:b])).strip() for a,b in zip(positions, positions[1:]+[len(lines)])]
+    if bodies[0] and not bodies[1]:
+        return bodies, 'declined'
+    if any(not bodies[i] for i in (0,1,2)):
+        return None, 'invalid'
+    return (lines, positions, bodies), None
+
+
+def branch_cleanup(state: dict):
+    branch = state.get('branch')
+    if not branch or branch != 'canvas/' + state['unit']:
+        return
+    current = git('branch', '--show-current').stdout.decode().strip()
+    if current == state['base_branch'] and git('show-ref', '--verify', '--quiet', 'refs/heads/' + branch).returncode != 0:
+        return
+    status = git('status', '--porcelain')
+    clean = status.returncode == 0 and status.stdout == b''
+    head = git('rev-parse', 'HEAD').stdout.decode().strip()
+    if current == branch and clean and head == state['base_sha']:
+        switch = git('switch', state['base_branch'])
+        if switch.returncode == 0:
+            delete = git('branch', '-d', branch)
+            if delete.returncode == 0:
+                return
+    print(f'Checkout retained. To return when safe: git switch {state["base_branch"]}; git branch -d {branch}')
+
+
+def cleanup_step(state: dict, target: str):
+    begun(state, 'branch-cleanup', target)
+    branch_cleanup(state)
+    state['state'] = target
+    finished(state)
+
+
+def terminal(state: dict, target: str, reason: str | None, cleanup=False):
+    state['reason'] = reason
+    begun(state, 'terminal', target)
+    doc = read_run(state)
+    unit_started = any(x['event'] == 'unit.begin' and x.get('unit') == state['unit'] for x in doc['events'])
+    unit_ended = any(x['event'] == 'unit.end' and x.get('unit') == state['unit'] for x in doc['events'])
+    if unit_started and not unit_ended:
+        run_write(state, 'unit-end', ['unit-end', '--unit', state['unit'], '--status', 'parked'], 'unit.end', {'unit': state['unit'], 'status': 'parked'}, terminal=True, target=target)
+    run_write(state, 'end', ['end', '--status', 'failed' if target == 'blocked' else 'completed'], 'run.end', {'status': 'failed' if target == 'blocked' else 'completed'}, terminal=True, target=target)
+    if cleanup and target in ('parked', 'blocked', 'abandoned') and state.get('base_sha') and state.get('base_branch'):
+        cleanup_step(state, target)
+    else:
+        state['state'] = target
+        finished(state)
+
+
+def create_attempt(unit: dict, cfg: dict, branch: str | None) -> dict:
+    state = make_state(unit['id'], unit['judge'], unit['implementer'], branch)
+    state['base_branch'] = cfg['base_branch']
+    write_state(state)
+    try:
+        begin_run(state)
+    except Outcome as error:
+        if state.get('run'):
+            terminal(state, 'blocked', error.reason)
+        else:
+            found = find_run(state['attempt_token'], state)
+            fresh = set(found['ambiguous']) - set(state['ambiguous_before'])
+            if found['runs'] or fresh:
+                quarantine(state, 'orphan-run', 'begin failed after journal activity', found['runs'] + sorted(fresh))
+            state['state'], state['reason'] = 'blocked', error.reason
+            finished(state)
+        fail(6, f'blocked({error.reason})')
+    return state
+
+
+def ignored_manifest(state: dict, cap: int):
+    paths = git_ok('ls-files', '-z', '--others', '--ignored', '--exclude-standard').split(b'\0')
+    paths = [x for x in paths if x]
+    if len(paths) > cap:
+        obj = {'tracked': False, 'count': len(paths)}
+    else:
+        files = {}
+        for name in paths:
+            decoded = os.fsdecode(name)
+            try:
+                info = (WS / decoded).lstat()
+            except FileNotFoundError:
+                continue
+            files[decoded] = {'size': info.st_size, 'mtime_ns': info.st_mtime_ns}
+        obj = {'tracked': True, 'count': len(paths), 'files': files}
+    atomic(unit_dir(state['unit']) / 'ignored-manifest.json', json_bytes(obj))
+
+
+def spec_command(unit: dict, cfg: dict, refs: dict):
+    judge, _ = can_agents(unit, cfg)
+    new_unit_preconditions(unit)
+    status = git('status', '--porcelain')
+    if status.returncode:
+        fail(3, f'cannot inspect working tree: {error_text(status)}')
+    if status.stdout:
+        fail(3, 'working tree is dirty')
+    if git('branch', '--show-current').stdout.decode().strip() != cfg['base_branch']:
+        fail(3, 'HEAD is not on base branch')
+    for branch in ('canvas/' + unit['id'], 'canvas'):
+        if git('show-ref', '--verify', '--quiet', 'refs/heads/' + branch).returncode == 0:
+            fail(3, f'branch exists: {branch}')
+    state = create_attempt(unit, cfg, 'canvas/' + unit['id'])
+    try:
+        state['base_sha'] = git_ok('rev-parse', 'HEAD').decode().strip()
+        begun(state, 'branch')
+        result = git('switch', '-c', state['branch'])
+        if result.returncode:
+            raise Outcome('blocked', 'branch')
+        finished(state)
+        begun(state, 'manifest')
+        ignored_manifest(state, cfg['caps']['ignored_files'])
+        finished(state)
+        run_write(state, 'unit-begin', ['unit-begin', '--unit', unit['id']], 'unit.begin', {'unit': unit['id']})
+        prompt = re.sub(r'\{\{(TITLE|INTENT)\}\}',
+                        lambda match: {'TITLE': unit['title'], 'INTENT': unit['intent']}[match.group(1)],
+                        refs['coordinator-spec-prompt.md'])
+        for attempt in (1,2):
+            message, error = capture_dispatch(state, judge, f'spec-{attempt}', prompt,
+                                              cfg['caps']['prompt_bytes'], dispatch_seconds=cfg['caps']['dispatch_seconds'])
+            if error:
+                terminal(state, 'parked', 'spec-dispatch-failed', cleanup=True)
+                fail(7, f'parked(spec-dispatch-failed): {error}')
+            parts, kind = spec_parts(message)
+            if kind == 'declined':
+                atomic(unit_dir(unit['id']) / 'declined.txt', message.strip().encode('utf-8'))
+                print(parts[0])
+                terminal(state, 'parked', 'spec-declined', cleanup=True)
+                fail(7, 'parked(spec-declined)')
+            if kind == 'invalid':
+                if attempt == 2:
+                    raise Outcome('blocked', 'spec-invalid')
+                continue
+            lines, positions, bodies = parts
+            final = '\n'.join(lines[:positions[-1]+1]) + '\n' + refs['coordinator-environment.md']
+            data = final.encode('utf-8')
+            atomic(unit_dir(unit['id']) / 'spec.txt', data)
+            state['spec']['digest'] = digest(data)
+            state['state'], state['reason'] = 'spec-ready', None
+            finished(state)
+            print(f'unit={unit["id"]}\nspec={unit_dir(unit["id"]) / "spec.txt"}\ndigest={digest(data)}\nrun={state["run"]}\nbase_sha={state["base_sha"]}')
+            return
+    except Outcome as error:
+        terminal(state, 'blocked', error.reason, cleanup=True)
+        fail(6, f'blocked({error.reason})')
+
+
+def approve_command(args):
+    state = state_of(args.unit)
+    if not state or state_kind(state) != 'spec-ready':
+        fail(3, 'unit is not spec-ready')
+    path = unit_dir(args.unit) / 'spec.txt'
+    try:
+        data = path.read_bytes()
+    except OSError as error:
+        fail(3, f'spec unreadable: {error}')
+    actual = digest(data)
+    if actual != args.digest:
+        fail(3, f'spec digest mismatch: expected {args.digest}, actual {actual}')
+    atomic(unit_dir(args.unit) / 'approved-spec.txt', data)
+    state['spec'].update({'digest': actual, 'approved': True, 'approved_at': now()})
+    write_state(state)
+    print(f'approved {args.unit} {actual}')
+
+
+def tree_id(state: dict) -> str:
+    helper = SCRIPT / 'tree-oid.sh'
+    if not helper.exists():
+        helper = (SCRIPT / '../../engineering-mode/scripts/tree-oid.sh').resolve()
+    result = call([helper], state['unit'])
+    if result.returncode == 3:
+        raise Outcome('blocked', 'tree-unbindable')
+    if result.returncode:
+        raise Outcome('blocked', 'tree-id')
+    value = result.stdout.decode('ascii', 'replace').strip()
+    if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value):
+        raise Outcome('blocked', 'tree-id')
+    return value
+
+
+def ignored_report(manifest: dict | None) -> str:
+    if not manifest or manifest.get('tracked') is False:
+        return 'Ignored files were not compared.'
+    prior = manifest.get('files', {})
+    current = {}
+    for raw in git_ok('ls-files', '-z', '--others', '--ignored', '--exclude-standard').split(b'\0'):
+        if raw:
+            name = os.fsdecode(raw)
+            try:
+                info = (WS / name).lstat()
+            except FileNotFoundError:
+                continue
+            current[name] = {'size': info.st_size, 'mtime_ns': info.st_mtime_ns}
+    changed = sorted(name for name, info in current.items() if prior.get(name) != info)
+    return 'New or changed ignored files:\n' + (quoted_paths(changed) if changed else '(none)')
+
+
+def quoted_paths(paths: list[str]) -> str:
+    return '\n'.join(json.dumps(path, ensure_ascii=True) for path in paths)
+
+
+def classify(base: str, tree: str):
+    raw = git_ok('diff-tree', '-r', '-z', '--no-renames', base, tree)
+    entries = []
+    parts = raw.split(b'\0')
+    i = 0
+    while i < len(parts) and parts[i]:
+        meta = parts[i].decode('ascii')
+        match = re.fullmatch(r':([0-7]{6}) ([0-7]{6}) ([0-9a-f]+) ([0-9a-f]+) ([A-Z])[0-9]*', meta)
+        if not match or i + 1 >= len(parts):
+            raise Outcome('blocked', 'tree-id')
+        try:
+            path = parts[i+1].decode('utf-8')
+        except UnicodeError:
+            raise Outcome('blocked', 'tree-unbindable')
+        entries.append((*match.groups(), path))
+        i += 2
+    binary, links = [], []
+    for old_mode, new_mode, old_oid, new_oid, change, path in entries:
+        if '160000' in (old_mode, new_mode):
+            raise Outcome('blocked', 'tree-unbindable')
+        if '120000' in (old_mode, new_mode):
+            links.append(path)
+        if old_oid == new_oid:
+            continue
+        for oid in (old_oid, new_oid):
+            if set(oid) == {'0'}:
+                continue
+            result = git('cat-file', 'blob', oid)
+            if result.returncode:
+                raise Outcome('blocked', 'tree-id')
+            data = result.stdout
+            try:
+                data.decode('utf-8')
+                bad = b'\0' in data or data.splitlines()[:1] == [b'version https://git-lfs.github.com/spec/v1']
+            except UnicodeError:
+                bad = True
+            if bad:
+                binary.append(path)
+                break
+    return sorted(set(binary)), sorted(set(links))
+
+
+def pairs_no_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate key')
+        result[key] = value
+    return result
+
+
+def utf8_text(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        value.encode('utf-8')
+    except UnicodeError:
+        return False
+    return True
+
+
+def has_controls(value: str) -> bool:
+    return any((ord(ch) < 32 and ch not in '\n\t') or 127 <= ord(ch) <= 159 for ch in value)
+
+
+def verdict_strings_safe(value) -> bool:
+    if isinstance(value, str):
+        return utf8_text(value) and not has_controls(value)
+    if isinstance(value, list):
+        return all(verdict_strings_safe(item) for item in value)
+    if isinstance(value, dict):
+        return all(verdict_strings_safe(key) and verdict_strings_safe(item) for key, item in value.items())
+    return True
+
+
+def verdict(message: str) -> dict:
+    if len(message.encode('utf-8')) > 65536:
+        raise ValueError('verdict too large')
+    text = message.strip()
+    fence = re.fullmatch(r'```(?:json)?\n(\{.*\})\n```', text, re.S)
+    if fence:
+        text = fence.group(1)
+    obj = json.loads(text, object_pairs_hook=pairs_no_duplicates)
+    if not verdict_strings_safe(obj):
+        raise ValueError('verdict contains control characters or invalid Unicode')
+    if not isinstance(obj, dict) or set(obj) != {'verdict','summary','findings','notes'} or obj['verdict'] not in ('pass','iterate') or not utf8_text(obj['summary']) or len(obj['summary']) > 2000:
+        raise ValueError('verdict schema')
+    findings, notes = obj['findings'], obj['notes']
+    if not isinstance(findings, list) or len(findings) > 50 or not isinstance(notes, list) or len(notes) > 20:
+        raise ValueError('verdict lists')
+    for item in findings:
+        if not isinstance(item, dict) or set(item) != {'file','line','what','expected'} or not utf8_text(item['file']) or type(item['line']) is not int or item['line'] < 0 or not utf8_text(item['what']) or len(item['what']) > 1000 or not utf8_text(item['expected']) or len(item['expected']) > 1000:
+            raise ValueError('finding schema')
+    if any(not utf8_text(note) or len(note) > 500 for note in notes):
+        raise ValueError('note schema')
+    if (obj['verdict'] == 'iterate') != bool(findings):
+        raise ValueError('verdict/findings mismatch')
+    return obj
+
+
+def review_prompt(template: str, spec: bytes, diff: str, links: list[str], ignored: str, blind=False) -> str:
+    template = '\n'.join(line for line in template.split('\n') if not (blind and line.startswith('[spec] ')))
+    if not blind:
+        template = template.replace('[spec] ', '')
+    sections = '' if blind else '## Spec\n' + spec.decode('utf-8') + '\n\n'
+    sections += '## Coordinator notes\n'
+    sections += ('Symlink entries (target content was not followed):\n' + quoted_paths(links) + '\n') if links else 'Symlink entries: (none)\n'
+    sections += ignored + '\n\n## Diff\n' + diff
+    return template.replace('{{SECTIONS}}', sections)
+
+
+def review_step(state: dict, base: str, spec: bytes, judge: dict, round_n: int, manifest: dict | None, cfg: dict, refs: dict, cal: dict):
+    tree = tree_id(state)
+    binary, links = classify(base, tree)
+    ignored = ignored_report(manifest)
+    if binary:
+        return None, 'binary-change:\n' + quoted_paths(binary), tree, ignored
+    diff_raw = git_ok('diff', '--text', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', base, tree)
+    try:
+        diff = diff_raw.decode('utf-8')
+    except UnicodeError:
+        raise Outcome('blocked', 'tree-unbindable')
+    template = refs['coordinator-review-prompt.md']
+    first = review_prompt(template, spec, diff, links, ignored)
+    if len(first.encode('utf-8')) > cfg['caps']['prompt_bytes']:
+        return None, 'too-large', tree, ignored
+    def dispatch_verdict(prompt, label):
+        for attempt in (1,2):
+            message, error = capture_dispatch(state, judge, f'{label}-{attempt}', prompt,
+                                              cfg['caps']['prompt_bytes'], round_n, cfg['caps']['dispatch_seconds'])
+            if error:
+                return None, 'review-dispatch-failed'
+            try:
+                result = verdict(message)
+                atomic(unit_dir(state['unit']) / (f'{label}-{attempt}.verdict.json'), json_bytes(result))
+                return result, None
+            except (ValueError, TypeError, RecursionError):
+                if attempt == 2:
+                    raise Outcome('blocked', 'verdict-unparseable')
+        return None, 'review-dispatch-failed'
+    primary, error = dispatch_verdict(first, f'review-{round_n}')
+    if error:
+        return None, error, tree, ignored
+    combined = dict(primary)
+    if cal['dials']['depth']['value'] == 'deep' and primary['verdict'] == 'pass':
+        blind = review_prompt(template, spec, diff, links, ignored, blind=True)
+        if len(blind.encode('utf-8')) > cfg['caps']['prompt_bytes']:
+            return None, 'too-large', tree, ignored
+        secondary, error = dispatch_verdict(blind, f'review-blind-{round_n}')
+        if error:
+            return None, error, tree, ignored
+        if secondary['verdict'] == 'iterate':
+            combined['verdict'] = 'iterate'
+            combined['findings'] = secondary['findings']
+            combined['notes'] = primary['notes'] + secondary['notes']
+    atomic(unit_dir(state['unit']) / 'verdict.json', json_bytes(combined))
+    run_write(state, 'review', ['review', '--unit', state['unit'], '--round', str(round_n), '--verdict', combined['verdict'], '--reviewer', judge['backend']], 'review.recorded', {'unit': state['unit'], 'round': round_n, 'verdict': combined['verdict'], 'reviewer': judge['backend']})
+    return combined, None, tree, ignored
+
+
+def check_command(unit: dict, spec: bytes, args, cfg: dict, refs: dict, cal: dict):
+    judge, _ = can_agents(unit, cfg)
+    new_unit_preconditions(unit)
+    head = git('rev-parse', 'HEAD').stdout.decode().strip()
+    if head != args.base:
+        fail(3, f'HEAD {head} differs from --base {args.base}')
+    current_tree = call([(SCRIPT / 'tree-oid.sh') if (SCRIPT / 'tree-oid.sh').exists() else (SCRIPT / '../../engineering-mode/scripts/tree-oid.sh').resolve()])
+    if current_tree.returncode:
+        # The review step reports precise snapshot failures after run.begin.
+        pass
+    elif current_tree.stdout.decode('ascii', 'replace').strip() == git('rev-parse', 'HEAD^{tree}').stdout.decode().strip():
+        fail(3, 'nothing to review')
+    if digest(spec) != args.spec_digest:
+        fail(3, f'spec digest mismatch: expected {args.spec_digest}, actual {digest(spec)}')
+    state = create_attempt(unit, cfg, None)
+    state['base_sha'] = args.base
+    write_state(state)
+    try:
+        run_write(state, 'unit-begin', ['unit-begin', '--unit', unit['id']], 'unit.begin', {'unit': unit['id']})
+        run_write(state, 'round-begin', ['round-begin', '--unit', unit['id'], '--round', '1'], 'round.begin', {'unit': unit['id'], 'round': 1})
+        result, reason, tree, ignored = review_step(state, args.base, spec, judge, 1, None, cfg, refs, cal)
+        if result:
+            print(json.dumps({'unit': unit['id'], 'tree': tree, 'verdict': result['verdict'], 'summary': result['summary'], 'findings': result['findings'], 'notes': result['notes'], 'ignored': ignored}, ensure_ascii=True), flush=True)
+        else:
+            print(f'no review: {reason}\n{ignored}', flush=True)
+        terminal(state, 'checked', reason)
+        if not result:
+            fail(8, f'checked({reason})')
+    except Outcome as error:
+        terminal(state, 'blocked', error.reason)
+        fail(6, f'blocked({error.reason})')
+
+
+def process_group(pgid: int | None):
+    if not isinstance(pgid, int) or pgid < 1:
+        return []
+    result = call(['ps', '-axo', 'pid=,pgid=,command='])
+    if result.returncode:
+        return []
+    return [line.strip() for line in result.stdout.decode('utf-8', 'replace').splitlines() if re.match(r'\s*\d+\s+' + str(pgid) + r'\s+', line)]
+
+
+def abandon_command(args):
+    state = state_of(args.unit) if args.unit else None
+    if state is UNREADABLE:
+        if not args.run:
+            current = context()
+            if current.get('state') == 'active':
+                root = CDIR / 'units'
+                held_by_readable = False
+                if root.exists():
+                    for path in root.iterdir():
+                        if path.is_dir() and UNIT_RE.fullmatch(path.name):
+                            candidate = state_of(path.name)
+                            if candidate is not None and candidate is not UNREADABLE and candidate.get('run') == current['run']:
+                                held_by_readable = True
+                                break
+                if not held_by_readable:
+                    fail(3, f'unreadable state may belong to an active run; use abandon --run {current["run"]}')
+            path = unit_dir(args.unit) / 'state.json'
+            path.rename(path.with_name('state.json.unreadable'))
+            print(f'unit {args.unit}: directory kept, id remains used, no run was open')
+            return
+        state = None
+    if state and state_kind(state) in TERMINAL:
+        if state_kind(state) == 'abandoned' and state.get('reason') == 'run-ended-externally':
+            print(f'abandoned {state["unit"]} {state.get("run")}: run ended externally')
+            return
+        fail(3, 'unit is terminal')
+    if not state and not args.run:
+        fail(3, '--run is required when state file is missing or unreadable')
+    run = state['run'] if state else args.run
+    if args.run and state and args.run != run:
+        fail(3, '--run differs from recorded run')
+    if not state:
+        current = context()
+        if current.get('state') == 'active' and current.get('run') != run:
+            fail(3, f'context does not name run {run}')
+    doc = read_run(state, allow_incomplete=True) if state else read_run_detached(run)
+    events = doc['events']
+    starts = [x for x in events if x['event'] == 'run.begin']
+    plan = starts[0].get('plan') if len(starts) == 1 else None
+    if state:
+        if plan != 'coordinator:' + state['attempt_token']:
+            fail(3, 'run plan does not match state attempt token')
+        unit = state['unit']
+    else:
+        if not isinstance(plan, str) or not plan.startswith('coordinator:'):
+            fail(3, 'run is not a coordinator plan')
+        named = {x['unit'] for x in events if isinstance(x.get('unit'), str)}
+        if any('unit' in x and not isinstance(x['unit'], str) for x in events) or len(named) > 1:
+            quarantine(None, 'unowned-run', 'run names more than one or an invalid unit', [run])
+        unit = next(iter(named)) if named else None
+        if unit and not any(x['event'] == 'unit.begin' and x.get('unit') == unit for x in events):
+            quarantine(None, 'unowned-run', 'run names a unit without unit.begin', [run])
+        if args.unit and unit and args.unit != unit:
+            fail(3, f'run names {unit}, not {args.unit}')
+        root = CDIR / 'units'
+        if root.exists():
+            for path in root.iterdir():
+                if not path.is_dir() or not UNIT_RE.fullmatch(path.name):
+                    continue
+                candidate = state_of(path.name)
+                if candidate is not None and candidate is not UNREADABLE and candidate.get('run') == run:
+                    if unit != path.name:
+                        fail(3, f'run is already held by unit {path.name}')
+                    state = candidate
+        if state and state_kind(state) in TERMINAL:
+            fail(3, 'unit is terminal')
+        if state and plan != 'coordinator:' + state['attempt_token']:
+            fail(3, 'run plan does not match state attempt token')
+    if doc['ended']:
+        if unit and not state:
+            path = unit_dir(unit) / 'state.json'
+            if state_of(unit) is UNREADABLE:
+                path.rename(path.with_name('state.json.unreadable'))
+            state = make_state(unit, None, None, None)
+            state['run'] = run
+            state['seq'] = max(x['seq'] for x in events)
+            state['state'] = 'unknown-outcome'
+            write_state(state)
+        if state:
+            state['reason'] = 'run-ended-externally'
+            if state.get('base_sha') and state.get('base_branch'):
+                cleanup_step(state, 'abandoned')
+            else:
+                state['state'] = 'abandoned'
+                finished(state)
+        print(f'abandoned {unit or "(no unit)"} {run}: run ended externally')
+        return
+    current = context()
+    if current.get('state') != 'active' or current.get('run') != run:
+        if state:
+            quarantine(state, 'context-missing', f'active run {run} has no matching context')
+        fail(3, f'context does not name active run {run}')
+    branch = git('branch', '--show-current').stdout.decode().strip()
+    print(f'branch: {branch}')
+    if state and state.get('base_sha'):
+        print('commits beyond base:\n' + git('log', '--oneline', state['base_sha']+'..HEAD').stdout.decode())
+    print('git status:\n' + git('status', '--short').stdout.decode())
+    pgid = ((state or {}).get('last_dispatch') or {}).get('pgid')
+    live = process_group(pgid)
+    print('live process group:\n' + ('\n'.join(live) if live else (f'pgid={pgid}' if pgid else '(none)')))
+    if isinstance(pgid, int) and pgid > 0 and group_alive(pgid) and not args.dispatches_terminated:
+        fail(3, f'dispatch process group {pgid} is still alive; wait for it to stop or pass --dispatches-terminated')
+    if unit and not state:
+        path = unit_dir(unit) / 'state.json'
+        if state_of(unit) is UNREADABLE:
+            path.rename(path.with_name('state.json.unreadable'))
+        state = make_state(unit, None, None, None)
+        state['run'] = run
+        state['seq'] = max(x['seq'] for x in events)
+        state['state'] = 'unknown-outcome'
+        write_state(state)
+    unit_started = unit is not None and any(x['event'] == 'unit.begin' and x.get('unit') == unit for x in events)
+    unit_ended = unit is not None and any(x['event'] == 'unit.end' and x.get('unit') == unit for x in events)
+    if unit_started and not unit_ended:
+        # The first write also repairs a torn final dispatch line.
+        state['seq'] = max(x['seq'] for x in events)
+        run_write(state, 'unit-end', ['unit-end', '--unit', unit, '--status', 'parked'], 'unit.end', {'unit': unit, 'status': 'parked'}, terminal=True)
+    doc = read_run(state, allow_incomplete=True) if state else read_run_detached(run)
+    starts_by_id = {x['dispatch_id'] for x in doc['events'] if x['event'] == 'dispatch.start'}
+    ends_by_id = {x['dispatch_id'] for x in doc['events'] if x['event'] in ('dispatch.end', 'dispatch.abandoned')}
+    open_ids = sorted(starts_by_id - ends_by_id)
+    if open_ids and not args.dispatches_terminated:
+        fail(3, 'Passing --dispatches-terminated asserts that each listed dispatch and its descendants have terminated or cannot produce further side effects. ' + ', '.join(open_ids))
+    if state:
+        state['reason'] = 'by-engineer'
+        begun(state, 'recover', 'abandoned')
+    argv = ['recover']
+    for item in open_ids:
+        argv += ['--acknowledge', item]
+    result = call_retry([SCRIPT / 'loop-run', *argv], unit)
+    if result.returncode:
+        if result.returncode == 3:
+            fail(3, 'recover: journal lock busy')
+        quarantine(state, 'recover-refused', error_text(result))
+    doc = read_run(state) if state else read_run_detached(run)
+    if not doc['ended'] or doc['end_status'] != 'abandoned':
+        quarantine(state, 'recover-refused', 'recover did not end run')
+    if state:
+        if state.get('base_sha') and state.get('base_branch'):
+            cleanup_step(state, 'abandoned')
+        else:
+            state['state'] = 'abandoned'
+            finished(state)
+    print(f'abandoned {unit or "(no unit)"} {run}')
+
+
+def release_command(args):
+    marker = read_json(CDIR / 'quarantine.json', 3)
+    if args.id != marker.get('id') or not args.processes_gone:
+        fail(3, 'quarantine id or --processes-gone missing')
+    note = outside_file(args.note_file, 'note file')
+    if len(note) > 4000:
+        fail(2, 'note exceeds 4000 bytes')
+    try:
+        note_text = note.decode('utf-8')
+    except UnicodeError:
+        fail(2, 'note is not UTF-8')
+    current = context()
+    if current.get('state') == 'malformed' or current.get('run') in marker['runs']:
+        fail(3, 'context still names a quarantined run or is malformed')
+    record = {key: marker[key] for key in ('id','runs','unit','reason')}
+    record.update({'released_at': now(), 'note': note_text})
+    with (CDIR / 'quarantine.log').open('ab') as stream:
+        stream.write(json_bytes(record))
+    if marker.get('unit'):
+        state = state_of(marker['unit'])
+        if state and state_kind(state) == 'quarantined':
+            state['state'], state['reason'] = 'released', marker['reason']
+            write_state(state)
+    (CDIR / 'quarantine.json').unlink()
+    print(f'released quarantine {args.id}')
+
+
+def status_command(args):
+    marker_path = CDIR / 'quarantine.json'
+    marker = read_json(marker_path, 4) if marker_path.exists() else None
+    units = []
+    root = CDIR / 'units'
+    if root.exists():
+        for path in sorted(root.iterdir()):
+            if not path.is_dir():
+                continue
+            state = state_of(path.name)
+            if not state:
+                continue
+            if state is UNREADABLE:
+                units.append({'unit': path.name, 'state': 'unreadable', 'reason': 'state-unreadable',
+                              'run': None, 'branch': None, 'base_sha': None,
+                              'spec_digest': None, 'approved': False,
+                              'verdict_recorded': (path / 'verdict.json').is_file()})
+                continue
+            spec_path = path / 'spec.txt'
+            current = digest(spec_path.read_bytes()) if spec_path.exists() else None
+            units.append({'unit': path.name, 'state': state.get('state'), 'reason': state.get('reason'),
+                          'run': state.get('run'), 'branch': state.get('branch'), 'base_sha': state.get('base_sha'),
+                          'spec_digest': current, 'approved': current is not None and current == state.get('spec', {}).get('digest') and bool(state.get('spec', {}).get('approved')),
+                          'verdict_recorded': (path / 'verdict.json').is_file()})
+    if args.unit:
+        units = [x for x in units if x['unit'] == args.unit]
+    obj = {'schema': 1, 'key': KEY, 'cdir': str(CDIR), 'quarantine': marker, 'units': units}
+    if args.json:
+        print(json.dumps(obj, ensure_ascii=False))
+    else:
+        print(f'KEY={KEY}\nCDIR={CDIR}\nquarantine={json.dumps(marker)}')
+        for item in units:
+            print(json.dumps(item, ensure_ascii=False))
+
+
+def init_command():
+    for path in (HOME / '.config', HOME / '.config' / 'olddonkey-loop', HOME / '.config' / 'olddonkey-loop' / 'coordinator', CDIR):
+        if not path.exists():
+            path.mkdir(mode=0o700)
+    validate_cdir()
+    print(f'KEY={KEY}\nCDIR={CDIR}\n# config.json (create as 0600, owned by you):\n# {{"schema":1,"base_branch":"main","remote":"origin","agents":{{"judge":{{"backend":"claude","model":"sonnet"}},"implementer":{{"backend":"codex","model":"gpt-5"}}}},"caps":{{"rounds":3,"prompt_bytes":120000,"ignored_files":5000,"dispatch_seconds":3600}},"gate":{{"argv":["python3","-m","unittest"],"mode":"strict","runner_unsupported":false}}}}')
+
+
+def parser():
+    root = argparse.ArgumentParser(prog='loop-coordinator')
+    sub = root.add_subparsers(dest='command', required=True)
+    sub.add_parser('init')
+    p = sub.add_parser('spec'); p.add_argument('--unit-file', required=True)
+    p = sub.add_parser('approve-spec'); p.add_argument('--unit', required=True); p.add_argument('--digest', required=True)
+    p = sub.add_parser('status'); p.add_argument('--unit'); p.add_argument('--json', action='store_true')
+    p = sub.add_parser('abandon'); p.add_argument('--unit'); p.add_argument('--run'); p.add_argument('--dispatches-terminated', action='store_true')
+    p = sub.add_parser('release-quarantine'); p.add_argument('--id', required=True); p.add_argument('--processes-gone', action='store_true'); p.add_argument('--note-file', required=True)
+    p = sub.add_parser('check-diff'); p.add_argument('--unit-file', required=True); p.add_argument('--spec', required=True); p.add_argument('--spec-digest', required=True); p.add_argument('--base', required=True)
+    return root
+
+
+def main():
+    # Quarantine outranks even CLI shape for all but status and release.
+    command = ARGS[0] if ARGS else ''
+    if command not in ('status', 'release-quarantine') and (CDIR / 'quarantine.json').exists():
+        fail(4, f'quarantine marker: {CDIR / "quarantine.json"}')
+    args = parser().parse_args(ARGS)
+    unit = unit_file(args.unit_file) if args.command in ('spec','check-diff') else None
+    if args.command == 'approve-spec' and not UNIT_RE.fullmatch(args.unit):
+        fail(2, 'invalid unit id')
+    if args.command == 'abandon' and args.unit and not UNIT_RE.fullmatch(args.unit):
+        fail(2, 'invalid unit id')
+    if args.command == 'status' and args.unit and not UNIT_RE.fullmatch(args.unit):
+        fail(2, 'invalid unit id')
+    spec = outside_file(args.spec, 'spec file') if args.command == 'check-diff' else None
+    if spec is not None:
+        try:
+            spec.decode('utf-8')
+        except UnicodeError:
+            fail(2, 'spec file must be UTF-8')
+    if args.command == 'release-quarantine':
+        _ = outside_file(args.note_file, 'note file')
+    if args.command in ('approve-spec','check-diff') and not HEX64.fullmatch(args.digest if args.command == 'approve-spec' else args.spec_digest):
+        fail(2, 'invalid SHA-256 digest')
+    require_root()
+    if args.command == 'init':
+        init_command(); return 0
+    if args.command == 'status':
+        status_command(args); return 0
+    validate_cdir()
+    if args.command == 'release-quarantine':
+        fd = lock()
+        try:
+            release_command(args)
+        finally:
+            release_lock(fd)
+        return 0
+    cfg = config() if args.command in ('spec','check-diff') else None
+    refs = references() if args.command in ('spec','check-diff') else None
+    cal = calibration() if args.command in ('spec','check-diff') else None
+    fd = lock()
+    try:
+        unknowns = reconcile()
+        if unknowns and args.command != 'abandon':
+            first = unknowns[0]
+            if first['reason'] in ('state-lost', 'state-unreadable'):
+                if first['reason'] == 'state-unreadable' and not first.get('run'):
+                    hint = f'abandon --unit {first["unit"]}'
+                else:
+                    hint = f'abandon --run {first["run"]}' if first.get('run') else 'abandon --run <run-id>'
+                label = f'; run names unit {first["unit"]}' if first.get('unit') else ''
+                fail(9, f'unknown-outcome({first["reason"]}){label}; use {hint}')
+            fail(9, f'unknown-outcome({first["reason"]}) for {first["unit"]}; use abandon --unit {first["unit"]}')
+        if args.command == 'spec':
+            spec_command(unit, cfg, refs)
+        elif args.command == 'check-diff':
+            check_command(unit, spec, args, cfg, refs, cal)
+        elif args.command == 'approve-spec':
+            approve_command(args)
+        elif args.command == 'abandon':
+            abandon_command(args)
+        return 0
+    finally:
+        release_lock(fd)
+
+
+try:
+    raise SystemExit(main())
+except Stop as error:
+    print(f'error: {error.message}', file=sys.stderr)
+    raise SystemExit(error.code)
+except Outcome as error:
+    print(f'error: {error.kind}({error.reason})', file=sys.stderr)
+    raise SystemExit(6)
+except Exception as error:
+    try:
+        atomic(CDIR / 'last-error.txt', traceback.format_exc().encode('utf-8', 'replace'))
+    except Exception:
+        pass
+    message = str(error).splitlines()[0] if str(error) else ''
+    print(f'error: internal: {type(error).__name__}: {message}', file=sys.stderr)
+    raise SystemExit(1)
+PY

@@ -1013,6 +1013,24 @@ What building the units changed, relative to §4 and §7 above. Where this secti
 - An `init` command creates the config directory and prints the workspace key.
 - The own-write rule tolerates a `journal.repaired` event before the expected one, since the journal emits it when it repairs a torn tail.
 
+### Unit 2, as built
+
+Review of the implementation changed these. `references/coordinator.md` is the operator's reference.
+
+- `abandon` has two paths. With a readable state file, the run is bound by its `coordinator:<attempt_token>` plan, and `unit.end` is written only if the unit began; a unit killed between `run.begin` and `unit.begin` is closed, not quarantined. Without one, `--run ID` is enough and the unit is read from the run's events.
+- `abandon` refuses while the last dispatch's process group is alive, unless `--dispatches-terminated` is given. Writing while the adapter could still append its own events quarantined a healthy run, and in unit 3 that process is an implementer editing the tree.
+- Reconciliation reads the journal again for a unit already in `unknown-outcome`. A run closed from outside becomes `abandoned(run-ended-externally)`.
+- A busy journal lock is retried for ten seconds and then stops the command with exit 3. It is never a quarantine.
+- Children inherit no `LOOP_*` variable and none of the `GIT_DIR` family. `GIT_DIR=<other repo>` used to create the unit branch in the other repository.
+- A dispatch has a time cap, `caps.dispatch_seconds` (1 to 14400, default 3600). On expiry, or on SIGINT, SIGTERM, or SIGHUP, the adapter's process group gets TERM and then KILL. After any adapter exit a surviving descendant is stopped, and one that cannot be stopped leaves the unit `unknown-outcome`.
+- Every path the coordinator writes into a prompt or prints is a JSON string. A file name with a newline could otherwise forge a section of the review prompt.
+- A spec with a control character, or with a line that is a heading plus trailing whitespace, is invalid. So is a verdict with a control character in any string.
+- The combined verdict is stored as `verdict.json` and printed before the run is closed.
+- An unreadable `state.json` shows as `unreadable` in `status`. `abandon --unit ID` moves it aside when no open run can belong to it.
+- Exit 1 is an internal error with the traceback in `last-error.txt`; exit 130 is a signal during a dispatch.
+- `read-context` reads without the lock when the store has none, and exits 5 for a context file with unsafe permissions.
+- The selftest runs its cases four at a time (`COORD_SELFTEST_JOBS`) and prints them in declaration order. It must run from a checkout outside `/tmp`: the codex adapter refuses a state root under a sandbox-writable root.
+
 ## 12. Review record
 
 Codex read-only review, `gpt-6-sol` at `max`, one thread
