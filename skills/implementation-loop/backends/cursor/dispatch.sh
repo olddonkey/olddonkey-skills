@@ -524,7 +524,7 @@ if [[ $READ_ONLY -eq 0 && $POST_COPY_OK -eq 1 ]]; then
   else
     chmod 600 "$PATCH_PATH"
     PATCH_DESCRIPTION="$PATCH_PATH"
-    FILES_CHANGED="$(LC_ALL=C grep -c '^diff --git ' "$PATCH_PATH" || true)"
+    FILES_CHANGED="$(env LC_ALL=C grep -c '^diff --git ' "$PATCH_PATH" || true)"
     if [[ $FINAL_STATUS -eq 0 && -s "$PATCH_PATH" ]]; then
       if ! (cd "$WORKSPACE" && git apply -p2 --check --binary "$PATCH_PATH") \
         > "$STATE_DIR/apply-check.log" 2>&1; then
