@@ -316,9 +316,12 @@ workspace (`:146-152`). The dispatch directory is created at `:205`.
 `project-files.zlist` (`:208-209`) and `prompt.txt` (`:284-285`) are written
 before `journal_dispatch_start` (`:333`) and the child (`:345`). Parse
 failure (`:367-392`) writes neither `parsed.json` nor `result.txt`.
-`changes.raw.patch` / `changes.patch` are implement-only after a successful
-post-copy walk (`:425-455`). `apply-check.log` / `apply.log` are written
-only on the successful nonempty apply path (`:458-464`). Disposable copies
+On a successful result, new paths the real repository ignores are deleted
+from the work copy before the diff (`:423-501`). `changes.patch` is
+implement-only after a successful post-copy walk (`:510-526`); it is the raw
+pristine-vs-work diff, applied with `git apply -p2` and never rewritten.
+`apply-check.log` / `apply.log` are written only on the successful nonempty
+apply path (`:528-534`). Disposable copies
 under `$HOME/.config/olddonkey-loop/cursor-work/<dispatch-id>/` (`:164-167`)
 are not protected run state.
 
@@ -330,10 +333,9 @@ are not protected run state.
 | stderr.log | backends/cursor/dispatch.sh:289 | absent | present | present | present | present | child stderr; created at :345 |
 | parsed.json | backends/cursor/dispatch.sh:367 | absent | absent | present | present | present | JSON {is_error,session_id}; absent on parse failure |
 | result.txt | backends/cursor/dispatch.sh:366 | absent | absent | present | present | present | result string; absent on parse failure |
-| changes.raw.patch | backends/cursor/dispatch.sh:426 | absent | present | absent | present | present | git diff --no-index; implement-only |
-| changes.patch | backends/cursor/dispatch.sh:418 | absent | present | absent | present | present | normalized patch; implement-only |
-| apply-check.log | backends/cursor/dispatch.sh:460 | absent | absent | absent | absent | present | git apply --check output; successful nonempty apply |
-| apply.log | backends/cursor/dispatch.sh:464 | absent | absent | absent | absent | present | git apply output; successful nonempty apply |
+| changes.patch | backends/cursor/dispatch.sh:517 | absent | present | absent | present | present | raw pristine-vs-work patch; implement-only |
+| apply-check.log | backends/cursor/dispatch.sh:530 | absent | absent | absent | absent | present | git apply --check output; successful nonempty apply |
+| apply.log | backends/cursor/dispatch.sh:534 | absent | absent | absent | absent | present | git apply output; successful nonempty apply |
 
 ### Claude
 

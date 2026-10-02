@@ -71,7 +71,7 @@ INVENTORY = {
         "early failure": ["project-files.zlist", "prompt.txt"],
         "parse failure": [
             "project-files.zlist", "prompt.txt", "output.json", "stderr.log",
-            "changes.raw.patch", "changes.patch",
+            "changes.patch",
         ],
         "read-only": [
             "project-files.zlist", "prompt.txt", "output.json", "stderr.log",
@@ -79,11 +79,11 @@ INVENTORY = {
         ],
         "implement": [
             "project-files.zlist", "prompt.txt", "output.json", "stderr.log",
-            "parsed.json", "result.txt", "changes.raw.patch", "changes.patch",
+            "parsed.json", "result.txt", "changes.patch",
         ],
         "successful terminal": [
             "project-files.zlist", "prompt.txt", "output.json", "stderr.log",
-            "parsed.json", "result.txt", "changes.raw.patch", "changes.patch",
+            "parsed.json", "result.txt", "changes.patch",
             "apply-check.log", "apply.log",
         ],
     },

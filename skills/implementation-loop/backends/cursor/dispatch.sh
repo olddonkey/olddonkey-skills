@@ -10,8 +10,8 @@
 # untracked-non-ignored project files into two git-less copies outside the real
 # repository. cursor-agent runs only in the work copy with --trust and
 # --sandbox enabled; it never receives --force, -f, or --yolo. Implement mode
-# turns pristine-vs-work into a normalized patch, checks it, and applies it to
-# the invoking worktree. The adapter never stages, commits, pushes, or resumes.
+# drops new ignored paths, diffs pristine against work, and applies that raw
+# patch with -p2. The adapter never stages, commits, pushes, or resumes.
 #
 # The default model is cursor-grok-4.6-xhigh. CURSOR_LOOP_MODEL may override it.
 # CURSOR_LOOP_EFFORT or --effort is an assertion against the effort embedded in
@@ -415,6 +415,91 @@ elif [[ "$IS_ERROR" == "true" ]]; then
   FINAL_STATUS=10
 fi
 
+# The snapshot leaves ignored files out, so a path the agent creates where the
+# real repository ignores it must not ride the patch back: it would land
+# hidden from git status, or collide with an ignored file already there. Only
+# a dispatch that is about to apply is filtered; a failed one keeps its work
+# copy whole for forensics.
+IGNORED_DROPPED=0
+if [[ $READ_ONLY -eq 0 && $FINAL_STATUS -eq 0 ]]; then
+  if ! IGNORED_DROPPED="$(python3 - "$WORKSPACE" "$PRISTINE" "$WORK_COPY" <<'PY'
+import os
+import shutil
+import subprocess
+import sys
+
+workspace, pristine, work = sys.argv[1:]
+
+def walk_error(error):
+    raise error
+
+def paths(root):
+    found = []
+    for directory, dirnames, filenames in os.walk(root, followlinks=False, onerror=walk_error):
+        for name in dirnames + filenames:
+            found.append(os.path.relpath(os.path.join(directory, name), root))
+    return found
+
+def beyond_symlink(path):
+    # git check-ignore dies on a path whose parent is a symlink in the real
+    # worktree. The symlink itself is still asked about, and dropping it
+    # drops everything the agent put beneath that name.
+    parent = os.path.dirname(path)
+    while parent:
+        if os.path.islink(os.path.join(workspace, parent)):
+            return True
+        parent = os.path.dirname(parent)
+    return False
+
+def shown(path):
+    return path.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+try:
+    baseline = set(paths(pristine))
+    new_paths = [path for path in paths(work) if path not in baseline]
+    askable = {path for path in new_paths if not beyond_symlink(path)}
+    ignored = set()
+    if askable:
+        payload = b"\0".join(os.fsencode(path) for path in sorted(askable)) + b"\0"
+        checked = subprocess.run(
+            ["git", "-C", workspace, "check-ignore", "-z", "--stdin"],
+            input=payload, capture_output=True,
+        )
+        if checked.returncode not in (0, 1):
+            raise OSError(f"git check-ignore failed ({checked.returncode}): {checked.stderr.decode(errors='replace')}")
+        ignored = {os.fsdecode(path) for path in checked.stdout.split(b"\0") if path}
+        if not ignored.issubset(askable):
+            raise OSError("git check-ignore returned an unexpected path")
+    for path in sorted(ignored, key=lambda value: (value.count(os.sep), value)):
+        target = os.path.join(work, path)
+        if os.path.islink(target) or not os.path.isdir(target):
+            if os.path.lexists(target):
+                os.unlink(target)
+        else:
+            shutil.rmtree(target)
+    for path in sorted(ignored)[:20]:
+        print(f"note: ignored path not applied: {shown(path)}", file=sys.stderr)
+    if len(ignored) > 20:
+        print(f"note: ignored paths not applied: {len(ignored) - 20} more (total {len(ignored)})", file=sys.stderr)
+    unchecked = sorted(
+        path for path in new_paths
+        if path not in askable and os.path.lexists(os.path.join(work, path))
+    )
+    for path in unchecked[:20]:
+        print(f"note: ignore rules not checked beyond a real-worktree symlink: {shown(path)}", file=sys.stderr)
+    if len(unchecked) > 20:
+        print(f"note: ignore rules not checked beyond a real-worktree symlink: {len(unchecked) - 20} more (total {len(unchecked)})", file=sys.stderr)
+    print(len(ignored))
+except Exception as exc:
+    print(f"error: could not filter ignored paths; real worktree was not changed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+)"; then
+    IGNORED_DROPPED=0
+    FINAL_STATUS=11
+  fi
+fi
+
 PATCH_PATH="$STATE_DIR/changes.patch"
 FILES_CHANGED=0
 if [[ $READ_ONLY -eq 1 ]]; then
@@ -423,44 +508,29 @@ else
   PATCH_DESCRIPTION="<not generated>"
 fi
 if [[ $READ_ONLY -eq 0 && $POST_COPY_OK -eq 1 ]]; then
-  RAW_PATCH="$STATE_DIR/changes.raw.patch"
+  # The patch is applied as written. Renames stay off because a rename header
+  # carries its paths without the a/ or b/ prefix, and -p2 strips the
+  # a/pristine/ and b/work/ components so no header is ever rewritten.
   set +e
-  (cd "$COPY_ROOT" && git diff --no-index --binary \
-    --src-prefix=a/ --dst-prefix=b/ -- pristine work) > "$RAW_PATCH"
+  (cd "$COPY_ROOT" && git diff --no-index --binary --no-renames \
+    --no-ext-diff --no-textconv --no-color \
+    --src-prefix=a/ --dst-prefix=b/ -- pristine work) > "$PATCH_PATH"
   DIFF_STATUS=$?
   set -e
   if [[ $DIFF_STATUS -gt 1 ]]; then
+    rm -f "$PATCH_PATH"
     echo "error: could not compute pristine-vs-work patch" >&2
     [[ $FINAL_STATUS -ne 0 ]] || FINAL_STATUS=11
   else
-    python3 - "$RAW_PATCH" "$PATCH_PATH" <<'PY'
-import re
-import sys
-source, destination = sys.argv[1:]
-metadata_prefixes = (
-    b"diff --git ", b"--- ", b"+++ ", b"Binary files ",
-    b"rename from ", b"rename to ", b"copy from ", b"copy to ",
-)
-with open(source, "rb") as handle:
-    lines = handle.readlines()
-with open(destination, "wb") as handle:
-    for line in lines:
-        if line.startswith(metadata_prefixes):
-            # Strip exactly one copy-root component from every a/ or b/ path.
-            # A project may itself contain a top-level directory named
-            # pristine or work; a sequence of replace() calls would strip it.
-            line = re.sub(rb"([ab])/(?:pristine|work)/", rb"\1/", line)
-        handle.write(line)
-PY
     chmod 600 "$PATCH_PATH"
     PATCH_DESCRIPTION="$PATCH_PATH"
-    FILES_CHANGED="$(LC_ALL=C grep -c '^diff --git ' "$PATCH_PATH" || true)"
+    FILES_CHANGED="$(env LC_ALL=C grep -c '^diff --git ' "$PATCH_PATH" || true)"
     if [[ $FINAL_STATUS -eq 0 && -s "$PATCH_PATH" ]]; then
-      if ! (cd "$WORKSPACE" && git apply --check --binary "$PATCH_PATH") \
+      if ! (cd "$WORKSPACE" && git apply -p2 --check --binary "$PATCH_PATH") \
         > "$STATE_DIR/apply-check.log" 2>&1; then
         echo "error: captured cursor patch does not apply cleanly; real worktree was not changed" >&2
         FINAL_STATUS=12
-      elif ! (cd "$WORKSPACE" && git apply --binary "$PATCH_PATH") \
+      elif ! (cd "$WORKSPACE" && git apply -p2 --binary "$PATCH_PATH") \
         > "$STATE_DIR/apply.log" 2>&1; then
         echo "error: captured cursor patch failed during apply after a successful check" >&2
         FINAL_STATUS=13
@@ -517,6 +587,7 @@ echo "work copy: $WORK_COPY"
 echo "copies retained: $COPIES_RETAINED"
 echo "patch: $PATCH_DESCRIPTION"
 echo "files changed: $FILES_CHANGED"
+echo "ignored paths dropped: $IGNORED_DROPPED"
 echo "enforcement: sandbox-confined to a git-less copy; network denied; NEVER --force/-f/--yolo"
 echo "git ownership: orchestrator owns commit, gate, and publish; dispatcher only applies the captured patch"
 [[ ! -s "$RESULT_FILE" ]] || cat "$RESULT_FILE"
