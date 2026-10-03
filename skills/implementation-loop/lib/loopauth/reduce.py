@@ -140,7 +140,8 @@ def _reject(code: str, message: str) -> None:
 
 
 class Reducer:
-    def __init__(self) -> None:
+    def __init__(self, run: str | None = None) -> None:
+        self.run = run
         self.unknown_schema: list[int] = []
         self.nodes: dict[str, dict] = {}
         self.attempts: dict[str, dict] = {}
@@ -172,10 +173,17 @@ class Reducer:
             summary["status"] = "unknown-schema"
             self.unknown_schema.append(position)
         else:
+            if self.run is None and type(obj.get("run")) is str:
+                self.run = obj["run"]
             attribution = declared_attribution(obj)
             if attribution is not None:
                 summary["attribution"] = attribution
-            if schema == 1:
+            if type(obj.get("run")) is str and self.run != obj["run"]:
+                summary["status"] = "rejected"
+                self.rejected.append({"position": position, "seq": summary["seq"],
+                                      "event": summary["event"], "code": "run-mismatch",
+                                      "message": "line belongs to another run"})
+            elif schema == 1:
                 summary["status"] = "legacy"
             else:
                 try:
@@ -199,7 +207,7 @@ class Reducer:
                         "seq": summary["seq"],
                         "schema": schema,
                         "status": summary["status"],
-                        "reasons": sorted(gate_ineligibility(obj)),
+                        "reasons": sorted(gate_ineligibility(dict(obj, input_isolation="endpoint-sampled"))),
                         "completion_evidence": False,
                     }
                 )
@@ -210,6 +218,8 @@ class Reducer:
         run = obj.get("run")
         if type(run) is not str:
             _reject("envelope", "a schema-2 line must carry the journal envelope run")
+        if self.run is not None and run != self.run:
+            _reject("run-mismatch", "line belongs to another run")
         if "attribution_failure" in obj:
             _reject("envelope", "a schema-2 record is never unattributed")
         name = obj.get("event")
@@ -320,6 +330,7 @@ class Reducer:
         row = v.select_row(*pair)
         assert row is not None
         evidence = payload["evidence"]
+        self._check_journal_references(attempt, evidence)
         if pair == ("starting", "running"):
             self._check_observation(attempt, evidence)
         elif pair == ("starting", "blocked"):
@@ -421,6 +432,46 @@ class Reducer:
             _reject(code, f"the named {event} belongs to another attempt")
         return record
 
+    def _check_journal_references(self, attempt: dict, value: object) -> None:
+        """Only the already accepted prefix can contradict a reference claim."""
+        if type(value) is not dict:
+            return
+        subjects = {
+            "operation-result": ("operation.result", {"outcome": "outcome", "content": "output_content"}),
+            "gate": ("gate.result", {"verdict": "verdict", "input_content": "input_content"}),
+            "review": ("review.recorded", {"verdict": "verdict", "reviewer": "reviewer"}),
+            "publish": ("publish.recorded", {"outcome": "outcome", "pr": "pr", "head_sha": "head_sha", "content": "content"}),
+        }
+        kind = value.get("kind")
+        if type(kind) is str and kind in subjects and "digest" in value:
+            event, fields = subjects[kind]
+            matches = [(name, record) for (name, digest), record in self.by_digest.items()
+                       if digest == value["digest"]]
+            for name, record in matches:
+                if (name != event or record["node_id"] != attempt["node_id"]
+                        or record["attempt_id"] != attempt["attempt_id"]
+                        or any(value.get(key) != record.get(field) for key, field in fields.items())):
+                    _reject("reference-contradicted", f"{kind} reference contradicts its accepted record")
+        else:
+            for child in value.values():
+                self._check_journal_references(attempt, child)
+
+    def _check_late_record(self, attempt: dict, payload: dict) -> None:
+        evidence = payload["evidence"]
+        if payload["to"] == "succeeded":
+            entry = v.TERMINAL_EVIDENCE[v.matrix_key(attempt["node_type"], attempt["stop_point"])]
+            slots = entry["substitutable"]
+            container = evidence["terminal_evidence"]
+        else:
+            container = evidence["failure_evidence"]
+            kind = v.FAILURE_SUBSTITUTABLE.get(container["phase"])
+            slots = {"failing_ref": kind} if kind else {}
+        if not slots:
+            _reject("substitution-kind", "the pinned row has no substitutable reference; park only")
+        for slot, kind in slots.items():
+            ref = container[slot]  # full evidence was validated with substitution disabled
+            self._named(SUBSTITUTED_EVENTS[kind], ref, attempt, "reconciliation-required")
+
     def _check_observation(self, attempt: dict, evidence: dict) -> None:
         spawned = self._named("operation.spawned", evidence["observation_ref"], attempt, "observation")
         if spawned["identity"] != evidence["identity"]:
@@ -431,8 +482,11 @@ class Reducer:
         if self._records("operation.released", attempt["attempt_id"]):
             _reject("barrier", "an operation.released exists for the attempt; the barrier is not closed")
 
-    def _check_reconciliation(self, attempt: dict, payload: dict) -> dict:
+    def _check_reconciliation(self, attempt: dict, payload: dict) -> dict | None:
         evidence = payload["evidence"]
+        if "reconciliation_ref" not in evidence:
+            self._check_late_record(attempt, payload)
+            return None
         ref = evidence["reconciliation_ref"]
         record = self._named("reconciliation.result", ref, attempt, "reconciliation-missing")
         if record["method"] != ref["kind"]:
@@ -566,9 +620,9 @@ class Reducer:
         }
 
 
-def reduce_run(events: object) -> dict:
+def reduce_run(events: object, *, run: str | None = None) -> dict:
     """Fold one run's parsed journal lines (in file order)."""
-    reducer = Reducer()
+    reducer = Reducer(run)
     for event in events:  # type: ignore[union-attr]
         reducer.apply(event)
     return reducer.result()

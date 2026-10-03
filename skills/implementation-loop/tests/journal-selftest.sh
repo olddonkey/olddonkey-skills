@@ -2167,6 +2167,40 @@ else
   fail "schema-1 view: an append still lands in the run, not in unattributed.jsonl"
 fi
 
+# PR65 rebase: the new readers dispatch schema before interpreting lifecycle.
+run_cmd reader-schema2-end "$JOURNAL" read-run --workspace "$WS_S1E" --run "$RUN_S1E"
+expect_status 0 "read-run schema 2: a known schema is returned"
+if python3 - "$CASE_STDOUT" <<'PYREADER'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["ended"] is False and doc["end_status"] is None
+assert any(e.get("schema") == 2 and e.get("event") == "run.end" for e in doc["events"])
+PYREADER
+then pass "read-run schema 2: run.end cannot terminate schema 1"; else fail "read-run schema 2: run.end cannot terminate schema 1"; fi
+for SCHEMA_READER in 2 99; do
+  python3 - "$STORE_S1E/runs" "$SCHEMA_READER" <<'PYREADER'
+import json, os, sys
+root, schema = sys.argv[1], int(sys.argv[2])
+run = "20200101T000000Z-00%04d" % schema
+path = os.path.join(root, run + ".jsonl")
+with open(path, "w") as stream:
+    json.dump(dict(schema=schema, run=run, seq=1, event="run.begin", plan="schema-probe"), stream)
+    stream.write("\n")
+os.chmod(path, 0o600)
+PYREADER
+  run_cmd "finder-schema-$SCHEMA_READER" "$JOURNAL" find-run --workspace "$WS_S1E" --plan schema-probe
+  expect_status 0 "find-run: schema $SCHEMA_READER stays a read-only observation"
+  if python3 - "$CASE_STDOUT" "$SCHEMA_READER" <<'PYREADER'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+run = "20200101T000000Z-00%04d" % int(sys.argv[2])
+assert run not in doc["runs"] and run in doc["ambiguous"]
+PYREADER
+  then pass "find-run: schema $SCHEMA_READER run.begin is ambiguous"; else fail "find-run: schema $SCHEMA_READER run.begin is ambiguous"; fi
+done
+run_cmd reader-unknown-schema "$JOURNAL" read-run --workspace "$WS_S1E" --run 20200101T000000Z-000099
+expect_status 9 "read-run: unknown schema fails closed (exit 9)"
+
 # --- 17. The shared lib/ is imported from the script's real path ---
 INSTALL="$TMP_ROOT/install"
 mkdir -p "$INSTALL/scripts" "$TMP_ROOT/bin"

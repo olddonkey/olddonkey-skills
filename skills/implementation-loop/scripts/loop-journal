@@ -1566,7 +1566,9 @@ def cmd_read_run(args: argparse.Namespace) -> int:
         tail = "unterminated"
     else:
         tail = "clean"
-    ends = [event for event in events if event.get("event") == "run.end"]
+    if any(vocabulary.line_schema(event) is None for event in events):
+        fail("unknown-schema line in the run", EXIT_UNKNOWN_SCHEMA)
+    ends = [event for event in schema_1_lines(events) if event.get("event") == "run.end"]
     print(dump_json({
         "schema": 1,
         "run": args.run,
@@ -1619,7 +1621,8 @@ def cmd_find_run(args: argparse.Namespace) -> int:
         first_end = data.find(b"\n")
         first_line = data if first_end < 0 else data[: first_end + 1]
         events, _, mid_corrupt = parse_segment(first_line)
-        if mid_corrupt or not events or events[0].get("event") != "run.begin":
+        if (mid_corrupt or not events or vocabulary.line_schema(events[0]) != 1
+                or events[0].get("event") != "run.begin"):
             ambiguous.append(run_id)
         elif events[0].get("plan") == args.plan:
             runs.append(run_id)
