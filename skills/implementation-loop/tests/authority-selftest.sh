@@ -1101,12 +1101,13 @@ def g_seam(argv):
     emit("seam: recovery-after-delimiter is in the closed list for recovery",
          store._CRASH["point"] == "recovery-after-delimiter")
     emit("seam: recovery's crash points are exactly the closed list",
-         store.CRASH_APPLICABLE["recover"] == {"after-push", "after-readback", "after-intent-remove",
-                                                "recovery-after-delimiter"}, store.CRASH_APPLICABLE["recover"])
-    exercised = {"revoke": set(REVOCATION_POINTS), "regenesis": set(REGENESIS_CUTS)}
-    emit("seam: every named crash point of revocation and re-genesis is run as a real crash by this suite",
-         all(store.CRASH_APPLICABLE[command] <= exercised[command] for command in exercised),
-         {command: sorted(store.CRASH_APPLICABLE[command] - exercised[command]) for command in exercised})
+         store.CRASH_APPLICABLE["recover"] == ({"after-push", "after-readback", "after-intent-remove",
+                                                "recovery-after-delimiter", "archive-after-rename", "archive-after-readonly"} | store.PRIMITIVE_POINTS), store.CRASH_APPLICABLE["recover"])
+    exercised = review_named_points()
+    emit("seam: all five commands derive their real-crash cases from CRASH_APPLICABLE",
+         set(exercised) == set(store.CRASH_APPLICABLE) and
+         all(set(exercised[command]) == points for command, points in store.CRASH_APPLICABLE.items()),
+         exercised)
     os.environ["LOOP_AUTHORITY_CRASH_AT"] = "frame-byte-500"
     store.configure_crash("revoke")
     ok, code = refused(lambda: store.check_frame_byte(500), "crash-point")
@@ -4188,6 +4189,103 @@ def s_matrix_coverage_selftest():
              and detail.startswith("the crashed ceremony exited"), (slot.calls, detail))
 
 
+def review_named_points():
+    # These cases actually crash and recover every registered command/point.
+    # Adding a registered point without implementing it must fail the suite.
+    sys.path.insert(0, LIB)
+    from loopauth.store import CRASH_APPLICABLE
+    return {command: tuple(sorted(points)) for command, points in CRASH_APPLICABLE.items()}
+
+
+def j_review_crash(command, point):
+    def job(checks):
+        label = f"review crash {command}/{point}"
+        if command == "genesis":
+            case = Case(label)
+            result = case.genesis(env={"LOOP_AUTHORITY_CRASH_AT": point})
+        elif command == "regenesis":
+            case = quarantined_case(label)
+            result = case.ceremony("regenesis", env={"LOOP_AUTHORITY_CRASH_AT": point})
+        elif command in ("rotate", "revoke"):
+            case = committed_case(label)
+            args = (command,) if command == "rotate" else (command, "--epoch", "1")
+            result = case.ceremony(*args, env={"LOOP_AUTHORITY_CRASH_AT": point})
+        else:
+            if point.startswith("archive-"):
+                case = quarantined_case(label)
+                crashed(case, "after-readback", "regenesis")
+            elif point.startswith("fs-create-"):
+                case = committed_case(label, rotate=True)
+                data = case.read(case.log_path())
+                frames, _ = parse_frames(data)
+                case.write(case.log_path(), data[:frames[0]["end"]])
+            else:
+                case = committed_case(label)
+                crashed(case, "after-frame-fsync", "rotate")
+                if point == "recovery-after-delimiter":
+                    case.write(case.log_path(), case.read(case.log_path())[:-1])
+            result = case.writer("recover", env={"LOOP_AUTHORITY_CRASH_AT": point})
+        checks(label + ": cut is reached", result.rc == 137, result)
+        checks(label + ": published files have one link", all(
+            os.stat(os.path.join(directory, name)).st_nlink == 1
+            for directory, _, files in os.walk(case.auth()) for name in files))
+        first = case.writer("recover")
+        second = case.writer("recover")
+        checks(label + ": second recovery converges", first.rc in (0, 6) and second.rc == first.rc
+               and first.json.get("state") == second.json.get("state")
+               and second.json.get("state") in ("committed", "quarantined", "none"), (first, second))
+        case.agree(checks, label + ": writer and verifier agree after recovery", second.json.get("state"))
+    return job
+
+
+def j_review_stray_refs(checks):
+    case = committed_case("review-stray")
+    git("--git-dir", case.remote, "update-ref", "refs/heads/" + ANCHOR_REF, case.tip())
+    case.agree(checks, "a tail-matched unrelated branch does not quarantine", "committed")
+    result = case.writer("recover")
+    checks("stray branch: recover succeeds without quarantine marker", result.rc == 0 and
+           not os.path.exists(os.path.join(case.store_dir(), "quarantine")), result)
+
+
+def j_review_unlinkable(checks):
+    case = committed_case("review-unlinkable", rotate=True)
+    lineage = Lineage(case)
+    case.write(case.log_path(), lineage.data[:lineage.frames[0]["end"]])
+    result = case.writer("recover")
+    checks("unlinkable: rollback remains quarantined", result.rc == 6 and result.json.get("state") == "quarantined", result)
+    before, remote_before = case.snapshot(), case.remote_snapshot()
+    result = case.ceremony("regenesis")
+    checks("unlinkable: current lineage-preserving refusal is documented and pinned", result.rc == 4 and "regenesis-unlinkable" in result.out, result)
+    unchanged(checks, "unlinkable refusal", case, before, remote_before)
+
+
+def j_review_none(checks):
+    case = Case("review-none")
+    status, verification, independent = case.status(), case.writer("verify"), case.verifier()
+    checks("none: status remains informational success", status.rc == 0 and status.json.get("state") == "none", status)
+    checks("none: both verify commands refuse absent authority", verification.rc == 12 and independent.rc == 12
+           and verification.json.get("state") == independent.json.get("state") == "none", (verification, independent))
+
+
+def j_review_surrogates(checks):
+    case = committed_case("review-surrogate")
+    original = case.read(case.log_path())
+    for value in ({"payload": "\ud800", "sig": "x"}, {"\ud800": "x"}):
+        frame = mkframe(2, "epoch.rotated", json.dumps(value).encode())
+        case.write(case.log_path(), original + frame)
+        writer, independent = case.agree(checks, "complete surrogate frame is quarantined", "quarantined")
+        checks("surrogate frame: verifier emits JSON, no traceback", independent.rc == 6 and
+               "Traceback" not in independent.err and "UTF-8" in independent.json.get("detail", ""), independent)
+
+
+def s_review_regressions():
+    jobs = [(f"review crash {command}/{point}", j_review_crash(command, point))
+            for command, points in review_named_points().items() for point in points]
+    jobs += [("review stray ref", j_review_stray_refs), ("review unlinkable", j_review_unlinkable),
+             ("review no authority", j_review_none), ("review surrogate", j_review_surrogates)]
+    parallel(jobs)
+
+
 MATRIX = {}
 
 
@@ -4196,7 +4294,8 @@ def main():
         MATRIX.update(matrix_options(sys.argv[6:]))
         sections = (("crash matrix", s_crash_matrix),)
     else:
-        sections = (("crash matrix coverage check", s_matrix_coverage_selftest),
+        sections = (("review regressions", s_review_regressions),
+                    ("crash matrix coverage check", s_matrix_coverage_selftest),
                     ("in-process", s_inproc_pure), ("genesis basics", s_genesis_basic),
                     ("write protocol", s_protocol), ("epochs and re-genesis", s_epochs_regenesis),
                     ("ceremonies and key staging", s_ceremonies_staging),

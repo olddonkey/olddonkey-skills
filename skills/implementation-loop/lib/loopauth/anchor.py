@@ -219,16 +219,19 @@ def ls_remote(scratch: str, remote: str) -> str | None:
         raise
     if result.returncode != 0:
         raise Unreachable(result.stderr.decode("utf-8", "replace").strip()[:300])
-    text = result.stdout.decode("ascii", "replace")
-    lines = [line for line in text.split("\n") if line]
-    if not lines:
-        return None
-    if len(lines) != 1:
-        _fail("remote", "ls-remote returned more than one ref")
-    oid, _tab, ref = lines[0].partition("\t")
-    if ref != tools.ANCHOR_REF or not tools.OID_RE.fullmatch(oid):
-        _fail("remote", "ls-remote returned an unexpected ref line")
-    return oid
+    lines = result.stdout.decode("ascii", "replace").splitlines()
+    matches = []
+    for line in lines:
+        if not line:
+            continue
+        oid, tab, ref = line.partition("\t")
+        if not tab or not ref.startswith("refs/") or not tools.OID_RE.fullmatch(oid):
+            raise Unreachable("ls-remote returned a malformed ref line")
+        if ref == tools.ANCHOR_REF:
+            matches.append(oid)
+    if len(matches) > 1:
+        raise Unreachable("ls-remote returned more than one exact anchor ref")
+    return matches[0] if matches else None
 
 
 def fetch(scratch: str, remote: str) -> str:
@@ -253,7 +256,7 @@ def fetch(scratch: str, remote: str) -> str:
         os.close(fd)
     oid = data.decode("ascii", "replace").strip()
     if not tools.OID_RE.fullmatch(oid):
-        _fail("remote", "fetched ref is malformed")
+        raise Unreachable("fetched ref is malformed")
     return oid
 
 
@@ -261,7 +264,7 @@ def _packed_ref(scratch: str) -> str:
     try:
         fd = os.open(os.path.join(scratch, "packed-refs"), os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as error:
-        raise AnchorError("remote", "fetched ref is missing") from error
+        raise Unreachable("fetched ref is missing") from error
     try:
         data = b""
         while True:
@@ -275,7 +278,7 @@ def _packed_ref(scratch: str) -> str:
         oid, _sp, ref = line.partition(" ")
         if ref == tools.READBACK_REF and tools.OID_RE.fullmatch(oid):
             return oid
-    raise AnchorError("remote", "fetched ref is missing")
+    raise Unreachable("fetched ref is missing")
 
 
 class ChainEntry:

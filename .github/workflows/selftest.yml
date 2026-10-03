@@ -104,6 +104,8 @@ jobs:
         run: bash skills/implementation-loop/tests/index-selftest.sh
       - name: Reducer selftest
         run: bash skills/implementation-loop/tests/reduce-selftest.sh
+      - name: Authority review regression controls
+        run: python3 skills/implementation-loop/tests/authority-review-selftest.py
       - name: Authority store selftest
         run: bash skills/implementation-loop/tests/authority-selftest.sh
       - name: Authority registry selftest
@@ -319,6 +321,16 @@ jobs:
         run: |
           bash skills/implementation-loop/tests/authority-selftest.sh --crash-matrix \
             --check-shards cut-ids --sizes "$SIZES"
+
+  authority-macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authority review regression controls
+        run: python3 skills/implementation-loop/tests/authority-review-selftest.py
+      - name: Authority store and Darwin start-token regressions
+        run: bash skills/implementation-loop/tests/authority-selftest.sh
 
   tree-oid:
     strategy:

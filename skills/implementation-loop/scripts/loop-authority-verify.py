@@ -105,8 +105,11 @@ def _canon_check(value: object, depth: int = 0) -> None:
 
 def canon(value: object) -> bytes:
     _canon_check(value)
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-                      allow_nan=False).encode("utf-8")
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                          allow_nan=False).encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise Bad("canonical", "string is not encodable as UTF-8") from error
 
 
 def load_canonical(data: bytes, what: str) -> object:
@@ -422,8 +425,11 @@ class Runner:
         raise EnvError(f"git form outside the three allowed: {form}")
 
     def run(self, argv: list[str], *, git: bool, stdin: bytes = b"") -> subprocess.CompletedProcess:
-        return subprocess.run(argv, input=stdin, capture_output=True, env=self.env(git),
-                              cwd=self.temp, timeout=120, check=False, close_fds=True)
+        try:
+            return subprocess.run(argv, input=stdin, capture_output=True, env=self.env(git),
+                                  cwd=self.temp, timeout=120, check=False, close_fds=True)
+        except subprocess.TimeoutExpired as error:
+            raise Unreachable("remote command timed out") from error
 
     def init_repo(self) -> None:
         self.repo = os.path.join(self.temp, "anchor.git")
@@ -1489,7 +1495,7 @@ def verify() -> dict:
 
 def exit_code(out: dict) -> int:
     state = out["state"]
-    if state in ("committed", "none"):
+    if state == "committed":
         return EXIT["committed"]
     if state in TERMINAL:
         return EXIT["terminal"]
@@ -1540,6 +1546,8 @@ def main(argv: list[str]) -> int:
     except OSError as error:
         print(f"error: environment: {error}", file=sys.stderr)
         return EXIT["env"]
+    except Unreachable as error:
+        out = result("pending", "remote unreachable", str(error))
     except Bad as bad:
         out = result("invalid", "layout", bad.detail)
     finally:
