@@ -64,6 +64,14 @@ at most 200 characters and no newline; intent has at most 20000 UTF-8
 bytes. The spec and note files passed to commands also stay outside the
 worktree. Unit ids are never reused.
 
+The spec heading look-alike guard is defence in depth: it recognizes level-2
+ATX and dashed setext headings with invisible formatting characters, while
+ordinary prose and other heading levels remain valid. Homoglyphs, such as a
+Cyrillic letter substituted for a Latin one, are out of scope. The engineer's
+approval of the spec's exact bytes is the control. Invalid specs report a
+fixed reason (with a line number for a look-alike heading); the unit state
+still records `spec-invalid`.
+
 ## Commands
 
 | Command | Effect and requirements |

@@ -1025,7 +1025,9 @@ Review of the implementation changed these. `references/coordinator.md` is the o
 - Children inherit no `LOOP_*` variable and none of the `GIT_DIR` family. `GIT_DIR=<other repo>` used to create the unit branch in the other repository.
 - A dispatch has a time cap, `caps.dispatch_seconds` (1 to 14400, default 3600). On expiry, or on SIGINT, SIGTERM, or SIGHUP, the adapter's process group gets TERM and then KILL. After any adapter exit a surviving descendant is stopped, and one that cannot be stopped leaves the unit `unknown-outcome`.
 - Every path the coordinator writes into a prompt or prints is a JSON string. A file name with a newline could otherwise forge a section of the review prompt.
-- A spec with a control or Unicode format character, or with a look-alike section heading (whitespace, hash runs, or case variation), is invalid. So is a verdict with a control or Unicode format character in any string.
+- A spec is invalid when it holds a control character, a bidirectional control (U+202A to U+202E, U+2066 to U+2069), or a zero-width space, word joiner, or BOM. So is a verdict with one in any string. Joiners and direction marks (U+200C to U+200F) are allowed, since emoji and several scripts need them.
+- A spec is also invalid when a line other than the five exact headings would render as a level-2 heading with one of the five section names: an ATX `##` line or a name underlined with dashes, compared after removing invisible characters and ignoring case and spacing. A level-1 or level-3 heading and a bare name are ordinary text. Homoglyphs are not caught; the engineer's approval of the exact bytes is the control. The refusal names the line.
+- A unit name read from journal events must match the unit id pattern before `abandon` uses it as a path; otherwise the run is quarantined.
 - The combined verdict is stored as `verdict.json` and printed before the run is closed.
 - An unreadable `state.json` shows as `unreadable` in `status`. `abandon --unit ID` moves it aside when no open run can belong to it.
 - Exit 1 is an internal error with the traceback in `last-error.txt`; exit 130 is a signal during a dispatch.

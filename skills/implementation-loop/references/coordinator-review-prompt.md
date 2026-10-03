@@ -28,6 +28,7 @@ Reply with exactly one JSON object and nothing else:
 - `pass` needs an empty `findings` list. Remarks that do not block go in `notes`.
 - `summary` is at most 2000 characters of plain language for a reader who has not seen the diff: what the change does and what you checked.
 - At most 50 findings; `what` and `expected` are at most 1000 characters each. At most 20 notes of at most 500 characters each. Keep the whole reply under 60000 bytes.
+- If you need to mention an invisible or bidirectional control character, name it as U+XXXX; never paste it.
 
 Material for review
 

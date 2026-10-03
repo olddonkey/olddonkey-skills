@@ -50,8 +50,8 @@ class Stop(Exception):
         self.code, self.message = code, message
 
 class Outcome(Exception):
-    def __init__(self, kind: str, reason: str):
-        self.kind, self.reason = kind, reason
+    def __init__(self, kind: str, reason: str, detail: str | None = None):
+        self.kind, self.reason, self.detail = kind, reason, detail
 
 
 def fail(code: int, message: str):
@@ -640,7 +640,8 @@ def reconcile() -> list[dict]:
                     unreadable_units[0]['run'] = run
                 else:
                     named = {e.get('unit') for e in doc['events'] if isinstance(e.get('unit'), str)}
-                    unknowns.append({'unit': next(iter(named)) if len(named) == 1 else None,
+                    owned_unit = next(iter(named)) if len(named) == 1 else None
+                    unknowns.append({'unit': owned_unit if owned_unit and UNIT_RE.fullmatch(owned_unit) else None,
                                      'run': run, 'state': 'unknown-outcome', 'reason': 'state-lost'})
     return unknowns
 
@@ -829,32 +830,61 @@ def capture_dispatch(state: dict, agent: dict, label: str, prompt: str, cap: int
     return message, None
 
 
+HEADING_BLANKS = frozenset('\u115f\u1160\u2800\u3164\uffa0')
+
+
+def heading_visible(text: str) -> str:
+    return ''.join(ch for ch in text if unicodedata.category(ch) not in ('Cf', 'Mn')
+                   and ch not in HEADING_BLANKS)
+
+
+def fold_heading(text: str) -> str:
+    return ' '.join(heading_visible(text).split()).casefold()
+
+
+def lookalike_heading(lines: list[str]) -> int | None:
+    section_names = {fold_heading(heading[3:]) for heading in HEADINGS}
+    for index, line in enumerate(lines):
+        if line in HEADINGS:
+            continue
+        visible = heading_visible(line)
+        atx = re.fullmatch(r' {0,3}##(?!#)(.*)', visible)
+        if atx:
+            body = re.sub(r'\s*#+\s*$', '', atx.group(1))
+            if fold_heading(body) in section_names:
+                return index + 1
+        if (index + 1 < len(lines) and fold_heading(line) in section_names and
+            re.fullmatch(r'-+', lines[index + 1].strip())):
+            return index + 1
+    return None
+
+
 def spec_parts(message: str):
+    if len(message.strip().encode('utf-8')) > 32768:
+        return 'over 32768 bytes', 'invalid'
     if has_controls(message):
-        return None, 'invalid'
+        return 'control or format character', 'invalid'
     data = message.strip()
-    if len(data.encode('utf-8')) > 32768:
-        return None, 'invalid'
     lines = data.splitlines()
     if not lines or not lines[0].startswith('Unit: ') or not lines[0][6:].strip():
-        return None, 'invalid'
+        return 'first line is not Unit:', 'invalid'
+    lookalike = lookalike_heading(lines)
+    if lookalike is not None:
+        return f'line {lookalike} looks like a section heading', 'invalid'
     positions = []
-    section_names = {heading[3:].casefold() for heading in HEADINGS}
-    if any(' '.join(line.strip().strip('#').split()).casefold() in section_names
-           and line not in HEADINGS for line in lines):
-        return None, 'invalid'
     for heading in HEADINGS:
         found = [i for i, line in enumerate(lines) if line == heading]
         if len(found) != 1:
-            return None, 'invalid'
+            return 'a heading is missing or repeated', 'invalid'
         positions.append(found[0])
     if positions != sorted(positions):
-        return None, 'invalid'
+        return 'headings out of order', 'invalid'
     bodies = [('\n'.join(lines[a+1:b])).strip() for a,b in zip(positions, positions[1:]+[len(lines)])]
     if bodies[0] and not bodies[1]:
         return bodies, 'declined'
-    if any(not bodies[i] for i in (0,1,2)):
-        return None, 'invalid'
+    for index, name in enumerate(('Why', 'Change', 'Tests')):
+        if not bodies[index]:
+            return f'{name} is empty', 'invalid'
     return (lines, positions, bodies), None
 
 
@@ -980,7 +1010,7 @@ def spec_command(unit: dict, cfg: dict, refs: dict):
                 fail(7, 'parked(spec-declined)')
             if kind == 'invalid':
                 if attempt == 2:
-                    raise Outcome('blocked', 'spec-invalid')
+                    raise Outcome('blocked', 'spec-invalid', parts)
                 continue
             lines, positions, bodies = parts
             final = '\n'.join(lines[:positions[-1]+1]) + '\n' + refs['coordinator-environment.md']
@@ -993,7 +1023,8 @@ def spec_command(unit: dict, cfg: dict, refs: dict):
             return
     except Outcome as error:
         terminal(state, 'blocked', error.reason, cleanup=True)
-        fail(6, f'blocked({error.reason})')
+        detail = f': {error.detail}' if error.reason == 'spec-invalid' and error.detail else ''
+        fail(6, f'blocked({error.reason}){detail}')
 
 
 def approve_command(args):
@@ -1117,7 +1148,8 @@ def utf8_text(value):
 
 def has_controls(value: str) -> bool:
     return any((ord(ch) < 32 and ch not in '\n\t') or 127 <= ord(ch) <= 159
-               or unicodedata.category(ch) == 'Cf' for ch in value)
+               or 0x202A <= ord(ch) <= 0x202E or 0x2066 <= ord(ch) <= 0x2069
+               or ord(ch) in (0x200B, 0x2060, 0xFEFF) for ch in value)
 
 
 def verdict_strings_safe(value) -> bool:
@@ -1321,7 +1353,8 @@ def abandon_command(args):
         if not isinstance(plan, str) or not plan.startswith('coordinator:'):
             fail(3, 'run is not a coordinator plan')
         named = {x['unit'] for x in events if isinstance(x.get('unit'), str)}
-        if any('unit' in x and not isinstance(x['unit'], str) for x in events) or len(named) > 1:
+        if (any('unit' in x and not isinstance(x['unit'], str) for x in events) or
+            len(named) > 1 or any(not UNIT_RE.fullmatch(name) for name in named)):
             quarantine(None, 'unowned-run', 'run names more than one or an invalid unit', [run])
         unit = next(iter(named)) if named else None
         if unit and not any(x['event'] == 'unit.begin' and x.get('unit') == unit for x in events):

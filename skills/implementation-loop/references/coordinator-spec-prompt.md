@@ -33,6 +33,7 @@ Rules:
 - Keep the unit to one coherent change that a person can review. If the request is larger, specify the first coherent part and say in Why what you left out.
 - If the request cannot be specified from what is in the repository, say why under Why and leave Change empty. The coordinator then stops and shows your Why to the engineer, which is the right outcome.
 - Leave the Environment section empty. The coordinator fills it in.
+- If you need to mention an invisible or bidirectional control character, name it as U+XXXX; never paste it.
 - Stay under 30000 bytes.
 
 The unit:
