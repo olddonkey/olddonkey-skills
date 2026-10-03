@@ -181,7 +181,8 @@ run):
    and replayed plans and caller-built bindings mint nothing -- abandonment
    that removes only the intent, missing intent-named directories, and the
    revocation's quarantine child) — expect `selftest: PASS (547 checks)`.
-   Then `bash skills/implementation-loop/tests/refs-selftest.sh` (0a.3: the
+   Then `python3 skills/implementation-loop/tests/refs-review-selftest.py` (8 offline
+   observation/CLI regression tests), then `bash skills/implementation-loop/tests/refs-selftest.sh` (0a.3: the
    closed reference map against a frozen oracle and the live 0a.1
    vocabulary, claim classification and the eligibility gate in-process, and
    the real `loop-authority refs` over journals written by `loop-journal
@@ -189,7 +190,7 @@ run):
    pending, quarantined, and in each bootstrap terminal state, with the
    journal store, the authority directory, and the remote byte-identical
    afterwards; needs `ssh-keygen` with `-Y` and `git`) — expect
-   `selftest: PASS (136 checks)`.
+   `selftest: PASS (148 checks)`.
 11. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
 12. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.

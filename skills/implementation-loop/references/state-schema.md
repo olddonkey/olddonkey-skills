@@ -975,7 +975,7 @@ macOS to exercise the Darwin start-token and durability paths.
 claimed references, read-only. It reads the run's segment exactly where
 `loop-journal` keeps it (`journal/<sha256(realpath(workspace))>/runs/<run>.jsonl`,
 `lib/loopauth/journal_read.py`: the same ownership, mode, and no-symlink
-checks, `O_NOFOLLOW`, never `meta.lock`, and no repair -- a torn last line is
+checks, `O_NOFOLLOW | O_NONBLOCK` (a FIFO is refused without waiting), never `meta.lock`, and no repair -- a torn last line is
 left out and reported as `torn_tail_bytes`, a mid-file invalid line fails
 closed), reduces it with 0a.1's reducer (unchanged), classifies every claim
 of every record the reducer accepted (`refs.py`), lays the outcomes over the
@@ -1041,7 +1041,9 @@ classification it does not list is an error, never a silent claim:
 `terminal_evidence` and `failure_evidence` are walked, never classified
 themselves; the one reference a reconciliation replaced is a claim of the
 substituted kind (`substituted_by: reconciliation_ref`). Each claim carries
-its record's `position`, `seq`, `event`, `node_id`, and `attempt_id`, its
+its report-local `id` (the key referenced by `refuted_by`), its originating
+`field`, and `substituted_by` (a replacement field name or null), plus its
+record's `position`, `seq`, `event`, `node_id`, and `attempt_id`, its
 `path` and the reducer's `guard` (null for a record's own field), `kind`,
 `digest`, the reference's own claims (`claims`, e.g. `answer`), `names`,
 `authority`, `validity`, and `reason`. Per node (its latest attempt, as the
@@ -1051,3 +1053,16 @@ its attempts is rejected, with `refuted_by` listing them; and
 `completion_eligible`, the constant `false` of 0a -- an explicit gate, not
 derived from the guards, so a node with no reference at all is ineligible
 too.
+
+The lock-free store observation compares a local-state digest before and after
+classification, retrying at most three times on a changed snapshot or `OSError`.
+If no stable read is obtained it reports `unavailable` with reason `changing`
+and `current_authorization: false`, rather than publishing a transient quarantine
+or a traceback. This is an observation, not synchronization: a later ceremony
+can still change the store after the report. It never acquires the writer lock.
+
+The refs command validates the journal and claims before establishing scratch
+space. Invalid input leaves no new cache directory. Valid observations may leave
+the parent `$HOME/.cache/olddonkey-loop/tmp` directory after their scratch entries
+are cleaned; “read-only” refers to authority, journal and remote contents. The
+canonical report is written as UTF-8 bytes, independent of stdout's locale codec.

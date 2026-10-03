@@ -264,6 +264,27 @@ def live_evidence():
     return pairs, fields, containers
 
 
+def live_classifications():
+    tree = ast.parse(open(os.path.join(LIB, "loopauth", "recover.py"), encoding="utf-8").read())
+    def outputs(value):
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return {value.value}
+        if isinstance(value, ast.IfExp):
+            return outputs(value.body) | outputs(value.orelse)
+        raise AssertionError("unrecognized assigned classifier state expression")
+    values = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Plan":
+            value = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "state"), None)
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                values.add(value.value)
+            elif not (isinstance(value, ast.Name) and value.id in ("state", "state_q")):
+                raise AssertionError("unrecognized classifier state expression")
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in ("state", "state_q") for t in node.targets):
+            values.update(outputs(node.value))
+    return values
+
+
 def main_static():
     # --- the frozen oracle
     emit("map: REFERENCE_MAP equals the frozen oracle (every kind: what it names, the 0a.1 fields that carry it, "
@@ -280,6 +301,11 @@ def main_static():
          tuple(refs.CLAIMLESS_EVENTS) == ORACLE_CLAIMLESS, refs.CLAIMLESS_EVENTS)
     emit("map: every 0a.2 classifier state maps to current or its unavailable reason (frozen)",
          refs.CLASSIFICATIONS == ORACLE_CLASSIFICATIONS, refs.CLASSIFICATIONS)
+    emit("map: claimless plus handled events equals the live RECORDS vocabulary",
+         set(refs.CLAIMLESS_EVENTS) | {"attempt.begin", "node.transition", "review.recorded", "reconciliation.result"}
+         == set(vocabulary.RECORDS), sorted(vocabulary.RECORDS))
+    emit("map: classifications equal all live Plan/state/state_q literals",
+         live_classifications() == set(refs.CLASSIFICATIONS), sorted(live_classifications()))
     # --- exactly once, against the live 0a.1 vocabulary
     for name in ("REFERENCE_MAP", "FIELD_MAP"):
         keys = literal_keys(name)
@@ -898,6 +924,27 @@ def child_ceremony():
         tools.cleanup()
 
 
+def child_observation():
+    # A real rotation at the exact seam the reviewer reproduced: the log has
+    # been read, but the remote has not. No reader lock may block this child.
+    home, url = ARGS
+    os.environ["HOME"] = home
+    os.environ["LOOP_AUTHORITY_TEST"] = "1"
+    from loopauth import recover, tools
+    original = recover.check_key_files
+    rotated = []
+    def interleave(*args, **kwargs):
+        if not rotated:
+            rotated.append(run_child(home, url, "rotate"))
+        return original(*args, **kwargs)
+    recover.check_key_files = interleave
+    try:
+        tools.establish_scratch()
+        print(json.dumps({"store": refs.observe_store(), "rotated": rotated}))
+    finally:
+        tools.cleanup()
+
+
 def run_child(home, url, command, point="-", *extra):
     result = subprocess.run([sys.executable, os.path.realpath(__file__), "child", LIB, TMP, home, url, command, point,
                              *extra], capture_output=True, timeout=600)
@@ -1128,6 +1175,29 @@ def main_command():
     emit("refs [schema-1 run]: the store is still reported (current) and nothing changed",
          report.get("store", {}).get("state") == "current"
          and before == [tree(journal_path(home)), tree(auth_path(home)), tree(remote)])
+    # --- a forced real interleaving plus ordinary concurrent ceremonies
+    probe = subprocess.run([sys.executable, os.path.realpath(__file__), "observation", LIB, TMP, home, _url],
+                           capture_output=True, timeout=120)
+    observation = json.loads(probe.stdout) if probe.returncode == 0 else {}
+    emit("observation: a real rotation between log and remote reads is retried to current",
+         probe.returncode == 0 and observation.get("store", {}).get("state") == "current"
+         and observation.get("rotated", [[1]])[0][0] == 0, (probe.returncode, observation, probe.stderr[-300:]))
+    def rotate_three_times():
+        return [run_child(home, _url, "rotate") for _ in range(3)]
+    concurrent_samples = 0
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        writing = pool.submit(rotate_three_times)
+        for index in range(8):
+            concurrent_samples += not writing.done()
+            observed = authority(home, "refs", "--workspace", ws_a, "--run", run_a)
+            state = (observed["json"] or {}).get("store", {})
+            emit(f"observation: concurrent ceremony sample {index} is coherent or explicitly changing/pending",
+                 observed["rc"] == 0 and state.get("state") in ("current", "unavailable")
+                 and state.get("reason") in (None, "changing", "pending"), observed)
+        rotations = writing.result()
+    emit("observation: all concurrent ceremonies succeed without a reader lock",
+         all(code == 0 for code, _err in rotations) and concurrent_samples > 0,
+         (rotations, concurrent_samples))
     # --- no lock that blocks the writer
     fd = os.open(auth_path(home, "lock"), os.O_RDWR)
     try:
@@ -1203,7 +1273,7 @@ def run(function):
 
 
 {"static": lambda: run(main_static), "claims": lambda: run(main_claims), "command": lambda: run(main_command),
- "child": child_ceremony}[MODE]()
+ "child": child_ceremony, "observation": child_observation}[MODE]()
 PY
 
 for mode in static claims command; do

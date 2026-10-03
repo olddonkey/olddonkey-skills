@@ -17,7 +17,7 @@ dimensions:
 - store state: current (anchored; not pending, quarantined, or in a
   bootstrap terminal state) or unavailable with its reason, plus the
   lineage class. The store is read only through 0a.2's read-only
-  classification, recover.classify (what `loop-authority status` and
+  classification, recover.classify_stable (wrapping what `loop-authority status` and
   `verify` run); the state is reported beside the claims and never changes
   one.
 
@@ -27,7 +27,8 @@ classified themselves. A kind, a reference field, a claim, or an event the
 map does not list is an error (fail closed), never a silent claim.
 
 Read-only: the journal is read by journal_read without loop-journal's lock,
-and recover.classify is called without the shared lock `status` takes, so
+and classification is sampled between local-state digests without the shared
+lock `status` takes, so
 no writer is ever blocked; guard status and eligibility are eligibility.py's.
 Nothing here admits a row or writes, and registry-selftest.sh's
 reachability scan proves that no path from this module reaches a sink.
@@ -322,19 +323,22 @@ def describe_store(summary: dict, remote_read: bool) -> dict:
 
 
 def observe_store() -> dict:
-    """0a.2's read-only classification, nothing else."""
-    plan = recover.classify()
+    """A stable read-only classification, or an explicit changing result."""
+    plan = recover.classify_stable()
+    if plan is None:
+        return {"state": UNAVAILABLE, "reason": "changing", "classification": None,
+                "table": None, "rule": None, "lineage": None, "test_only": None,
+                "current_authorization": False}
     return describe_store(plan.summary(), plan.remote_read)
 
 
-def report(workspace: object, run_id: object) -> dict:
-    """The run's claims, each with its validity and reason, its nodes'
-    guards, refuted flags, and eligibility, and the store state beside them."""
+def prepare_report(workspace: object, run_id: object) -> dict:
+    """Validate the journal and its claims before scratch/store access."""
     try:
         journal = journal_read.read_run(workspace, run_id)
     except journal_read.JournalReadError as error:
         raise RefsError(error.code, error.message, usage=error.usage) from error
-    reduced = reduce.reduce_run(journal["events"])
+    reduced = reduce.reduce_run(journal["events"], run=journal["run"])
     claims = claims_of(journal["events"], reduced)
     try:
         applied = eligibility.apply(reduced, claims)
@@ -352,8 +356,16 @@ def report(workspace: object, run_id: object) -> dict:
             "unknown_schema": reduced["unknown_schema"],
             "rejected": reduced["rejected"],
         },
-        "store": observe_store(),
         "claims": claims,
         "nodes": applied["nodes"],
         "completion_eligible": applied["completion_eligible"],
     }
+
+
+def observe_report(prepared: dict) -> dict:
+    """Add the store observation after journal/claim validation is complete."""
+    return {**prepared, "store": observe_store()}
+
+
+def report(workspace: object, run_id: object) -> dict:
+    return observe_report(prepare_report(workspace, run_id))

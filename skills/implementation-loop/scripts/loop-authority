@@ -16,7 +16,8 @@
 #                                         read-only verification of the run's
 #                                         claimed references (0a.3): canonical
 #                                         JSON on stdout; takes no lock and
-#                                         writes nothing; exit 0 when printed
+#                                         leaves store/journal/remote unchanged;
+#                                         valid requests use scratch cache; exit 0 when printed
 #
 # Store: $HOME/.config/olddonkey-loop/authority/ (see references/state-schema.md).
 # A ceremony is an operator-TTY session (A1.1): it refuses unless stdin and
