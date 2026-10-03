@@ -467,6 +467,9 @@ them here, and they bind 0a.1:
 - **Canonical limits.** Integers are limited to ±(2^53 − 1) and nesting to
   depth 64; anything beyond has no canonical encoding and is refused.
 
+- **A resolved journal reference must agree with its record.** When the `digest` of a reference of kind `operation-result`, `gate`, `review`, or `publish` equals the digest of a record the fold has already accepted, the reducer compares them — the record's event, `node_id`, `attempt_id`, the claimed outcome or verdict, and the content the record is about — and refuses the transition (`reference-contradicted`) if they differ. A digest that names no accepted record stays a claim. The guard is still `claimed`.
+- **A late real record exits `unknown-outcome` without a reconciliation.** `reconciliation_ref` is required exactly when the lost reference is substituted. If the lost record is in the journal, the transition carries the row's full evidence citing it and no `reconciliation_ref`; the reference must resolve to that record. A reference that does not resolve is refused (`reconciliation-required`), as is presenting both a reconciliation and the reference (`substitution-present`). Rows with no substitutable reference remain park-only.
+
 ---
 
 ## 4. What 0a.3 must pick up (hand-off)
