@@ -11,9 +11,12 @@
 #   LOOP_INDEX_ACTIVITY_SEC            default 300
 #   LOOP_INDEX_STALL_SEC               default 1200
 #   LOOP_INDEX_CHECKPOINT_FRESH_SEC    default 900
+#
+# Shared code is imported from the sibling lib/ of this script's real path; a
+# symlinked lib/ is refused.
 
 set -euo pipefail
-exec python3 - "$@" <<'PY'
+exec python3 - "${BASH_SOURCE[0]}" "$@" <<'PY'
 from __future__ import annotations
 
 import argparse
@@ -30,6 +33,9 @@ from datetime import datetime, timezone
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_STORE = 6
+
+# The bash wrapper passes its own path first; the rest is the command line.
+SELF_PATH = sys.argv.pop(1) if len(sys.argv) > 1 else ""
 
 RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$")
 
@@ -91,6 +97,13 @@ Declared attribution (dispatch and gate objects, timeline events):
   with no dispatch.start), or conflict (its events declare different
   values; no unit or round is shown and it counts as unattributed).
 
+Schema dispatch (every line is read by its own `schema`):
+  schema 1            feeds every view below, exactly as before
+  schema 2            (task-graph-v1 vocabulary tg-v1.0a1) is tolerated and
+                      counted in schema_2_events; it feeds no schema-1 view
+  anything else       unknown: counted in unknown_schema_lines, never
+                      interpreted; the run and the journal read degraded
+
 Per-run totals and timeline:
   counts_complete     false when the run is degraded or a torn tail was
                       discarded; counts are then partial
@@ -117,13 +130,46 @@ Test-only environment overrides:
 Exit codes:
   0  success, including empty store and degraded journal
   2  usage
-  6  operational failure (HOME unset or unreadable)
+  6  operational failure (HOME unset or unreadable, or a missing or
+     symlinked shared lib/)
 """
 
 
 def fail(message: str, code: int) -> None:
     print(f"error: {message}", file=sys.stderr)
     raise SystemExit(code)
+
+
+def load_vocabulary() -> object:
+    """Import lib/loopauth from the lib/ directory beside this script's real
+    scripts/ directory. A symlinked or missing lib/, package directory, or
+    package entry is refused (exit 6); nothing else on sys.path can shadow it."""
+    if not SELF_PATH:
+        fail("cannot resolve the loop-index script path", EXIT_STORE)
+    real = os.path.realpath(SELF_PATH)
+    lib = os.path.join(os.path.dirname(os.path.dirname(real)), "lib")
+    package = os.path.join(lib, "loopauth")
+    for path in (lib, package):
+        try:
+            info = os.lstat(path)
+        except OSError:
+            fail(f"shared library directory is missing: {path}", EXIT_STORE)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            fail(f"refusing shared library path (symlink or not a directory): {path}", EXIT_STORE)
+    for entry in os.scandir(package):
+        if entry.is_symlink():
+            fail(f"refusing shared library path (symlink): {entry.path}", EXIT_STORE)
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, lib)
+    import importlib
+
+    module = importlib.import_module("loopauth")
+    if os.path.dirname(os.path.realpath(str(module.__file__))) != package:
+        fail(f"loopauth resolved outside {package}", EXIT_STORE)
+    return importlib.import_module("loopauth.vocabulary")
+
+
+vocabulary = load_vocabulary()
 
 
 def contains_newline(value: object) -> bool:
@@ -312,14 +358,23 @@ def inspect_run(runs_dir: str, run_id: str) -> dict:
             "run_id": run_id,
             "events": [],
             "mid_corrupt": True,
+            "degraded": True,
             "counts_complete": False,
             "generation": None,
             "status": "degraded",
+            "schema_2_events": 0,
+            "unknown_schema_lines": 0,
         }
-    events, discarded, mid = parse_segment(data)
+    parsed, discarded, mid = parse_segment(data)
+    # Dispatch on each line's schema: schema 1 feeds the views; schema 2 is
+    # tolerated and counted; any other value is degraded evidence, never read.
+    schemas = [vocabulary.line_schema(event) for event in parsed]
+    events = [event for event, schema in zip(parsed, schemas) if schema == 1]
+    unknown = sum(1 for schema in schemas if schema is None)
+    degraded = mid or unknown > 0
     generation = None
-    status = "degraded" if mid else "active"
-    if not mid:
+    status = "degraded" if degraded else "active"
+    if not degraded:
         for event in events:
             if event.get("event") == "run.begin":
                 try:
@@ -345,9 +400,12 @@ def inspect_run(runs_dir: str, run_id: str) -> dict:
         "run_id": run_id,
         "events": events,
         "mid_corrupt": mid,
-        "counts_complete": not mid and discarded == 0,
+        "degraded": degraded,
+        "counts_complete": not degraded and discarded == 0,
         "generation": generation,
         "status": status,
+        "schema_2_events": sum(1 for schema in schemas if schema == 2),
+        "unknown_schema_lines": unknown,
     }
 
 
@@ -1000,7 +1058,7 @@ def main(argv: list[str]) -> int:
             for info in infos:
                 generation = info["generation"]
                 dispatches = build_dispatches(
-                    info["events"], degraded=info["mid_corrupt"]
+                    info["events"], degraded=info["degraded"]
                 )
                 gates = build_gates(info["events"])
                 timeline, timeline_truncated = build_timeline(
@@ -1011,19 +1069,21 @@ def main(argv: list[str]) -> int:
                     "generation": generation if generation is not None else "unknown",
                     "status": info["status"],
                     "units": build_units(
-                        info["events"], degraded=info["mid_corrupt"]
+                        info["events"], degraded=info["degraded"]
                     ),
                     "dispatches": dispatches,
                     "gates": gates,
                     "checkpoint": build_checkpoint(
                         info["events"],
-                        degraded=info["mid_corrupt"],
+                        degraded=info["degraded"],
                         now=now,
                     ),
                     "counts_complete": info["counts_complete"],
                     "counts": build_counts(info["events"], dispatches, gates),
                     "timeline": timeline,
                     "timeline_truncated": timeline_truncated,
+                    "schema_2_events": info["schema_2_events"],
+                    "unknown_schema_lines": info["unknown_schema_lines"],
                 }
                 runs_out.append(run)
         else:

@@ -46,6 +46,7 @@ jobs:
           bash -n skills/implementation-loop/tests/integration-test.sh
           bash -n skills/implementation-loop/tests/journal-selftest.sh
           bash -n skills/implementation-loop/tests/index-selftest.sh
+          bash -n skills/implementation-loop/tests/reduce-selftest.sh
           bash -n skills/implementation-loop/tests/console-selftest.sh
           bash -n skills/implementation-loop/tests/calibration-selftest.sh
           bash -n skills/implementation-loop/tests/evidence-selftest.sh
@@ -97,6 +98,8 @@ jobs:
         run: bash skills/implementation-loop/tests/journal-selftest.sh
       - name: Index selftest
         run: bash skills/implementation-loop/tests/index-selftest.sh
+      - name: Reducer selftest
+        run: bash skills/implementation-loop/tests/reduce-selftest.sh
       - name: Console selftest
         run: bash skills/implementation-loop/tests/console-selftest.sh
       - name: Calibration selftest
