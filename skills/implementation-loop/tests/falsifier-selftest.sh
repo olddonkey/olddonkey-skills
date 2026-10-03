@@ -34,8 +34,8 @@
 #    and nothing else a loopauth module defines outside that table; planted
 #    bypasses fail F1 -- the complete one (a forged open token through
 #    s._new(s.Token(...)), s._grant, and s._fs_create) also shown live, run
-#    through the planted entry. The verifier's runner is its one frozen
-#    statement, and an extra process start planted inside it fails F1.
+#    through the planted entry. The verifier's runner is its frozen timeout
+#    handler with one subprocess call, and an extra process start planted inside it fails F1.
 # F2 every external entry point maps to exactly one row: a frozen table equal
 #    to the real argument parser's enumeration; each ceremony run through the
 #    real entry mints one ceremony token of its row; `recover` takes no
@@ -76,7 +76,8 @@
 #    then) with the writer, the verifier, and refs classifying the store
 #    quarantined by its exact rule and position, and once recovery has run
 #    to completion from the cut the quarantine marker exists with its exact
-#    bytes; "abandoned" for re-genesis requires the remote tip to be the
+#    bytes and no residual intent. A marker with residual intent is an
+#    explicit quarantined case, never "both"; "abandoned" for re-genesis requires the remote tip to be the
 #    recorded old pointer, each with planted half-transitions it must refuse;
 #    every byte of
 #    the revocation, rotation, and genesis frames; the every-byte crash matrix
@@ -342,11 +343,12 @@ ENTRY_MODULE_ACCESS = {
     "canonical": {"canonical", "CanonicalError"},
     "tools": {"establish_scratch", "test_mode", "cleanup", "ToolError"},
     "store": {"EXIT_OK", "EXIT_REFUSED", "EXIT_DORMANT", "EXIT_CONSUME", "EXIT_PENDING", "EXIT_QUARANTINED",
-              "EXIT_TERMINAL", "EXIT_INVALID", "configure_crash", "WriterLock", "ReaderLock", "AuthorityError"},
+              "EXIT_TERMINAL", "EXIT_INVALID", "configure_crash", "WriterLock", "ReaderLock", "AuthorityError",
+              "anchor.Unreachable", "anchor.AnchorError"},
     "registry": {"admit", "RowRefused"},
     "recover": {"recover", "classify", "TERMINAL_STATES"},
     "ceremony": {"run"},
-    "refs": {"report", "RefsError"},
+    "refs": {"prepare_report", "observe_report", "RefsError"},
 }
 # The modules load_loopauth() loads, in its order: its one dict of modules.
 ENTRY_LOADED = ("canonical", "tools", "store", "registry", "recover", "ceremony", "refs")
@@ -354,9 +356,6 @@ ENTRY_LOADED = ("canonical", "tools", "store", "registry", "recover", "ceremony"
 # loopauth module also defines: os.path and os.DirEntry.path (store.path),
 # and the caught errors' .message.
 ENTRY_SHARED_NAMES = {"path", "message"}
-# F4's exception list, and the only one: empty. The suite prints
-# `escape-hatch: none` only while it is empty and every F4 check passes.
-F4_EXCEPTIONS: dict = {}
 # The loopauth modules of the authority store (0a.2) and its read path (0a.3).
 STORE_MODULES = {"store", "tools", "ceremony", "registry", "anchor", "keys", "records", "frame", "recover",
                  "refs"}
@@ -447,6 +446,26 @@ EXPECTED = {
          "regenesis-step-5": ([T_TD], "completed")},
         **{point: ([T_RA], "abandoned") for point in FRAME_SAMPLES}),
 }
+# Intra-primitive cuts stop at the FIRST matching primitive. Genesis and
+# re-genesis first create the empty log; rotation first creates a public key,
+# all before intent publication. Revocation's first create is its intent.
+# Rotation/revocation replace the cursor after removing intent: only an
+# unpublished cursor needs tidy. Active revocation already has its marker,
+# so its quarantined classifier needs no cursor recovery at either cut.
+# Genesis/re-genesis first replace active while their intents still exist.
+EXPECTED["genesis"].update({"fs-create-after-temp-fsync": ([], "none"),
+    "fs-create-after-rename": ([], "none"),
+    "fs-replace-after-temp-fsync": ([T_GC, T_TD], "committed"), "fs-replace-after-rename": ([T_GC, T_TD], "committed")})
+for _kind in ("rotation", "revocation", "revocation-active"):
+    EXPECTED[_kind].update({"fs-create-after-temp-fsync": ([], "neither"),
+        "fs-create-after-rename": ([] if _kind == "rotation" else [T_TD], "neither"),
+        "fs-replace-after-temp-fsync": ([] if _kind == "revocation-active" else [T_TD], "both"),
+        "fs-replace-after-rename": ([], "both")})
+EXPECTED["regenesis"].update({"fs-create-after-temp-fsync": ([], "abandoned"),
+    "fs-create-after-rename": ([], "abandoned"),
+    "fs-replace-after-temp-fsync": ([T_RC, T_TD], "completed"), "fs-replace-after-rename": ([T_RC, T_TD], "completed"),
+    "archive-after-rename": ([T_RC, T_TD], "completed"), "archive-after-readonly": ([T_RC, T_TD], "completed")})
+
 RC_OF = {("genesis", "none"): 0, ("genesis", "committed"): 0, ("rotation", "neither"): 0, ("rotation", "both"): 0,
          ("revocation", "neither"): 0, ("revocation", "both"): 0, ("revocation-active", "neither"): 0,
          ("revocation-active", "both"): 6, ("regenesis", "abandoned"): 6, ("regenesis", "completed"): 0}
@@ -523,8 +542,25 @@ EXTRA_SPECS = [
     dict(label="pending: a committed store with the remote unreachable", kind="rotation", point=None,
          runs=[run_spec([], 5, away=True), run_spec([], 0, restore=True)], outcome="neither"),
 ]
+EXTRA_SPECS += [
+    dict(label="recover marker temp before publication", kind="revocation-active", point="after-readback",
+         runs=[run_spec([T_TD, T_QT], 137, crash="fs-create-after-temp-fsync"), run_spec([T_QT], 6)], outcome="both"),
+    dict(label="recover marker after publication", kind="revocation-active", point="after-readback",
+         runs=[run_spec([T_TD, T_QT], 137, crash="fs-create-after-rename"), run_spec([], 6)], outcome="both"),
+]
+for _point in ("fs-replace-after-temp-fsync", "fs-replace-after-rename"):
+    EXTRA_SPECS.append(dict(label="recover cursor " + _point, kind="rotation", point="after-frame-fsync",
+        runs=[run_spec([T_RP, T_TD], 137, crash=_point),
+              run_spec([T_TD] if _point == "fs-replace-after-temp-fsync" else [], 0)], outcome="both"))
+for _point in ("archive-after-rename", "archive-after-readonly"):
+    EXTRA_SPECS.append(dict(label="recover archive " + _point, kind="regenesis", point="after-readback",
+        runs=[run_spec([T_RC], 137, crash=_point), run_spec([T_RC, T_TD], 0)], outcome="completed"))
+
 # Fail-closed and quarantine outcomes, by the state recovery must leave.
 SPECIALS = [
+    dict(label="residual intent: marker written before intent removal", steps=[("genesis", "-"), ("revoke", "after-readback", "1")],
+         mutate="materialize-revocation-marker", runs=[run_spec([], 6), run_spec([], 6)],
+         state="quarantined", rule="active-epoch-revoked", residual_intent=True),
     dict(label="fail-closed: A2.3 row 1 (a corrupted genesis.intent)", steps=[("genesis", "genesis-step-2")],
          mutate="corrupt-genesis-intent", runs=[run_spec([], 7)], state="genesis-invalid"),
     dict(label="fail-closed: A2.3 row 1 (the intent-named directory missing)",
@@ -1016,9 +1052,35 @@ _case_numbers = itertools.count(1)
 _trace_numbers = itertools.count(1)
 
 
+def trace_sink_problems(tokens):
+    """Completed calls must fit their own frozen row, even on a failed run."""
+    key_work = {"create_key", "certify_key", "seal", "seal_pointer", "append_frame", "write_cursor"}
+    allowed = {
+        "ceremony: authority-genesis": key_work | {"create_store_dir", "write_genesis_intent", "write_active", "remove_genesis_intent"},
+        "ceremony: epoch-rotation": key_work | {"create_key_dir", "write_intent", "remove_intent"},
+        "ceremony: epoch-revocation": {"seal", "seal_pointer", "write_intent", "append_frame", "write_cursor", "remove_intent"},
+        "ceremony: linked-regenesis": key_work | {"create_store_dir", "write_regenesis_intent", "archive_store", "write_active", "remove_regenesis_intent"},
+        T_TR: {"truncate_frame"}, T_RP: {"push_anchor"}, T_DRP: {"complete_delimiter", "push_anchor"},
+        T_TD: {"write_cursor", "remove_intent"}, T_QT: {"write_quarantine"},
+        T_GA: {"remove_genesis_intent"}, T_GC: {"write_active", "remove_genesis_intent"},
+        T_RA: {"remove_regenesis_intent"}, T_RC: {"archive_store", "write_active", "remove_regenesis_intent"},
+    }
+    for row in CEREMONY_ROWS.values():
+        allowed[f"child({row}): authority-head-advance"] = {"push_anchor"}
+    allowed["child(epoch-revocation): store-quarantine"] = {"write_quarantine"}
+    problems = []
+    for token in tokens:
+        label = token_label(token)
+        unexpected = set(token["sinks"]) - allowed.get(label, set())
+        if label not in allowed or unexpected:
+            problems.append((label, sorted(unexpected)))
+    return problems
+
+
 class Trace:
     """What the recording fixture saw in one run of the real entry point: the
-    tokens minted, in order, each with the sinks it completed; every
+    tokens minted, in order, each with completed sinks checked against its frozen
+    row (not a claim about calls interrupted before returning); every
     tools.run command; and the crash seam's events."""
 
     def __init__(self, path):
@@ -1038,6 +1100,9 @@ class Trace:
                     else:
                         self.events.append(event)
         self.tokens = [tokens[token_id] for token_id in order]
+        problems = trace_sink_problems(self.tokens)
+        if problems:
+            raise ValueError(f"trace-sink: {problems}")
 
     @property
     def labels(self):
@@ -1284,6 +1349,31 @@ def load_registry_scanner():
     return path, namespace
 
 
+AUTHORITY_IMPORTERS = {
+    "lib/loopauth/store.py", "lib/loopauth/tools.py", "scripts/loop-authority-verify",
+    "scripts/loop-authority.py", "scripts/loop-calibration", "scripts/loop-index", "scripts/loop-journal",
+}
+
+
+def authority_importers(root):
+    found = set()
+    for folder in ("scripts", "backends", "lib"):
+        base = os.path.join(root, folder)
+        if not os.path.isdir(base):
+            continue
+        for directory, dirs, files in os.walk(base, followlinks=False):
+            dirs[:] = [name for name in dirs if name != "__pycache__"]
+            for filename in files:
+                path = os.path.join(directory, filename)
+                if os.path.islink(path):
+                    found.add("symlink:" + os.path.relpath(path, root))
+                    continue
+                text = read_bytes(path).decode("utf-8", "replace")
+                if re.search(r"\bloopauth\b|\bimportlib\b|\b__import__\b", text):
+                    found.add(os.path.relpath(path, root))
+    return found
+
+
 def writer_sources(root):
     """{module: (path, source)}: every lib/loopauth module, the Python of
     scripts/loop-authority (its heredocs, if any), and loop-authority.py,
@@ -1356,7 +1446,7 @@ def constant(node):
 
 def store_call(module, call, name):
     owner, attr = callee(call)
-    return attr == name and (owner == "store" or (module == "store" and owner is None))
+    return attr == name
 
 
 def sink_uses(index):
@@ -1385,21 +1475,29 @@ def sink_problems(index):
         got = pairs.get(sink, set())
         for caller in sorted(got - SINK_DRIVERS[sink]):
             problems.append(f"{sink} is called from {caller}, not from the transaction driver of a row")
-    for sink in sorted(set(pairs) - set(SINK_FUNCTIONS)):
-        problems.append(f"an unfrozen sink {sink}")
+    declarations = [node for module, scope, node in index.nodes if module == "store" and scope == "store"
+                    and isinstance(node, (ast.Assign, ast.AugAssign)) and any(
+                        isinstance(target, ast.Name) and target.id == "SINK_FUNCTIONS"
+                        for target in (node.targets if isinstance(node, ast.Assign) else [node.target]))]
+    try:
+        actual = ast.literal_eval(declarations[0].value) if len(declarations) == 1 and isinstance(declarations[0], ast.Assign) else None
+    except (ValueError, TypeError):
+        actual = None
+    if actual != SINK_FUNCTIONS:
+        problems.append(f"an unfrozen sink declaration: {actual}")
     return problems, pairs
 
 
 def begun_rows(node):
     return {constant(call.args[0]) for call in ast.walk(node) if isinstance(call, ast.Call)
-            and callee(call) == ("store", "begin") and call.args and constant(call.args[0]) is not None}
+            and store_call("", call, "begin") and call.args and constant(call.args[0]) is not None}
 
 
 def mints(node):
     """The function mints its own token: a ceremony row's store.begin, or the
     recovery routine's _mint (recovery and finish tokens)."""
     for call in ast.walk(node):
-        if isinstance(call, ast.Call) and (callee(call) == ("store", "begin") or callee(call)[1] == "_mint"):
+        if isinstance(call, ast.Call) and (store_call("", call, "begin") or callee(call)[1] == "_mint"):
             return True
     return False
 
@@ -1647,6 +1745,11 @@ class AliasScan(ast.NodeVisitor):
             self.flag("aliases", node, f"module alias: the import-bound name {node.id} rebound")
         self.generic_visit(node)
 
+    def visit_Call(self, node):
+        if isinstance(node.func, (ast.Call, ast.Lambda, ast.Subscript)):
+            self.flag("aliases", node, "dynamic callable construction")
+        self.generic_visit(node)
+
     def visit_arg(self, node):
         if node.arg in self.bound:
             self.flag("aliases", node, f"module alias: a parameter shadows the import-bound name {node.arg}")
@@ -1741,6 +1844,9 @@ class AliasScan(ast.NodeVisitor):
                 self.flag("writes", node, f"os.open for writing{spelled}")
                 return
             if canonical == "open":
+                if any(isinstance(arg, ast.Starred) for arg in call.args) or any(kw.arg is None for kw in call.keywords):
+                    self.flag("writes", node, f"open() with indirect arguments{spelled}")
+                    return
                 mode = call.args[1] if len(call.args) > 1 else keyword(call, "mode")
                 if mode is None or (isinstance(constant(mode), str) and not set(constant(mode)) & set("wax+")):
                     return
@@ -1998,6 +2104,11 @@ class EntryModules:
                 self.any_receiver(node)  # a module receiver is judged by its table instead
         self.bindings()
 
+    def exception_type(self, node):
+        parent = self.parent.get(node)
+        return (isinstance(parent, ast.ExceptHandler) and parent.type is node and
+                ast.unparse(node) in {"store.anchor.Unreachable", "store.anchor.AnchorError"})
+
     def use(self, node, kind):
         parent = self.parent.get(node)
         written = ast.unparse(parent)[:80] if parent is not None else ""
@@ -2006,6 +2117,10 @@ class EntryModules:
         if isinstance(parent, ast.Attribute) and parent.value is node:
             if kind == MODULE_DICT:
                 self.flag(None, parent, f"{MODULE_DICT} used other than by a constant subscript: {written}")
+                return
+            above = self.parent.get(parent)
+            if kind == "store" and parent.attr == "anchor" and isinstance(above, ast.Attribute) and self.exception_type(above):
+                self.accesses.setdefault(kind, set()).add("anchor." + above.attr)
                 return
             module = None if kind == "loopauth" else kind
             spelled = "" if written == f"{kind}.{parent.attr}" else f" (written {written})"
@@ -2028,6 +2143,8 @@ class EntryModules:
                                 f"value the scan cannot follow ({type(parent).__name__}: {written})")
 
     def any_receiver(self, node):
+        if self.exception_type(node):
+            return
         receiver = ast.unparse(node.value)[:60]
         if node.attr.startswith("_") and not dunder(node.attr):
             self.flag(None, node, f".{node.attr} under {receiver}: a private attribute, whatever the receiver")
@@ -2095,6 +2212,9 @@ def f1_findings(root, rs, registry):
     trees, errors = parse_modules(writer_sources(root))
     index = Index(trees)
     found = [("parse", error) for error in errors]
+    importers = authority_importers(root)
+    if importers != AUTHORITY_IMPORTERS:
+        found.append(("entry importer inventory", sorted(importers ^ AUTHORITY_IMPORTERS)))
     found += [("p2 s7 scan", f"{where}:{line}: {what}") for where, line, what in rs["scan"](lib)]
     direct, paths, _reached = rs["read_only_scan"](lib)
     found += [("0a.3 read-only rules", f"{m}:{line}: {what}") for m, line, what in direct]
@@ -2111,10 +2231,8 @@ def planted_copy(name, edits):
     """A copy of lib/ and scripts/loop-authority(.py) with code appended to
     (or, given a pair, replaced in) the named files."""
     root = os.path.join(TMP, "plant", name)
-    shutil.copytree(LIB, os.path.join(root, "lib"), ignore=shutil.ignore_patterns("__pycache__"))
-    os.makedirs(os.path.join(root, "scripts"))
-    for filename in ("loop-authority", "loop-authority.py"):
-        shutil.copy2(os.path.join(SCRIPTS, filename), os.path.join(root, "scripts", filename))
+    for folder in ("lib", "scripts", "backends"):
+        shutil.copytree(os.path.join(SKILL, folder), os.path.join(root, folder), ignore=shutil.ignore_patterns("__pycache__"))
     for relative, code in edits:
         path = os.path.join(root, relative)
         if isinstance(code, tuple):
@@ -2174,11 +2292,19 @@ VERIFIER_ALIAS_PLANTS = (
     ("tree = shutil; tree.rmtree(...) (a module held as a value)", "aliases",
      "def _bypass_value(path):\n    tree = shutil\n    tree.rmtree(path)\n"),
 )
+REVIEW_OPEN_PLANTS = (
+    ("starred open arguments", 'def _b(path):\n    print("x", file=open(*[path, "w"]))\n'),
+    ("double-starred open mode", 'def _b(path):\n    print("x", file=open(path, **{"mode": "w"}))\n'),
+    ("dynamic stream type construction", 'def _b(path):\n    type(sys.stdout)(type(sys.stdout.buffer.raw)(path, "w"))\n'),
+)
+ENTRY_ALIAS_PLANTS += tuple((label, code, "dynamic" if "type" in label else "open") for label, code in REVIEW_OPEN_PLANTS)
+VERIFIER_ALIAS_PLANTS += tuple((label, "aliases" if "type" in label else "writes", code) for label, code in REVIEW_OPEN_PLANTS)
+
 # Unlisted commands planted inside the runner itself, the one scope the alias
 # scan allows subprocess.run in: (label, the rules that must fire, (the text
 # replaced, its replacement)).
 RUNNER_DEF = '    def run(self, argv: list[str], *, git: bool, stdin: bytes = b"") -> subprocess.CompletedProcess:\n'
-RUNNER_RETURN = "        return subprocess.run(argv, input=stdin,"
+RUNNER_RETURN = "            return subprocess.run(argv, input=stdin,"
 RUNNER_PLANTS = (
     ("an extra subprocess.run of git push inside Runner.run, guarded by an SSH or HTTPS remote (the transports "
      "whose commands no wrapper fixture records)", ("runner", "argv"),
@@ -2188,9 +2314,9 @@ RUNNER_PLANTS = (
         '                            "HEAD:refs/olddonkey-loop/anchor"], env=self.env(git), cwd=self.temp,\n'
         '                           check=False)\n')),
     ("a second process start folded into Runner.run's own return statement", ("runner", "argv"),
-     (RUNNER_RETURN, '        return (self.remote is not None and self.remote["transport"] == "ssh"\n'
-                     '                and subprocess.run([self.binary("git"), "push", self.remote["url"]], check=False)) \\\n'
-                     '            or subprocess.run(argv, input=stdin,')),
+     (RUNNER_RETURN, '            return (self.remote is not None and self.remote["transport"] == "ssh"\n'
+                     '                    and subprocess.run([self.binary("git"), "push", self.remote["url"]], check=False)) \\\n'
+                     '                or subprocess.run(argv, input=stdin,')),
 )
 # Bypasses of the entry's frozen loopauth accesses, planted in
 # loop-authority.py: (label, edits, the texts the entry-loopauth-access
@@ -2419,6 +2545,17 @@ def f4_findings(root):
     trees, errors = parse_modules(writer_sources(root))
     index = Index(trees)
     found = [("parse", error) for error in errors]
+    primitives = {"prepare_record", "bind_record", "begin", "child"}
+    for module, scope, node in index.nodes:
+        name = node.attr if isinstance(node, ast.Attribute) else (node.id if module == "store" and isinstance(node, ast.Name) else None)
+        if name in primitives and isinstance(getattr(node, "ctx", None), ast.Load) and id(node) not in index.call_funcs:
+            found.append(("record primitive used as a value", f"{name} at {scope}:{node.lineno}"))
+        if isinstance(node, ast.ImportFrom) and any(alias.name in primitives for alias in node.names):
+            found.append(("record primitive used as a value", f"imported primitive at {scope}:{node.lineno}"))
+    for driver in CEREMONY_DRIVERS:
+        calls = [call for module, scope, call in index.calls if scope == driver and store_call(module, call, "prepare_record")]
+        if len(calls) != 1:
+            found.append(("missing or duplicate preparation", f"{driver}: {len(calls)} recognized prepare_record calls"))
     _problems, pairs = sink_problems(index)
     for sink in ("seal", "seal_pointer"):
         for caller in sorted(pairs.get(sink, set()) - {"store.prepare_record"}):
@@ -2457,7 +2594,7 @@ def f4_findings(root):
         found.append(("store functions taking a record type", sorted(typed)))
     for module, scope, call in index.calls:
         owner, attr = callee(call)
-        if module != "store" and attr in ("bind_record", "seal", "prepare_record") and owner == "store" \
+        if module != "store" and attr in ("bind_record", "seal", "prepare_record") \
                 and not isinstance(constant(keyword(call, "record_type")), str):
             found.append(("a caller's record type reaches a seal", f"store.{attr} at {scope}:{call.lineno}"))
     registry_names = {name for name in vars(importlib.import_module("loopauth.registry")) if not dunder(name)}
@@ -2483,8 +2620,27 @@ def f4_findings(root):
     for module, tree in trees.items():
         if module.startswith("loop-authority"):
             continue  # judged above
+        aliases = {"registry"}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    if alias.name == "registry" or alias.name.endswith(".registry"):
+                        aliases.add(alias.asname or alias.name.split(".")[0])
+                        if alias.asname or isinstance(node, ast.Import):
+                            found.append(("the row validator rebound", f"registry imported under another name at {module}:{node.lineno}"))
+        changed = True
+        while changed:
+            before = set(aliases)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name) and node.value.id in aliases:
+                    aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            changed = before != aliases
         for node in ast.walk(tree):
             at = f"{module}:{getattr(node, 'lineno', 0)}"
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("setattr", "delattr", "vars", "getattr") and node.args and isinstance(node.args[0], ast.Name) and node.args[0].id in aliases:
+                found.append(("the row validator rebound", f"registry reflection at {at}"))
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in aliases and (node.attr == "__dict__" or not isinstance(node.ctx, ast.Load)):
+                found.append(("the row validator rebound", f"registry alias attribute changed/exposed at {at}"))
             if isinstance(node, ast.Name) and node.id == "registry" and not isinstance(node.ctx, ast.Load):
                 found.append(("the row validator rebound", f"the name registry assigned at {at}"))
             elif isinstance(node, ast.arg) and node.arg == "registry":
@@ -2508,6 +2664,8 @@ def f4_findings(root):
 
 
 F4_RULES = (
+    ("record primitive used as a value", "record/token primitives cannot escape as values or bare imports"),
+    ("missing or duplicate preparation", "each ceremony driver contains exactly one recognized preparation"),
     ("seal outside the write-protocol driver",
      "store.seal and store.seal_pointer are called only from the write-protocol driver (store.prepare_record)"),
     ("a record prepared outside a ceremony row's driver",
@@ -2599,14 +2757,12 @@ VERIFIER_KEYGEN_FORMS = (("-Y", "verify", "-f", None, "-I", None, "-n", None, "-
 VERIFIER_GIT_FORMS = ("init", "fetch", "cat-file")
 # The only primitives the verifier may reference, and where: its one runner
 # starts processes, and its temporary-directory functions write.
-VERIFIER_ALLOWED = {"Runner.run": {"subprocess.run", "subprocess.CompletedProcess"},
+VERIFIER_ALLOWED = {"Runner.run": {"subprocess.run", "subprocess.CompletedProcess", "subprocess.TimeoutExpired"},
                     "Runner.write_temp": {"os.open", "os.write"}, "Runner.make_temp": {"os.open", "os.mkdir"},
                     "Runner.init_repo": {"os.mkdir"}, "Runner.cleanup": {"shutil.rmtree"}}
-# That runner, whole: its one statement, a single subprocess.run of its own
-# argv parameter -- no other call, command, or statement inside it.
-RUNNER_RUN = ("def run(self, argv: list[str], *, git: bool, stdin: bytes=b'') -> subprocess.CompletedProcess:\n"
-              "    return subprocess.run(argv, input=stdin, capture_output=True, env=self.env(git), cwd=self.temp, "
-              "timeout=120, check=False, close_fds=True)")
+# That runner, whole: one subprocess.run with fixed argv/env/timeout and the
+# explicit F2 TimeoutExpired-to-Unreachable mapping; no other process start.
+RUNNER_RUN = "def run(self, argv: list[str], *, git: bool, stdin: bytes=b'') -> subprocess.CompletedProcess:\n    try:\n        return subprocess.run(argv, input=stdin, capture_output=True, env=self.env(git), cwd=self.temp, timeout=120, check=False, close_fds=True)\n    except subprocess.TimeoutExpired as error:\n        raise Unreachable('remote command timed out') from error"
 
 
 def verifier_findings(path, rs):
@@ -2614,8 +2770,8 @@ def verifier_findings(path, rs):
     its frozen argv forms through one runner, and writes only in its own
     temporary directory under $HOME/.cache/olddonkey-loop/verify -- judged by
     the alias-proof scan (every primitive resolved, whatever its spelling) and
-    the runner rule: Runner.run is exactly its one frozen statement (a single
-    subprocess.run of its own argv), and every other `.run` it references is
+    the runner rule: Runner.run is exactly its frozen body (one subprocess.run and the
+    explicit timeout mapping), and every other `.run` it references is
     a direct self.run / RUN.run call with a frozen argv."""
     tree = ast.parse(read_text(path), path)
     index = Index({"verify": tree})
@@ -2625,10 +2781,10 @@ def verifier_findings(path, rs):
     runner = index.functions.get("verify.Runner.run")
     start = None  # the one subprocess.run the runner may make: its statement's own call
     if runner is None or ast.unparse(runner) != RUNNER_RUN:
-        found.append(("runner", "Runner.run is not its one frozen statement (return subprocess.run(argv, ...)): "
+        found.append(("runner", "Runner.run differs from its frozen one-process body and timeout mapping: "
                                 + (ast.unparse(runner)[:240] if runner is not None else "missing")))
     else:
-        start = runner.body[0].value.func
+        start = runner.body[0].body[0].value.func
     calls = {id(n.func): n for n in ast.walk(tree) if isinstance(n, ast.Call)}
     for _module, scope, node in index.nodes:
         where = scope.split(".", 1)[1] if "." in scope else scope
@@ -2671,6 +2827,67 @@ def verifier_findings(path, rs):
 
 MATRIX_NAMES = ("MATRIX_KINDS", "MATRIX_LABELS", "MATRIX_FRAME_TYPES", "MATRIX_KIND_OF", "MATRIX_CEREMONY",
                 "matrix_cut_ids", "matrix_sizes_text", "matrix_options", "matrix_shard", "evidence_problem")
+
+
+def matrix_marker_probe(nodes):
+    """Execute the real matrix_cut with valid scripted states, varying only markers."""
+    names = ("MATRIX_KINDS", "MATRIX_FRAME_TYPES", "MATRIX_KIND_OF", "MATRIX_CEREMONY",
+             "MATRIX_ATTEMPTS", "MATRIX_OUTSIDE", "MATRIX_PRINCIPAL_READ", "canon", "sha", "fdigest",
+             "mkframe", "parse_frames", "frame_of_intent", "revocation_marker", "matrix_cut")
+    space = {"os": os, "re": re, "json": json, "hashlib": hashlib, "base64": base64}
+    exec(compile(ast.Module(body=[nodes[name] for name in names], type_ignores=[]), AUTHORITY_SUITE, "exec"), space)
+    frame = space["mkframe"](2, "epoch.revoked", b"{}")
+    base = space["mkframe"](1, "store.genesis", b"{}")
+    sid, old_tip, new_tip = "0" * 32, "1" * 40, "2" * 40
+    results = []
+    import tempfile
+    for cut in (1, "last"):
+        for wrong in (None, "before", "after"):
+            with tempfile.TemporaryDirectory(dir=TMP) as directory:
+                marker_path = os.path.join(directory, "quarantine")
+                class Scripted:
+                    case = None
+                    url = "file:///scripted-matrix.git"
+                    def __init__(self):
+                        self.case = self
+                        self.recovered = False
+                        self.n = len(frame) - 1 if cut == "last" else cut
+                    def restore(self):
+                        self.recovered = False
+                        if os.path.exists(marker_path): os.unlink(marker_path)
+                        if wrong == "before":
+                            with open(marker_path, "wb") as handle: handle.write(b"wrong marker")
+                    def ceremony(self, *args, **kwargs):
+                        return types.SimpleNamespace(rc=137, out="")
+                    def intent(self):
+                        return None if self.recovered else {"store_id": sid, "frame_b64": base64.b64encode(frame).decode(), "anchor_commit": new_tip}
+                    def log_path(self, *args): return "log"
+                    def store_dir(self, *args): return directory
+                    def active(self): return {"store_id": sid}
+                    def tip(self): return new_tip if self.recovered and cut == "last" else old_tip
+                    def read(self, path):
+                        if path == marker_path:
+                            with open(path, "rb") as handle: return handle.read()
+                        return base + (frame if self.recovered and cut == "last" else b"" if self.recovered else frame[:self.n])
+                    def verifier(self):
+                        state, table, row = (("pending", "A1.6 unterminated, remote old", "anchor-replay-forward") if cut == "last" else
+                                             ("needs-recovery", "A1.6 torn", "torn-frame-truncation"))
+                        return types.SimpleNamespace(json={"state": state, "table": table, "row": row, "authorizing_state": False, "current_authorization": False})
+                    def writer(self, *args):
+                        first = self.verifier().json
+                        self.recovered = True
+                        if os.path.exists(marker_path): os.unlink(marker_path)
+                        marker = b"wrong marker" if wrong == "after" else space["revocation_marker"](sid, 2) if cut == "last" else None
+                        if marker is not None:
+                            with open(marker_path, "wb") as handle: handle.write(marker)
+                        rows = [first, {"row": "recovery-tidy"}] + ([{"row": "store-quarantine"}] if cut == "last" else [])
+                        return types.SimpleNamespace(rc=6 if cut == "last" else 0, json={"steps": rows,
+                            "state": "quarantined" if cut == "last" else "committed", "seq": 2 if cut == "last" else 1,
+                            "epochs": {"1": "revoked" if cut == "last" else "active"}, "active_epoch": None if cut == "last" else 1,
+                            "authorizing_state": cut != "last", "rule": "active-epoch-revoked" if cut == "last" else None})
+                ok, detail, evidence = space["matrix_cut"](Scripted(), "revocation", cut, len(frame), base, old_tip, lambda intent: None)
+                results.append((cut, wrong, ok, detail, evidence is not None))
+    return all(ok == (wrong is None) and credited for _cut, wrong, ok, _detail, credited in results), results
 
 
 def crash_matrix_checks(suite_text, workflow_text):
@@ -2724,8 +2941,7 @@ def crash_matrix_checks(suite_text, workflow_text):
          and re.fullmatch(wrapper.group(1), "7,6") is None and parsed == sizes, (wrapper and wrapper.group(1), parsed)),
         ("each cut of the revocation is checked as the compound: no quarantine marker after a torn cut's recovery, "
          "and after the last byte's the marker's exact bytes (matrix_cut against the test-side revocation_marker)",
-         "marker is None" in cut and "marker == revocation_marker(store_id, 2)" in cut
-         and "kind == 'revocation'" in cut, None),
+         *matrix_marker_probe(nodes)),
     ]
     if workflow_text is not None:
         plan = re.search(r"\[\[ \"\$sizes\" =~ (\S+) \]\]", workflow_text)
@@ -2829,7 +3045,7 @@ def mode_static():
          not heredocs(read_text(AUTH)) and 'exec python3 -I -B "$here/loop-authority.py" "$@"' in read_text(AUTH))
     live = f1_findings(SKILL, rs, registry)
     for rule in ("p2 s7 scan", "0a.3 read-only rules", "0a.3 call graph", "sink -> transaction driver map",
-                 "token minting", "entry point", "entry loopauth access", "parse"):
+                 "token minting", "entry point", "entry loopauth access", "entry importer inventory", "parse"):
         hits = [what for name, what in live if name == rule]
         emit("F1", f"the live tree passes F1's rule [{rule}] (every lib/loopauth module and loop-authority.py)",
              not hits, hits[:6])
@@ -2900,8 +3116,18 @@ def mode_static():
     listed = []
     for module, names in sorted(ENTRY_MODULE_ACCESS.items()):
         real = importlib.import_module("loopauth" if module == "loopauth" else f"loopauth.{module}")
-        listed += [f"{module}.{name}" for name in sorted(names) if not hasattr(real, name)
-                   or (name.startswith("_") and not dunder(name)) or name in forbidden]
+        for name in sorted(names):
+            value = real
+            valid = True
+            for part in name.split("."):
+                if not hasattr(value, part) or (part.startswith("_") and not dunder(part)) or part in forbidden:
+                    valid = False
+                    break
+                value = getattr(value, part)
+            if "." in name and not (isinstance(value, type) and issubclass(value, Exception)):
+                valid = False
+            if not valid:
+                listed.append(f"{module}.{name}")
     emit("F1", "the frozen table names only real attributes, and no private helper, token constructor or minter "
          "(Token, _new, begin, begin_recovery, begin_finish, child), permit or file helper (_grant, _fs_*), sink "
          "(store.SINK_FUNCTIONS), or validator (registry.validate)", not listed, listed)
@@ -2932,7 +3158,7 @@ def mode_static():
                                    "sys.path"),
                        ("process", "starts processes only in its one runner (Runner.run), however a primitive is "
                                    "spelled"),
-                       ("runner", "has a runner that is its one frozen statement -- Runner.run is `return "
+                       ("runner", "has exactly its frozen runner body: one process and explicit timeout mapping -- `return "
                                   "subprocess.run(argv, input=stdin, capture_output=True, env=self.env(git), "
                                   "cwd=self.temp, timeout=120, check=False, close_fds=True)` with argv its own "
                                   "parameter, and nothing else: no other call, command, or statement inside it"),
@@ -2985,6 +3211,32 @@ def mode_static():
             handle.write(text.replace(needle, replacement, 1))
         emit("F1", f"planted control: loop-journal with {label} fails the journal check",
              needle in text and bool(journal_findings((copy,), LIB)))
+
+    sidecar = planted_copy("review-new-importer", [("scripts/loop-sidecar.py", "from loopauth import store\n" + FORGE_ACTIVE)])
+    sidecar_findings = f1_findings(sidecar, rs, registry)
+    emit("F1", "planted fifth importer: a new sidecar forging a token is visible to the inventory guard",
+         any(rule == "entry importer inventory" for rule, _detail in sidecar_findings), sidecar_findings[:3])
+
+    unknown_sink = planted_copy("review-new-sink", [("lib/loopauth/store.py", ('SINK_FUNCTIONS = (', 'SINK_FUNCTIONS = ("unlisted_sink",'))])
+    unknown_problems, _ = sink_problems(Index(parse_modules(writer_sources(unknown_sink))[0]))
+    emit("F1", "planted unfrozen sink: a new declared sink with no caller is still refused",
+         any("unfrozen sink" in problem for problem in unknown_problems), unknown_problems)
+    trace_path = os.path.join(TMP, "review-trace.jsonl")
+    events = [{"e": "mint", "id": "t", "kind": "recovery", "row": "recovery-tidy"},
+              {"e": "sink", "id": "t", "fn": "write_cursor"}]
+    with open(trace_path, "w", encoding="utf-8") as handle:
+        handle.write("".join(json.dumps(event) + "\n" for event in events))
+    trace_control = Trace(trace_path)
+    events[-1]["fn"] = "append_frame"
+    with open(trace_path, "w", encoding="utf-8") as handle:
+        handle.write("".join(json.dumps(event) + "\n" for event in events))
+    try:
+        Trace(trace_path)
+        rejected_trace = False
+    except ValueError as error:
+        rejected_trace = "trace-sink" in str(error)
+    emit("F3", "planted wrong-token sink: completed sinks are checked, not only recorded",
+         trace_control.sinks == [["write_cursor"]] and rejected_trace)
 
     # ---------------------------------------------------------------- F2
     table, top, groups = enumerate_parser()
@@ -3074,6 +3326,26 @@ def mode_static():
          {"seal outside the write-protocol driver", "store functions taking a record type"}),
         ("planted generic hatch", "the rotation driver with its row validator removed",
          [("lib/loopauth/ceremony.py", UNVALIDATED_PLANT)], {"no row validator before the record"})]
+    alias_seal = HATCH_PLANT.replace("seal_and_append", "seal_anything").replace("    plan = recover.recover()", "    s = store\n    plan = recover.recover()")
+    alias_seal = alias_seal.replace("        store.write_intent(token, store_id=view.store_id, data=prepared.intent_bytes)\n        store.append_frame(token, store_id=view.store_id, data=prepared.frame)", "        return prepared.frame").replace("store.", "s.")
+    revoke_source = read_text(os.path.join(LIB, "loopauth", "ceremony.py"))
+    revoke_start = revoke_source.index("def revoke(")
+    revoke_end = revoke_source.index("\ndef regenesis(", revoke_start)
+    revoke = revoke_source[revoke_start:revoke_end]
+    alias_revoke = revoke.replace('registry.validate("epoch-revocation",', 'print("epoch-revocation",').replace(
+        "prepared = store.prepare_record(", "prepare = store.prepare_record\n        prepared = prepare(")
+    f4_plants += [
+        ("planted alias hatch", "seal-only hatch through a local store alias", [("lib/loopauth/ceremony.py", alias_seal)],
+         {"a record prepared outside a ceremony row's driver", "a caller-supplied record type"}),
+        ("planted alias hatch", "revocation validator removed and preparation aliased", [("lib/loopauth/ceremony.py", (revoke, alias_revoke))],
+         {"record primitive used as a value", "missing or duplicate preparation"}),
+        ("planted registry mutation", "setattr replaces the validator", [("lib/loopauth/ceremony.py", 'setattr(registry, "validate", lambda *args: None)')],
+         {"the row validator rebound"}),
+        ("planted registry mutation", "import alias replaces the validator", [("lib/loopauth/ceremony.py", 'from . import registry as _reg\n_reg.validate = lambda *args: None')],
+         {"the row validator rebound"}),
+        ("planted registry mutation", "dictionary access replaces the validator", [("lib/loopauth/recover.py", 'registry.__dict__["validate"] = lambda *args: None')],
+         {"the row validator rebound"}),
+    ]
     f4_plants += [("planted dead validator", label, edits, {"no row validator before the record"})
                   for label, edits in DEAD_VALIDATOR_PLANTS]
     f4_plants.append(("planted stand-in validator", "ceremony.py rebinding registry to an object whose validate "
@@ -3099,14 +3371,21 @@ def mode_static():
              + (", though the call still precedes the record textually" if kind == "planted dead validator" else ""),
              expect <= fired and textual, found[:4])
     escape = []
-    if F4_EXCEPTIONS:
-        escape.append(f"F4_EXCEPTIONS lists {sorted(F4_EXCEPTIONS)}")
     if f4_live:
         escape.append(f"{len(f4_live)} F4 findings on the live tree")
     escape += driver_problems(live_index, {"store.prepare_record"} | set(CEREMONY_DRIVERS))
-    emit("F4", "the frozen maps allow no exceptions: F4's exception list is empty and every function they allow to "
+    emit("F4", "the real frozen maps allow no exceptions: every function they allow to "
          "seal or append mints its row's token", not escape, escape)
     print("escape-hatch\tnone" if not escape else f"escape-hatch\tfound\t{'; '.join(escape)[:400]}", flush=True)
+
+    parent_guard = 'if commit != bound["anchor_commit"] or ref != tools.ANCHOR_REF or ref != bound_ref:'
+    parent_plant = planted_copy("review-parent-binding", [("lib/loopauth/store.py", (parent_guard, 'if False:'))])
+    parent_result = subprocess.run([sys.executable, FZ, "parent-control", parent_plant, os.path.join(TMP, "parent-probe")],
+                                   capture_output=True, timeout=300)
+    parent_output = parent_result.stdout.decode("utf-8", "replace")
+    emit("F3", "planted control: removing anchor ownership fails the durable-parent probe",
+         any(line.startswith("not ok") and "durable parent's child refuses" in line for line in parent_output.splitlines()),
+         (parent_result.returncode, parent_output[-600:], parent_result.stderr[-300:]))
 
     # ---------------------------------------------------------------- F6 (the seam)
     saved = os.environ.pop("LOOP_AUTHORITY_TEST", None)
@@ -3133,6 +3412,11 @@ def mode_static():
     workflow_text = read_text(WORKFLOW) if os.path.isfile(WORKFLOW) else None
     for description, ok, detail in crash_matrix_checks(suite_text, workflow_text):
         emit("F6", f"every-byte crash matrix (authority-selftest.sh --crash-matrix): {description}", ok, detail)
+    weak_marker = suite_text.replace("ok = recovered.rc ==", "ok = True or recovered.rc ==")
+    weak_marker = weak_marker.replace('    if kind == "revocation" and os.path.lexists(os.path.join(case.store_dir(), "quarantine")):\n        problems.append("a quarantine marker exists while the revocation frame is incomplete")\n', '')
+    weak_checks = crash_matrix_checks(weak_marker, workflow_text)
+    emit("F6", "planted compound bypass: wrong-marker cuts must make the matrix check fail",
+         any(not ok for _description, ok, _detail in weak_checks), [description for description, ok, _detail in weak_checks if not ok])
     kinds_line = 'MATRIX_KINDS = ("genesis", "rotation", "revocation")'
     enumerator = 'for n in (*range(1, sizes[kind] - 1), "last")]'
     for label, (needle, replacement), text in (
@@ -3501,6 +3785,40 @@ cat >> "$TMP_ROOT/fz.py" <<'PY'
 # token, another parent's token, and a spent parent token (A1.5)
 # ===========================================================================
 
+def parent_binding_probe(case):
+    sys.path.insert(0, LIB)
+    from loopauth import ceremony, store, tools
+    tools.cleanup()
+    os.environ["HOME"] = case.home
+    os.environ["LOOP_AUTHORITY_TEST"] = "1"
+    tools._PINNED.clear()
+    tools.pin_remote(tools.parse_remote(case.url, allow_test=True))
+    ceremony.challenge = lambda envelope: None
+    original = store.push_anchor
+    observed = []
+    def inspect_child(token, **params):
+        # The real ceremony has already bound its anchor and made its frame
+        # durable. Only ownership of this different anchor can refuse here.
+        observed.append(refused(lambda: original(token, **dict(params, commit="f" * 40)), "stage-mismatch"))
+        return original(token, **params)
+    store.push_anchor = inspect_child
+    try:
+        with store.WriterLock():
+            ceremony.rotate(PRINCIPAL)
+    finally:
+        store.push_anchor = original
+        tools.cleanup()
+    return observed
+
+
+def mode_parent_control():
+    case = Case(os.path.join(TMP, "parent-control"), "durable parent")
+    case.steps([("genesis", "-")])
+    observed = parent_binding_probe(case)
+    emit("F3", "durable parent's child refuses another anchor exactly at stage-mismatch",
+         observed == [(True, "stage-mismatch")], observed)
+
+
 def mode_compound():
     root = os.path.join(TMP, "c")
     fixtures = {"committed": [("genesis", "-"), ("rotate", "-")],
@@ -3508,7 +3826,7 @@ def mode_compound():
                 "complete": [("genesis", "-"), ("rotate", "after-frame-fsync")],
                 "torn": [("genesis", "-"), ("rotate", "frame-byte-mid")],
                 "row9": [("genesis", "genesis-step-5")],
-                "tail": [("genesis", "-")]}
+                "tail": [("genesis", "-")], "other-parent": [("genesis", "-")]}
 
     def build(label):
         case = Case(root, label)
@@ -3560,11 +3878,11 @@ def mode_compound():
     head = store.child(rotation, "authority-head-advance")
     check("head advance: a child used outside its parent's transaction (the parent's frame not durable) is refused",
           lambda: store.push_anchor(head, **push), "protocol-order")
-    genesis_parent = store.begin("authority-genesis", PRINCIPAL)
-    other_head = store.child(genesis_parent, "authority-head-advance")
-    check("head advance: another parent's child (a genesis token's head advance) cannot push this anchor",
-          lambda: store.push_anchor(other_head, **push), "protocol-order", "stage-mismatch")
-    store.spend(genesis_parent)
+    other = use("other-parent")
+    observed = parent_binding_probe(other)
+    emit("F3", "head advance: another parent's durable, bound child cannot push this anchor (stage-mismatch only)",
+         observed == [(True, "stage-mismatch")], observed)
+    case = use("committed")
     spent_parent = store.begin("epoch-rotation", PRINCIPAL)
     spent_head = store.child(spent_parent, "authority-head-advance")
     store.spend(spent_parent)
@@ -3874,7 +4192,7 @@ def marker_of(home, store_id):
     return read_bytes(auth(home, "stores", store_id, "quarantine")) if store_id else None
 
 
-def revocation_both(base, observation, tip, marker):
+def revocation_both(base, observation, tip, marker, intent):
     """The active epoch's revocation is both parts once its record is
     anchored: A1.2's compound T-epoch-revoked + T-quarantined commits when
     that pointer is anchored, so the quarantine is authority state from then
@@ -3906,7 +4224,7 @@ def revocation_both(base, observation, tip, marker):
         and s.get("rule") == "active-epoch-revoked"
     unauthorized = not any(x.get("authorizing_state") or x.get("current_authorization") for x in (w, v, s or {}))
     materialized = marker is None or marker in {revocation_marker(sid, position, who) for who in MARKER_DETAIL}
-    return record and anchored and writer and verifier and refs and unauthorized and materialized
+    return record and anchored and writer and verifier and refs and unauthorized and materialized and intent is None
 
 
 def outcome_of(kind, base, observation, case):
@@ -3938,7 +4256,7 @@ def outcome_of(kind, base, observation, case):
                 and tip["seq"] == seq and marker_of(case.home, base["store_id"]) is None:
             if seq == base["L"] and epochs == base["epochs"]:
                 return "neither"
-            if seq == base["L"] + 1 and epochs == after_epochs(kind, base):
+            if seq == base["L"] + 1 and epochs == after_epochs(kind, base) and read_bytes(auth(case.home, "stores", base["store_id"], "intent")) is None:
                 return "both"
     elif kind == "revocation-active":
         marker = marker_of(case.home, base["store_id"])
@@ -3946,8 +4264,11 @@ def outcome_of(kind, base, observation, case):
                 and w.get("active_epoch") == base["active_epoch"] and marker is None and tip \
                 and tip["seq"] == base["L"]:
             return "neither"
-        if revocation_both(base, observation, tip, marker):
+        intent = read_bytes(auth(case.home, "stores", base["store_id"], "intent"))
+        if revocation_both(base, observation, tip, marker, intent):
             return "both"
+        if intent is not None and revocation_both(base, observation, tip, marker, None):
+            return "pending" if marker is None else "residual-intent"
     elif kind == "regenesis":
         old = base["store_id"]
         intent = read_bytes(auth(case.home, "regenesis.intent"))
@@ -4031,6 +4352,9 @@ def mutate(case, name):
         frame, _p, _s, _k = forge_frame(home, info, "nonce.issued", {"planted": "nonce"}, seq=info["L"] + 1, epoch=1)
         with open(auth(home, "stores", info["store_id"], "log", "segment-000001.olf"), "ab") as handle:
             handle.write(frame)
+    elif name == "materialize-revocation-marker":
+        info = lineage(home)
+        write_private(auth(home, "stores", info["store_id"], "quarantine"), revocation_marker(info["store_id"], info["L"]))
     elif name == "delete-key-file":
         info = lineage(home)
         os.unlink(auth(home, "stores", info["store_id"], "keys", key_dir_of(info, 1), "epoch.revoked-cert.pub"))
@@ -4109,6 +4433,11 @@ def matrix_job(spec, journal):
             marker = marker_of(case.home, base["store_id"])
             checks("F6", f"{label}: once recovery has run to completion, no quarantine marker exists (no revocation "
                    "was anchored)", marker is None, marker)
+        if spec.get("residual_intent"):
+            sid = read_json(auth(case.home, "active"))["store_id"]
+            checks("F6", f"{label}: the untouched residual intent is explicit, not a both outcome",
+                   read_bytes(auth(case.home, "stores", sid, "intent")) is not None and
+                   marker_of(case.home, sid) == revocation_marker(sid, 2), sid)
         post = case.durable()
         allowed_frames = pre["frames"] | {i["frame"] for i in pre["intents"] if i["frame"]}
         allowed_commits = pre["commits"] | {i["commit"] for i in pre["intents"] if i["commit"]}
@@ -4153,9 +4482,9 @@ def outcome_controls_job(journal):
     back to an older one -- while the local side looks abandoned). The writer
     classifies each quarantined, which the predicates took as both or
     abandoned before they read the marker and the remote tip; none is both or
-    abandoned now. The anchored record whose marker recovery has not yet
-    materialized is no half-transition: it is both, and recovery then writes
-    the marker's exact bytes."""
+    abandoned now. An anchored record with residual intent is pending until
+    tidy and marker materialization; an already written marker with residual
+    intent is the explicitly pinned residual-intent quarantine case."""
     def job(checks):
         root = os.path.join(TMP, "c")
 
@@ -4232,6 +4561,23 @@ def outcome_controls_job(journal):
         checks("F6", "half-transition: the quarantine marker's exact bytes with no revocation record (epoch 1 still "
                f"active in the log) is never neither, nor both (observed: {outcome})",
                observation.state == "quarantined" and not is_safe("revocation-active", outcome), outcome)
+
+        residual = Case(root, "residual-intent-control", journal)
+        residual.steps([("genesis", "-")])
+        residual_base = lineage(residual.home)
+        residual.steps([("revoke", "after-readback", "1")])
+        mutate(residual, "materialize-revocation-marker")
+        seen = residual.observe()
+        got = outcome_of("revocation-active", residual_base, seen, residual)
+        checks("F6", "marker-before-intent-removal is reported as residual-intent, never both", got == "residual-intent", got)
+        original_both = globals()["revocation_both"]
+        globals()["revocation_both"] = lambda b, o, t, m, i: original_both(b, o, t, m, None)
+        try:
+            mutated = outcome_of("revocation-active", residual_base, seen, residual)
+        finally:
+            globals()["revocation_both"] = original_both
+        checks("F6", "planted both-predicate omission is detected by the residual-intent control",
+               got == "residual-intent" and mutated == "both", (got, mutated))
 
         # --- re-genesis
         case = Case(root, "control: re-genesis", journal)
@@ -4452,7 +4798,7 @@ def mode_cli():
     raise SystemExit(code)
 
 
-MODES = {"static": ("F1", mode_static), "entry": ("F2", mode_entry), "verifier": ("F1", mode_verifier),
+MODES = {"parent-control": ("F3", mode_parent_control), "static": ("F1", mode_static), "entry": ("F2", mode_entry), "verifier": ("F1", mode_verifier),
          "journal": ("F1", mode_journal), "compound": ("F3", mode_compound), "types": ("F4", mode_types),
          "sweep": ("F6", mode_sweep), "matrix": ("F6", mode_matrix)}
 if MODE == "child":
