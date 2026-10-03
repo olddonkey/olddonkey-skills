@@ -1581,6 +1581,110 @@ assert reviews[-2]["round"] == 2 and reviews[-2]["verdict"] == "iterate"
 PY
 then pass "reviewer: enum, loop-run round-trip, and absent key are stored exactly"; else fail "reviewer: enum, loop-run round-trip, and absent key are stored exactly"; fi
 
+WS_READ_CONTEXT="$(workspace read-context)"
+STORE_READ_CONTEXT="$(store_dir "$WS_READ_CONTEXT")"
+run_cmd read-context-no-store "$JOURNAL" read-context --workspace "$WS_READ_CONTEXT"
+expect_status 0 "read-context: missing store prints a document"
+if python3 - "$CASE_STDOUT" "$STORE_READ_CONTEXT" <<'PY'
+import json, os, sys
+assert json.load(open(sys.argv[1])) == {"schema": 1, "state": "none", "run": None}
+assert not os.path.lexists(sys.argv[2])
+PY
+then pass "read-context: missing store is not created"; else fail "read-context: missing store is not created"; fi
+run_cmd read-context-begin "$RUN" begin --workspace "$WS_READ_CONTEXT"
+RUN_READ_CONTEXT="$(field_from "$CASE_STDOUT" run)"
+expect_status 0 "read-context: begin fixture succeeds"
+run_cmd read-context-active "$JOURNAL" read-context --workspace "$WS_READ_CONTEXT"
+expect_status 0 "read-context: active read succeeds"
+if python3 - "$CASE_STDOUT" "$RUN_READ_CONTEXT" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1])) == {"schema": 1, "state": "active", "run": sys.argv[2]}
+PY
+then pass "read-context: active run id is exact"; else fail "read-context: active run id is exact"; fi
+mv "$STORE_READ_CONTEXT/meta.lock" "$TMP_ROOT/read-context-saved-lock"
+run_cmd read-context-missing-lock "$JOURNAL" read-context --workspace "$WS_READ_CONTEXT"
+if python3 - "$CASE_STDOUT" "$CASE_STATUS" "$RUN_READ_CONTEXT" "$STORE_READ_CONTEXT/meta.lock" <<'PY'
+import json, os, sys
+assert int(sys.argv[2]) == 0
+assert json.load(open(sys.argv[1])) == {"schema": 1, "state": "active", "run": sys.argv[3]}
+assert not os.path.lexists(sys.argv[4])
+PY
+then pass "read-context: present context is active without meta.lock and read creates none"; else fail "read-context: missing-lock read failed (status $CASE_STATUS)"; fi
+mv "$TMP_ROOT/read-context-saved-lock" "$STORE_READ_CONTEXT/meta.lock"
+chmod 644 "$STORE_READ_CONTEXT/context"
+run_cmd read-context-mode "$JOURNAL" read-context --workspace "$WS_READ_CONTEXT"
+expect_status 5 "read-context: unsafe context mode exits 5"
+chmod 600 "$STORE_READ_CONTEXT/context"
+CONTEXT_READ_CONTEXT="$STORE_READ_CONTEXT/context"
+cp "$CONTEXT_READ_CONTEXT" "$TMP_ROOT/read-context-saved"
+run_cmd read-context-end "$RUN" end --workspace "$WS_READ_CONTEXT" --status completed
+expect_status 0 "read-context: end fixture succeeds"
+run_cmd read-context-no-file "$JOURNAL" read-context --workspace "$WS_READ_CONTEXT"
+if python3 - "$CASE_STDOUT" "$CASE_STATUS" <<'PY'
+import json, sys
+assert int(sys.argv[2]) == 0
+assert json.load(open(sys.argv[1])) == {"schema": 1, "state": "none", "run": None}
+PY
+then pass "read-context: missing context prints none"; else fail "read-context: missing context (status $CASE_STATUS)"; fi
+cp "$TMP_ROOT/read-context-saved" "$CONTEXT_READ_CONTEXT"
+run_cmd read-context-stale "$JOURNAL" read-context --workspace "$WS_READ_CONTEXT"
+if python3 - "$CASE_STDOUT" "$CASE_STATUS" "$RUN_READ_CONTEXT" <<'PY'
+import json, sys
+assert int(sys.argv[2]) == 0
+assert json.load(open(sys.argv[1])) == {"schema": 1, "state": "stale", "run": sys.argv[3]}
+PY
+then pass "read-context: ended run is stale"; else fail "read-context: ended run is stale (status $CASE_STATUS)"; fi
+printf 'invalid{\n' > "$CONTEXT_READ_CONTEXT"
+run_cmd read-context-malformed "$JOURNAL" read-context --workspace "$WS_READ_CONTEXT"
+if python3 - "$CASE_STDOUT" "$CASE_STATUS" <<'PY'
+import json, sys
+assert int(sys.argv[2]) == 0
+assert json.load(open(sys.argv[1])) == {"schema": 1, "state": "malformed", "run": None}
+PY
+then pass "read-context: malformed file"; else fail "read-context: malformed file (status $CASE_STATUS)"; fi
+WS_OTHER_CONTEXT="$(workspace read-context-other)"
+run_cmd read-context-other-begin "$RUN" begin --workspace "$WS_OTHER_CONTEXT"
+OTHER_CONTEXT="$(store_dir "$WS_OTHER_CONTEXT")/context"
+cp "$OTHER_CONTEXT" "$CONTEXT_READ_CONTEXT"
+run_cmd read-context-wrong "$JOURNAL" read-context --workspace "$WS_READ_CONTEXT"
+if python3 - "$CASE_STDOUT" "$CASE_STATUS" <<'PY'
+import json, sys
+assert int(sys.argv[2]) == 0
+doc = json.load(open(sys.argv[1]))
+assert doc["state"] == "malformed" and isinstance(doc["run"], str)
+PY
+then pass "read-context: wrong workspace is malformed with readable run"; else fail "read-context: wrong workspace is malformed (status $CASE_STATUS)"; fi
+cp "$TMP_ROOT/read-context-saved" "$CONTEXT_READ_CONTEXT"
+python3 - "$STORE_READ_CONTEXT/meta.lock" "$TMP_ROOT/read-context-lock-ready" <<'PY' &
+import fcntl, pathlib, sys, time
+with open(sys.argv[1], 'rb') as stream:
+    fcntl.flock(stream, fcntl.LOCK_EX)
+    pathlib.Path(sys.argv[2]).touch()
+    time.sleep(10)
+PY
+LOCK_HOLDER_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -e "$TMP_ROOT/read-context-lock-ready" ]] && break; sleep 0.1; done
+run_cmd read-context-busy env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=0 "$JOURNAL" read-context --workspace "$WS_READ_CONTEXT"
+expect_status 3 "read-context: busy lock exits 3"
+kill "$LOCK_HOLDER_PID" 2>/dev/null || true
+wait "$LOCK_HOLDER_PID" 2>/dev/null || true
+LOCK_HOLDER_PID=""
+python3 - "$STORE_READ_CONTEXT" "$TMP_ROOT/read-context-before.json" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+json.dump({str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+           for p in root.rglob('*') if p.is_file()}, open(sys.argv[2], 'w'))
+PY
+run_cmd read-context-unchanged "$JOURNAL" read-context --workspace "$WS_READ_CONTEXT"
+if python3 - "$STORE_READ_CONTEXT" "$TMP_ROOT/read-context-before.json" "$CASE_STATUS" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+after = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+         for p in root.rglob('*') if p.is_file()}
+assert int(sys.argv[3]) == 0 and after == json.load(open(sys.argv[2]))
+PY
+then pass "read-context: all store bytes unchanged"; else fail "read-context: store changed (status $CASE_STATUS)"; fi
+
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' "$FAILED_CHECKS" "$CHECKS" >&2
   exit 1
