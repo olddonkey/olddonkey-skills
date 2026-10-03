@@ -1369,7 +1369,14 @@ def _replay(plan: Plan, scratch_factory) -> None:
                       {"remote_seq": params["remote_seq"], "intent_matches": True, "frame_valid": True})
     scratch = scratch_factory()
     anchor_json = intent["anchor_json"].encode("utf-8")
-    commit = anchor.build_objects(scratch, anchor_json, intent["expected_parent"])
+    try:
+        commit = anchor.build_objects(scratch, anchor_json, intent["expected_parent"])
+    except anchor.AnchorError as error:
+        if error.code == "anchor-parent":
+            raise store.AuthorityError("pending", error.message, store.EXIT_PENDING) from error
+        raise
+    except anchor.Unreachable as error:
+        raise store.AuthorityError("pending", str(error), store.EXIT_PENDING) from error
     if commit != intent["anchor_commit"]:
         raise store.AuthorityError("replay", "the rebuilt commit differs from the stored one")
     active, prev, _sig = records.parse_anchor_json(anchor_json)

@@ -58,14 +58,14 @@ def emit(value: dict) -> None:
     print(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
-def exit_for(store, recover, plan) -> int:
+def exit_for(store, recover, plan, *, verify=False) -> int:
     """0 for a committed store (current_authorization in the JSON says
     whether it authorizes anything: a test lineage never does)."""
     cursor_only = plan.row == "recovery-tidy" and plan.params.get("intent") is None
     if plan.state == "committed" and (plan.row is None or cursor_only):
         return store.EXIT_OK
     if plan.state == "none":
-        return store.EXIT_OK
+        return store.EXIT_INVALID if verify else store.EXIT_OK
     if plan.state in recover.TERMINAL_STATES:
         return store.EXIT_TERMINAL
     if "pending" in plan.state:
@@ -136,7 +136,7 @@ def main(argv: list[str]) -> int:
         emit(plan.summary())
         if args.command == "status":
             return store.EXIT_OK
-        return exit_for(store, recover, plan)
+        return exit_for(store, recover, plan, verify=True)
     except store.AuthorityError as error:
         print(f"error: {error.code}: {error.message}", file=sys.stderr)
         return error.exit_code
@@ -145,6 +145,15 @@ def main(argv: list[str]) -> int:
         return store.EXIT_REFUSED
     except tools.ToolError as error:
         print(f"error: {error.code}: {error.message}", file=sys.stderr)
+        return EXIT_ENV
+    except store.anchor.Unreachable as error:
+        print(f"error: pending: {error}", file=sys.stderr)
+        return store.EXIT_PENDING
+    except store.anchor.AnchorError as error:
+        print(f"error: {error.code}: {error.message}", file=sys.stderr)
+        return store.EXIT_REFUSED
+    except OSError as error:
+        print(f"error: environment: {error}", file=sys.stderr)
         return EXIT_ENV
     finally:
         tools.cleanup()

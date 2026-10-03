@@ -58,6 +58,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 import time
 
 from . import anchor, canonical, frame, keys, records, registry, tools
@@ -245,10 +246,18 @@ def list_dir(target: str) -> list[str]:
     return sorted(os.listdir(target))
 
 
+def _durable_fsync(fd: int) -> None:
+    """Flush the device cache on Darwin before publishing durable state."""
+    if sys.platform == "darwin":
+        fcntl.fcntl(fd, getattr(fcntl, "F_FULLFSYNC", 51))
+    else:
+        os.fsync(fd)
+
+
 def _fsync_dir(target: str) -> None:
     fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        os.fsync(fd)
+        _durable_fsync(fd)
     finally:
         os.close(fd)
 
@@ -410,6 +419,12 @@ CRASH_APPLICABLE = {
     "recover": {"after-push", "after-readback", "after-intent-remove",
                 "recovery-after-delimiter"},
 }
+PRIMITIVE_POINTS = {"fs-create-after-temp-fsync", "fs-create-after-rename",
+                    "fs-replace-after-temp-fsync", "fs-replace-after-rename"}
+for _command in CRASH_APPLICABLE:
+    CRASH_APPLICABLE[_command] |= PRIMITIVE_POINTS
+for _command in ("regenesis", "recover"):
+    CRASH_APPLICABLE[_command] |= {"archive-after-rename", "archive-after-readonly"}
 KEY_STEP_COMMANDS = ("genesis", "rotate")
 FRAME_BYTE_COMMANDS = ("genesis", "rotate", "revoke", "regenesis")
 _CRASH: dict[str, object] = {"point": None, "frame_byte": None}
@@ -1071,8 +1086,7 @@ def _fs_mkdir(token: Token, target: str) -> None:
 
 
 def _fs_create(token: Token, target: str, data: bytes) -> None:
-    """Create target with data, never replacing: temp, fsync, link, dir
-    fsync, unlink the temp, dir fsync."""
+    """Publish a fsynced temp by rename under the exclusive writer lock."""
     _consume(token, "create", target, sha256(data))
     _check_chain(target)
     directory = os.path.dirname(target)
@@ -1081,19 +1095,18 @@ def _fs_create(token: Token, target: str, data: bytes) -> None:
     try:
         os.fchmod(fd, 0o600)
         _write_all(fd, data, target)
-        os.fsync(fd)
+        _durable_fsync(fd)
     except BaseException:
         os.close(fd)
         os.unlink(temporary)
         raise
     os.close(fd)
-    try:
-        os.link(temporary, target, follow_symlinks=False)
-    except FileExistsError:
+    crash("fs-create-after-temp-fsync")
+    if os.path.lexists(target):
         os.unlink(temporary)
         refuse("exists", f"refusing to replace {target}")
-    _fsync_dir(directory)
-    os.unlink(temporary)
+    os.rename(temporary, target)
+    crash("fs-create-after-rename")
     _fsync_dir(directory)
 
 
@@ -1109,13 +1122,15 @@ def _fs_replace(token: Token, target: str, data: bytes) -> None:
     try:
         os.fchmod(fd, 0o600)
         _write_all(fd, data, target)
-        os.fsync(fd)
+        _durable_fsync(fd)
     except BaseException:
         os.close(fd)
         os.unlink(temporary)
         raise
     os.close(fd)
+    crash("fs-replace-after-temp-fsync")
     os.replace(temporary, target)
+    crash("fs-replace-after-rename")
     _fsync_dir(directory)
 
 
@@ -1137,7 +1152,7 @@ def _fs_append(token: Token, target: str, offset: int, data: bytes) -> None:
             _write_all(fd, data[n:], target)  # type: ignore[index]
         else:
             _write_all(fd, data, target)
-        os.fsync(fd)
+        _durable_fsync(fd)
     finally:
         os.close(fd)
 
@@ -1149,7 +1164,7 @@ def _fs_truncate(token: Token, target: str, size: int) -> None:
     try:
         _check_file_info(os.fstat(fd), target, False)
         os.ftruncate(fd, size)
-        os.fsync(fd)
+        _durable_fsync(fd)
     finally:
         os.close(fd)
 
@@ -1198,7 +1213,7 @@ def _fs_link_published(token: Token, temporary: str, target: str) -> None:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != OWNER:
             refuse("layout", f"temporary key file refused: {temporary}")
-        os.fsync(fd)
+        _durable_fsync(fd)
     finally:
         os.close(fd)
     os.chmod(temporary, 0o600, follow_symlinks=False)
@@ -1667,8 +1682,10 @@ def archive_store(token: object, *, store_id: str) -> None:
         _fs_rename_dir(token, source, destination)
     elif not os.path.lexists(destination):
         refuse("missing", "the old store is neither in stores/ nor in archive/")
+    crash("archive-after-rename")
     _grant(token, "read-only", destination)
     _fs_read_only_tree(token, destination)
+    crash("archive-after-readonly")
     token.flags.add("archived")
     _after(token)
 
@@ -1701,8 +1718,13 @@ def push_anchor(token: object, *, scratch: str, commit: str, ref: str) -> None:
         refuse("pending", f"remote unreachable before push: {error}", EXIT_PENDING)
     if tip != expected_parent:
         refuse("non-fast-forward", "the remote anchor is not the expected parent; refusing to push")
-    result = _run_sink(token, "git.push-anchor", scratch=scratch, remote=remote.url,  # type: ignore[union-attr]
-                       commit=commit)
+    try:
+        result = _run_sink(token, "git.push-anchor", scratch=scratch, remote=remote.url,  # type: ignore[union-attr]
+                           commit=commit)
+    except tools.ToolError as error:
+        if error.code in ("timeout", "exec"):
+            refuse("pending", f"anchor push unavailable: {error.message}", EXIT_PENDING)
+        raise
     if result.returncode != 0:
         refuse("pending", "anchor push failed: "
                + result.stderr.decode("utf-8", "replace").strip()[:300], EXIT_PENDING)

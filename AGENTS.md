@@ -64,7 +64,7 @@ Components:
 
 `.github/workflows/selftest.yml` runs the `scripts` job, the sharded authority
 crash matrix (`crash-matrix-plan`, eight `crash-matrix` shards, and
-`crash-matrix-coverage`; see step 12), and `tree-oid`. Reproduce locally from
+`crash-matrix-coverage`; see step 12), `authority-macos`, and `tree-oid`. Reproduce locally from
 the repo root in this order — all suites are self-contained, need no network, and the
 backend CLIs are **not** required (they are only needed to dispatch a live
 run):
@@ -116,13 +116,16 @@ run):
    frozen oracle of the transition table and the terminal_evidence matrix,
    plus schema-2 records written through `loop-journal append --schema 2`) —
    expect `selftest: PASS (803 checks)`.
-12. `bash skills/implementation-loop/tests/authority-selftest.sh` (the 0a.2
+12. `python3 skills/implementation-loop/tests/authority-review-selftest.py`
+   runs 13 offline review regression tests, including full-fsync routing.
+   `bash skills/implementation-loop/tests/authority-selftest.sh` (the 0a.2
    authority store: the real `scripts/loop-authority` under a scratch `HOME`,
    ceremonies driven through a Python pty, a `file://` bare remote, real
    Ed25519 keys from the host `ssh-keygen`, crash injection at every protocol
    cut, and the independent verifier; needs `ssh-keygen` with `-Y`, `git`,
    `ssh`, and `openssl`, and runs its cases in parallel) — expect
-   `selftest: PASS (1363 checks)`, the first 11 of them a
+   `selftest: PASS (1678 checks)`, including the real crashes derived from
+   every command's `CRASH_APPLICABLE` set; the original first 11 checks are a
    self-test of the crash matrix's coverage check. Then the crash matrix,
    `bash skills/implementation-loop/tests/authority-selftest.sh --crash-matrix`
    (the real writer crashed at every frame-byte cut of genesis frame 1 and of
