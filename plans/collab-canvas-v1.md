@@ -1017,6 +1017,7 @@ What building the units changed, relative to §4 and §7 above. Where this secti
 
 Review of the implementation changed these. `references/coordinator.md` is the operator's reference.
 
+- Unlike the §7 preflight list, `approve-spec` needs neither config nor calibration: it compares the engineer-supplied digest and records those exact approved bytes. It does not dispatch an agent or grant standing authorization; `spec` and `check-diff` still validate both stores before dispatch.
 - `abandon` has two paths. With a readable state file, the run is bound by its `coordinator:<attempt_token>` plan, and `unit.end` is written only if the unit began; a unit killed between `run.begin` and `unit.begin` is closed, not quarantined. Without one, `--run ID` is enough and the unit is read from the run's events.
 - `abandon` refuses while the last dispatch's process group is alive, unless `--dispatches-terminated` is given. Writing while the adapter could still append its own events quarantined a healthy run, and in unit 3 that process is an implementer editing the tree.
 - Reconciliation reads the journal again for a unit already in `unknown-outcome`. A run closed from outside becomes `abandoned(run-ended-externally)`.
@@ -1024,7 +1025,7 @@ Review of the implementation changed these. `references/coordinator.md` is the o
 - Children inherit no `LOOP_*` variable and none of the `GIT_DIR` family. `GIT_DIR=<other repo>` used to create the unit branch in the other repository.
 - A dispatch has a time cap, `caps.dispatch_seconds` (1 to 14400, default 3600). On expiry, or on SIGINT, SIGTERM, or SIGHUP, the adapter's process group gets TERM and then KILL. After any adapter exit a surviving descendant is stopped, and one that cannot be stopped leaves the unit `unknown-outcome`.
 - Every path the coordinator writes into a prompt or prints is a JSON string. A file name with a newline could otherwise forge a section of the review prompt.
-- A spec with a control character, or with a line that is a heading plus trailing whitespace, is invalid. So is a verdict with a control character in any string.
+- A spec with a control or Unicode format character, or with a look-alike section heading (whitespace, hash runs, or case variation), is invalid. So is a verdict with a control or Unicode format character in any string.
 - The combined verdict is stored as `verdict.json` and printed before the run is closed.
 - An unreadable `state.json` shows as `unreadable` in `status`. `abandon --unit ID` moves it aside when no open run can belong to it.
 - Exit 1 is an internal error with the traceback in `last-error.txt`; exit 130 is a signal during a dispatch.

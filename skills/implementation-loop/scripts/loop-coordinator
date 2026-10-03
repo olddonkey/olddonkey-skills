@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 import traceback
+import unicodedata
 from datetime import datetime, timezone
 
 SCRIPT = Path(sys.argv[1])
@@ -461,11 +462,13 @@ def read_run(state: dict, allow_incomplete=False) -> dict:
 def read_run_detached(run: str) -> dict:
     for attempt in range(2):
         result = journal('read-run', '--run', run)
+        if result.returncode == 2:
+            fail(3, f'no such run {run}: {error_text(result)}')
         if result.returncode == 3:
             fail(3, 'journal lock busy')
         if result.returncode == 5:
             fail(5, f'read-run: {error_text(result)}')
-        if result.returncode in (2, 4, 6):
+        if result.returncode in (4, 6):
             quarantine(None, 'journal-unreadable', error_text(result), [run])
         if result.returncode:
             fail(5, f'read-run: {error_text(result)}')
@@ -836,7 +839,9 @@ def spec_parts(message: str):
     if not lines or not lines[0].startswith('Unit: ') or not lines[0][6:].strip():
         return None, 'invalid'
     positions = []
-    if any(line != line.rstrip() and line.rstrip() in HEADINGS for line in lines):
+    section_names = {heading[3:].casefold() for heading in HEADINGS}
+    if any(' '.join(line.strip().strip('#').split()).casefold() in section_names
+           and line not in HEADINGS for line in lines):
         return None, 'invalid'
     for heading in HEADINGS:
         found = [i for i, line in enumerate(lines) if line == heading]
@@ -1009,11 +1014,15 @@ def approve_command(args):
     print(f'approved {args.unit} {actual}')
 
 
-def tree_id(state: dict) -> str:
+def tree_helper() -> Path:
     helper = SCRIPT / 'tree-oid.sh'
     if not helper.exists():
         helper = (SCRIPT / '../../engineering-mode/scripts/tree-oid.sh').resolve()
-    result = call([helper], state['unit'])
+    return helper
+
+
+def tree_id(unit: str) -> str:
+    result = call([tree_helper()], unit)
     if result.returncode == 3:
         raise Outcome('blocked', 'tree-unbindable')
     if result.returncode:
@@ -1107,7 +1116,8 @@ def utf8_text(value):
 
 
 def has_controls(value: str) -> bool:
-    return any((ord(ch) < 32 and ch not in '\n\t') or 127 <= ord(ch) <= 159 for ch in value)
+    return any((ord(ch) < 32 and ch not in '\n\t') or 127 <= ord(ch) <= 159
+               or unicodedata.category(ch) == 'Cf' for ch in value)
 
 
 def verdict_strings_safe(value) -> bool:
@@ -1156,8 +1166,7 @@ def review_prompt(template: str, spec: bytes, diff: str, links: list[str], ignor
     return template.replace('{{SECTIONS}}', sections)
 
 
-def review_step(state: dict, base: str, spec: bytes, judge: dict, round_n: int, manifest: dict | None, cfg: dict, refs: dict, cal: dict):
-    tree = tree_id(state)
+def review_step(state: dict, base: str, tree: str, spec: bytes, judge: dict, round_n: int, manifest: dict | None, cfg: dict, refs: dict, cal: dict):
     binary, links = classify(base, tree)
     ignored = ignored_report(manifest)
     if binary:
@@ -1176,7 +1185,7 @@ def review_step(state: dict, base: str, spec: bytes, judge: dict, round_n: int, 
             message, error = capture_dispatch(state, judge, f'{label}-{attempt}', prompt,
                                               cfg['caps']['prompt_bytes'], round_n, cfg['caps']['dispatch_seconds'])
             if error:
-                return None, 'review-dispatch-failed'
+                return None, f'review-dispatch-failed: {error}'
             try:
                 result = verdict(message)
                 atomic(unit_dir(state['unit']) / (f'{label}-{attempt}.verdict.json'), json_bytes(result))
@@ -1211,11 +1220,13 @@ def check_command(unit: dict, spec: bytes, args, cfg: dict, refs: dict, cal: dic
     head = git('rev-parse', 'HEAD').stdout.decode().strip()
     if head != args.base:
         fail(3, f'HEAD {head} differs from --base {args.base}')
-    current_tree = call([(SCRIPT / 'tree-oid.sh') if (SCRIPT / 'tree-oid.sh').exists() else (SCRIPT / '../../engineering-mode/scripts/tree-oid.sh').resolve()])
-    if current_tree.returncode:
-        # The review step reports precise snapshot failures after run.begin.
-        pass
-    elif current_tree.stdout.decode('ascii', 'replace').strip() == git('rev-parse', 'HEAD^{tree}').stdout.decode().strip():
+    snapshot_error = None
+    try:
+        tree = tree_id(unit['id'])
+    except Outcome as error:
+        # Preserve the precise failure, reporting it after run.begin below.
+        tree, snapshot_error = None, error
+    if tree == git('rev-parse', 'HEAD^{tree}').stdout.decode().strip():
         fail(3, 'nothing to review')
     if digest(spec) != args.spec_digest:
         fail(3, f'spec digest mismatch: expected {args.spec_digest}, actual {digest(spec)}')
@@ -1225,7 +1236,9 @@ def check_command(unit: dict, spec: bytes, args, cfg: dict, refs: dict, cal: dic
     try:
         run_write(state, 'unit-begin', ['unit-begin', '--unit', unit['id']], 'unit.begin', {'unit': unit['id']})
         run_write(state, 'round-begin', ['round-begin', '--unit', unit['id'], '--round', '1'], 'round.begin', {'unit': unit['id'], 'round': 1})
-        result, reason, tree, ignored = review_step(state, args.base, spec, judge, 1, None, cfg, refs, cal)
+        if snapshot_error:
+            raise snapshot_error
+        result, reason, tree, ignored = review_step(state, args.base, tree, spec, judge, 1, None, cfg, refs, cal)
         if result:
             print(json.dumps({'unit': unit['id'], 'tree': tree, 'verdict': result['verdict'], 'summary': result['summary'], 'findings': result['findings'], 'notes': result['notes'], 'ignored': ignored}, ensure_ascii=True), flush=True)
         else:
@@ -1245,6 +1258,19 @@ def process_group(pgid: int | None):
     if result.returncode:
         return []
     return [line.strip() for line in result.stdout.decode('utf-8', 'replace').splitlines() if re.match(r'\s*\d+\s+' + str(pgid) + r'\s+', line)]
+
+
+def rebuild_state(unit: str, run: str, events: list[dict], plan: str) -> dict:
+    path = unit_dir(unit) / 'state.json'
+    if state_of(unit) is UNREADABLE:
+        path.rename(path.with_name('state.json.unreadable'))
+    state = make_state(unit, None, None, None)
+    state['attempt_token'] = plan[len('coordinator:'):]
+    state['run'] = run
+    state['seq'] = max(x['seq'] for x in events)
+    state['state'] = 'unknown-outcome'
+    write_state(state)
+    return state
 
 
 def abandon_command(args):
@@ -1318,14 +1344,7 @@ def abandon_command(args):
             fail(3, 'run plan does not match state attempt token')
     if doc['ended']:
         if unit and not state:
-            path = unit_dir(unit) / 'state.json'
-            if state_of(unit) is UNREADABLE:
-                path.rename(path.with_name('state.json.unreadable'))
-            state = make_state(unit, None, None, None)
-            state['run'] = run
-            state['seq'] = max(x['seq'] for x in events)
-            state['state'] = 'unknown-outcome'
-            write_state(state)
+            state = rebuild_state(unit, run, events, plan)
         if state:
             state['reason'] = 'run-ended-externally'
             if state.get('base_sha') and state.get('base_branch'):
@@ -1351,14 +1370,7 @@ def abandon_command(args):
     if isinstance(pgid, int) and pgid > 0 and group_alive(pgid) and not args.dispatches_terminated:
         fail(3, f'dispatch process group {pgid} is still alive; wait for it to stop or pass --dispatches-terminated')
     if unit and not state:
-        path = unit_dir(unit) / 'state.json'
-        if state_of(unit) is UNREADABLE:
-            path.rename(path.with_name('state.json.unreadable'))
-        state = make_state(unit, None, None, None)
-        state['run'] = run
-        state['seq'] = max(x['seq'] for x in events)
-        state['state'] = 'unknown-outcome'
-        write_state(state)
+        state = rebuild_state(unit, run, events, plan)
     unit_started = unit is not None and any(x['event'] == 'unit.begin' and x.get('unit') == unit for x in events)
     unit_ended = unit is not None and any(x['event'] == 'unit.end' and x.get('unit') == unit for x in events)
     if unit_started and not unit_ended:

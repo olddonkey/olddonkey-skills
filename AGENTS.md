@@ -91,7 +91,7 @@ run):
 9. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
    `scripts/loop-evidence` record card) — expect `selftest: PASS (152 checks)`.
 10. `bash skills/implementation-loop/tests/coordinator-selftest.sh` — expect
-    `selftest: PASS (623 checks)`. It uses only local temporary repositories
+    `selftest: PASS (689 checks)`. It uses only local temporary repositories
     and backend CLI stubs, and never calls a real agent. `COORD_SELFTEST_JOBS`
     defaults to 4; set it to 1 for declaration-order serial execution.
 11. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
