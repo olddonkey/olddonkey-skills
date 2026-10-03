@@ -38,6 +38,8 @@ jobs:
           bash -n skills/implementation-loop/scripts/loop-console
           bash -n skills/implementation-loop/scripts/loop-calibration
           bash -n skills/implementation-loop/scripts/loop-evidence
+          bash -n skills/implementation-loop/scripts/loop-authority
+          bash -n skills/implementation-loop/scripts/loop-authority-verify
           bash -n skills/implementation-loop/scripts/run-gate.sh
           bash -n skills/implementation-loop/scripts/selftest.sh
           bash -n skills/implementation-loop/tests/contract-core.sh
@@ -50,6 +52,8 @@ jobs:
           bash -n skills/implementation-loop/tests/console-selftest.sh
           bash -n skills/implementation-loop/tests/calibration-selftest.sh
           bash -n skills/implementation-loop/tests/evidence-selftest.sh
+          bash -n skills/implementation-loop/tests/authority-selftest.sh
+          bash -n skills/implementation-loop/tests/registry-selftest.sh
           bash -n skills/implementation-loop/tests/shim-selftest.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/run-gate.sh
           bash -n cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
@@ -100,6 +104,12 @@ jobs:
         run: bash skills/implementation-loop/tests/index-selftest.sh
       - name: Reducer selftest
         run: bash skills/implementation-loop/tests/reduce-selftest.sh
+      - name: Authority review regression controls
+        run: python3 skills/implementation-loop/tests/authority-review-selftest.py
+      - name: Authority store selftest
+        run: bash skills/implementation-loop/tests/authority-selftest.sh
+      - name: Authority registry selftest
+        run: bash skills/implementation-loop/tests/registry-selftest.sh
       - name: Console selftest
         run: bash skills/implementation-loop/tests/console-selftest.sh
       - name: Calibration selftest
@@ -233,6 +243,94 @@ jobs:
               raise SystemExit(1)
           print(f"relative-links: PASS ({checked} links across {len(paths)} files)")
           PY
+
+  # The authority crash matrix: every frame-byte cut of genesis frame 1 and of
+  # an epoch-rotation frame. A frame's length follows the ceremony's pid, tty,
+  # and start-time digits, so one plan job probes the two planned sizes N and
+  # every shard enumerates the same cut list from them: <kind>:frame-byte-n
+  # for n from 1 to N - 2 (torn prefixes), then <kind>:frame-byte-last. A
+  # run's frame need not be N bytes long. A shard credits byte n only to a
+  # real crash of that kind at exactly offset n of a frame of at least n + 2
+  # bytes, so n is never the final byte, and "last" only to a crash at its
+  # own frame's final byte; other runs are discarded and retried (up to 50),
+  # then the cut fails. Each shard records every credited cut's evidence
+  # (kind, frame length, crash offset), which the coverage job checks against
+  # the plan, and prints a classifier sweep over every prefix of each real
+  # frame its runs wrote, which the coverage job does not need.
+  crash-matrix-plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      sizes: ${{ steps.plan.outputs.sizes }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe the two frames the crash matrix enumerates
+        id: plan
+        run: |
+          set -o pipefail
+          bash skills/implementation-loop/tests/authority-selftest.sh --crash-matrix --plan | tee plan.log
+          sizes="$(sed -n 's/^# crash matrix sizes=//p' plan.log)"
+          [[ "$sizes" =~ ^[1-9][0-9]*,[1-9][0-9]*$ ]]
+          echo "sizes=$sizes" >> "$GITHUB_OUTPUT"
+
+  crash-matrix:
+    needs: crash-matrix-plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    env:
+      SHARD: ${{ matrix.shard }}
+      SIZES: ${{ needs.crash-matrix-plan.outputs.sizes }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authority crash matrix, one shard of 8
+        run: |
+          bash skills/implementation-loop/tests/authority-selftest.sh --crash-matrix \
+            --shard "$SHARD/8" --sizes "$SIZES" --cut-ids-out "cut-ids-$SHARD-of-8.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crash-matrix-cut-ids-${{ matrix.shard }}
+          path: cut-ids-${{ matrix.shard }}-of-8.txt
+          if-no-files-found: error
+
+  crash-matrix-coverage:
+    needs: [crash-matrix-plan, crash-matrix]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PLAN: ${{ needs.crash-matrix-plan.result }}
+      SHARDS: ${{ needs.crash-matrix.result }}
+      SIZES: ${{ needs.crash-matrix-plan.outputs.sizes }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The plan and all 8 shards succeeded
+        run: |
+          echo "plan: $PLAN, shards: $SHARDS"
+          [[ "$PLAN" == success && "$SHARDS" == success ]]
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: crash-matrix-cut-ids-*
+          path: cut-ids
+          merge-multiple: true
+      - name: The shards' credited cuts and their evidence cover the full cut list
+        run: |
+          bash skills/implementation-loop/tests/authority-selftest.sh --crash-matrix \
+            --check-shards cut-ids --sizes "$SIZES"
+
+  authority-macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authority review regression controls
+        run: python3 skills/implementation-loop/tests/authority-review-selftest.py
+      - name: Authority store and Darwin start-token regressions
+        run: bash skills/implementation-loop/tests/authority-selftest.sh
 
   tree-oid:
     strategy:
