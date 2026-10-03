@@ -85,7 +85,7 @@ ASSURANCE = {
 ASSURANCE_KEYS = tuple(ASSURANCE)
 WEAKEST_AXES = {axis: values[0] for axis, values in ASSURANCE.items()}
 
-BACKENDS = ("codex", "grok", "cursor")
+BACKENDS = ("claude", "codex", "grok", "cursor")
 RETRY_CLASSES = ("safe-retry", "reconcilable", "manual-only")
 OPERATION_OUTCOMES = ("succeeded", "failed")
 PUBLISH_OUTCOMES = ("published", "failed")
@@ -144,8 +144,9 @@ REFERENCE_KINDS = {
     "attestation": {"content": "any", "claims": {}},
 }
 # Reference kinds that name a record in this run's journal, and that record's
-# event. The reducer resolves only observation_ref, barrier_closed_ref, and
-# reconciliation_ref; every other reference stays a shape-checked claim.
+# event. The reducer requires resolution for observation_ref, barrier_closed_ref
+# and reconciliation_ref. Resolved operation-result, gate, review and publish
+# references must agree with their accepted record; unresolved digests stay claims.
 JOURNAL_REFERENCE_EVENTS = {
     "operation-reserve": "operation.reserve",
     "operation-spawned": "operation.spawned",
@@ -347,7 +348,7 @@ ROWS = [
 REVIEW_PASS = _ref(["review"], {"verdict": ["pass"], "reviewer": "present"})
 GATE_GREEN = _ref(["gate"], {"verdict": ["green"], "input_content": "present"})
 PUBLISH_PR = _ref(["publish"], {"outcome": ["published"], "pr": "present", "head_sha": "present"})
-PROVIDER_RECEIPT = _ref(["provider-receipt"], {"receipt_object": "present"})
+PROVIDER_RECEIPT = _ref(["provider-receipt"], {"receipt_object": "present", "outcome": ["merged"]})
 PUBLICATION_RELATIONS = [
     ["review_ref", "gate_ref"],
     ["review_ref", "publish_ref"],
@@ -974,9 +975,9 @@ def check_evidence(payload: dict, row: dict) -> None:
             f"evidence must carry exactly one of {', '.join(choice)}",
         )
     for name in fields:
-        if name not in evidence and name not in choice:
+        if name not in evidence and name not in choice and not (row["substitution"] and name == "reconciliation_ref"):
             _fail("evidence-missing", f"evidence.{name} is missing")
-    ctx = _Context(payload, bool(row["substitution"]))
+    ctx = _Context(payload, bool(row["substitution"] and "reconciliation_ref" in evidence))
     for name, spec in fields.items():
         if name in evidence:
             _check_field(evidence[name], spec, f"evidence.{name}", ctx)

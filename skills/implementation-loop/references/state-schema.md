@@ -41,34 +41,34 @@ open no segment, cache, context, or repository file themselves:
   are 40 lowercase hex, and labels every row `recorded`, `declared`,
   `values match`, or `unknown` — never verified.
 
-**Root layout** (`scripts/loop-journal:387-403`):
+**Root layout** (`scripts/loop-journal (store_paths)`):
 
 `$HOME/.config/olddonkey-loop/journal/<workspace-key>/`
 
-`workspace-key` is `sha256(canonical workspace)` (`scripts/loop-journal:372-373`).
+`workspace-key` is `sha256(canonical workspace)` (`scripts/loop-journal (workspace_key_for)`).
 The store contains `runs/`, `runs.tsv` (rebuildable cache), `context`,
 `unattributed.jsonl`, `generation`, and `meta.lock`. Retired context files are
-`context.retired-<run-id>` (`scripts/loop-journal:979`).
+`context.retired-<run-id>` (`scripts/loop-journal (retire_context)`).
 
-**Segment naming** (`scripts/loop-journal:476-479`):
+**Segment naming** (`scripts/loop-journal (segment_path)`):
 `runs/<run-id>.jsonl` where `<run-id>` is `YYYYMMDDTHHMMSSZ-` plus 6 hex
-digits (`scripts/loop-journal:65`).
+digits (`scripts/loop-journal (RUN_ID_RE)`).
 
-**Envelope fields** (`scripts/loop-journal:72`): `schema`, `seq`, `ts`,
+**Envelope fields** (`scripts/loop-journal (ENVELOPE_KEYS)`): `schema`, `seq`, `ts`,
 `event`, `run`, `attribution_failure`. Attributed schema-1 lines carry
 `schema=1`, monotonic `seq`, UTC `ts`, `event`, and `run`
-(`scripts/loop-journal:994-1000`). Unattributed lines omit `seq` and record
-`attribution_failure` (`scripts/loop-journal:1014-1019`). Schema-2 lines carry
+(`scripts/loop-journal (append_event)`). Unattributed lines omit `seq` and record
+`attribution_failure` (`scripts/loop-journal (append_unattributed)`). Schema-2 lines carry
 the same envelope with `schema=2` and are never unattributed (see
 [Schema 2](#schema-2-task-graph-v1-vocabulary-tg-v10a1) below).
 
-**Closed event list** (schema 1, `scripts/loop-journal:73-142`):
+**Closed event list** (schema 1, `scripts/loop-journal (EVENT_SPECS)`):
 
 `run.begin`, `run.end`, `unit.begin`, `unit.end`, `round.begin`,
 `checkpoint`, `review.recorded`, `publish.recorded`, `dispatch.start`,
 `dispatch.end`, `dispatch.abandoned`, `gate.result`, `journal.repaired`.
 
-**Segment classification** (`scripts/loop-journal:497-522`): an unterminated
+**Segment classification** (`scripts/loop-journal (parse_segment)`): an unterminated
 valid tail line counts; an unterminated invalid tail is ignored (torn write);
 a newline-terminated invalid line mid-file or at the tail is mid-file
 corruption. The index uses this classification and never repairs; a
@@ -113,7 +113,7 @@ Intended mechanical writer: `scripts/run-gate.sh` — `journal_gate_result`,
 called from `emit_result` after the `RESULT:` line is printed and before the
 gate exits. It writes nothing when the journal helper is absent, and a failed
 append only warns; neither changes the gate's exit. Validation is the
-`gate.result` entry of `EVENT_SPECS` (`scripts/loop-journal:117-140`). The
+`gate.result` entry of `EVENT_SPECS` (`scripts/loop-journal (EVENT_SPECS)`). The
 journal is local and unauthenticated — validation checks the payload's shape,
 not the actor, so any process running as the user can append a well-shaped
 `gate.result` through `loop-journal append` — so a `gate.result` is a
@@ -161,7 +161,7 @@ fixed caveat "Recorded gate result — not proof of what ships."
 `dispatch.start`, `dispatch.end`, `dispatch.abandoned`, and `gate.result`
 accept optional `unit` (non-empty str) and `round` (int ≥ 1). `loop-journal
 append` fills them from `LOOP_UNIT` and `LOOP_ROUND` when the payload does not
-already carry them (`attribution_from_env`, `scripts/loop-journal:748`); an
+already carry them (`attribution_from_env`, `scripts/loop-journal (attribution_from_env)`); an
 explicit `--field`/`--json` value wins, key by key. An empty or multi-line
 `LOOP_UNIT`, or a `LOOP_ROUND` that is not a positive decimal integer, fails
 the append with exit 2 — an adapter then refuses to launch and the gate warns.
@@ -174,10 +174,10 @@ repair, append, or context retirement, it refuses with exit 2 when any
 `dispatch_id` in the active run has more than one `dispatch.start` or more than
 one terminal event (`dispatch.end` / `dispatch.abandoned`): such a history is
 neither open nor closed (`duplicated_dispatch_ids`,
-`scripts/loop-journal:1365`). Otherwise each acknowledged id has exactly one
+`scripts/loop-journal (duplicated_dispatch_ids)`). Otherwise each acknowledged id has exactly one
 start and no terminal event, and its `dispatch.abandoned` copies that start's
 `unit`/`round` when present and writes neither when absent
-(`abandoned_payload`, `scripts/loop-journal:1388`).
+(`abandoned_payload`, `scripts/loop-journal (abandoned_payload)`).
 
 **The label is a declaration, not proof.** `unit` and `round` record what
 whoever ran the command declared. They carry no digest binding them to a
@@ -403,8 +403,8 @@ same target.
 | running → succeeded | `terminal_evidence` for the pinned row, and the pinned `stop_point_result` |
 | running → failed | `failure_evidence` |
 | running → unknown-outcome | `lost_child: true` |
-| unknown-outcome → succeeded | `reconciliation_ref` (kind `reconciliation` or `receipt-lookup`; `attestation` refused), `terminal_evidence`, the pinned `stop_point_result` |
-| unknown-outcome → failed | `reconciliation_ref` (as above), `failure_evidence` |
+| unknown-outcome → succeeded | optional `reconciliation_ref` (kind `reconciliation` or `receipt-lookup`; `attestation` refused), `terminal_evidence`, the pinned `stop_point_result` |
+| unknown-outcome → failed | optional `reconciliation_ref` (as above), `failure_evidence` |
 | unknown-outcome → parked | `unresolvable_reason` |
 | any non-terminal → cancelled | `cancel_ref`, `quiescence_ref` |
 | any non-terminal → parked | `park_reason` |
@@ -418,7 +418,7 @@ selected by the pinned values.
 | unit / worktree | `review_ref` (`verdict: pass`, `reviewer`) |
 | unit / commit | `review_ref`, `gate_ref` (`verdict: green`, `input_content`), `branch`, `sha` |
 | unit / pr | the commit row, `publish_ref` (`outcome: published`, `pr`, `head_sha` = `sha`) |
-| unit / merge | the pr row, `pre_merge_gate_ref`, `integration_content`, `provider_receipt_ref` (`receipt_object`), `receipt_object` (equal to the receipt's), `target_containment` `{target_ref, contains: true}` |
+| unit / merge | the pr row, `pre_merge_gate_ref`, `integration_content`, `provider_receipt_ref` (`receipt_object`, `outcome: merged`), `receipt_object` (equal to the receipt's), `target_containment` `{target_ref, contains: true}` |
 | investigation | `dispatch_ref`, `transcript_digest`, `report_digest` |
 | operation | `operation_result_ref` (`outcome: succeeded`) |
 | approval | `answer_ref` (`answer: granted`) |
@@ -447,7 +447,20 @@ whose `head` equals `sha`, `unproven` otherwise (non-git content included),
 so references that agree with each other but not with `sha` stay unproven.
 Relations are recorded, never refused, and never read as identity.
 
-**Reconciliation.** Out of `unknown-outcome`, exactly one missing reference
+**Resolved journal references.** A reference to an accepted `operation.result`,
+`gate.result`, `review.recorded` or `publish.recorded` must agree with the
+record's event, node, attempt and its outcome/verdict and associated content
+(or reviewer, and publication PR/head). Contradictions are refused as
+`reference-contradicted`; unresolved digests remain claims. Only the accepted
+prefix can resolve a reference, and guards remain `claimed`. A reconciliation
+receipt describes the lookup, so unlike the merge-success receipt it may
+carry `outcome: refused` (including a failed reconciliation).
+
+**Late records and reconciliation.** An exit from `unknown-outcome` carries
+the full row evidence. Without `reconciliation_ref`, the operation-result or
+publish reference must resolve to an already accepted record of this attempt;
+an unresolved digest is refused (`reconciliation-required`). Rows without a
+substitutable slot remain park-only. Alternatively, exactly one missing reference
 of the pinned row may be replaced by the `reconciliation_ref`'s record:
 `publish_ref` (unit `pr`/`merge`) or `operation_result_ref` (operation) into
 `succeeded`, the `failing_ref` of a `publish` or `operation` phase into

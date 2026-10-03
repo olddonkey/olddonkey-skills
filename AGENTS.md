@@ -78,8 +78,8 @@ run):
    `bash skills/implementation-loop/backends/claude/selftest.sh` — expect
    `selftest: PASS (303 checks)`.
 7. `bash skills/implementation-loop/tests/journal-selftest.sh` — expect
-   `selftest: PASS (237 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
-   — expect `selftest: PASS (103 checks)`; and
+   `selftest: PASS (586 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
+   — expect `selftest: PASS (111 checks)`; and
    `bash skills/implementation-loop/tests/console-selftest.sh` — expect
    `selftest: PASS (151 checks)`.
 8. `bash skills/implementation-loop/tests/contract-core.sh`,
@@ -94,15 +94,15 @@ run):
    canonical encoding, the schema-2 vocabulary, and the reducer against a
    frozen oracle of the transition table and the terminal_evidence matrix,
    plus schema-2 records written through `loop-journal append --schema 2`) —
-   expect `selftest: PASS (685 checks)`.
-10. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
+   expect `selftest: PASS (748 checks)`.
+11. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
-11. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
-12. Packaging checks: both marketplace JSON manifests must parse; every
+12. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
+13. Packaging checks: both marketplace JSON manifests must parse; every
    `SKILL.md` (under `skills/` and `cursor-implementation-loop/skills/`) must
    have non-empty `name:` and `description:` frontmatter; engineering-mode and
    Codex-loop Markdown must have no dangling relative links.
-13. `tree-oid` job (runs on ubuntu **and** macos):
+14. `tree-oid` job (runs on ubuntu **and** macos):
    `bash skills/engineering-mode/scripts/tree-oid-selftest.sh` and the
    Cursor copy — expect `selftest: PASS (202 checks)` each. Keep these scripts
    portable across GNU and BSD userlands.

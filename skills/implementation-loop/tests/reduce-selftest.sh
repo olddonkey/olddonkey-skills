@@ -688,7 +688,7 @@ ORACLE_TERMINAL = {
             "publish_ref": PUBLISH_PR,
             "pre_merge_gate_ref": GATE_GREEN,
             "integration_content": CONTENT,
-            "provider_receipt_ref": R(["provider-receipt"], {"receipt_object": "present"}),
+            "provider_receipt_ref": R(["provider-receipt"], {"receipt_object": "present", "outcome": ["merged"]}),
             "receipt_object": CONTENT,
             "target_containment": CONTAINMENT,
         },
@@ -2392,7 +2392,176 @@ def canonical_checks():
          canonical.digest({"a": 1, "b": 2}) == canonical.digest(dict([("b", 2), ("a", 1)])))
 
 
+
+def review_regressions():
+    # PR65 #1: rejected and legacy gates never acquire stronger isolation.
+    for schema in (1, 2):
+        sc = fresh("unit", "commit")
+        sc.gate("a1", input_isolation="immutable")
+        sc.events[-1]["schema"] = schema
+        result = reduce.reduce_run(sc.events)
+        emit(f"review #1 schema {schema}: isolation stays weak",
+             "isolation-weak" in result["gates"][-1]["reasons"])
+    sc = fresh("unit", "merge")
+    evidence = terminal_evidence(sc, "a1")
+    evidence["provider_receipt_ref"]["outcome"] = "refused"
+    succeed(sc, evidence)
+    expect("review #2 refused receipt cannot prove merge success", sc, "evidence-claim")
+    # A reconciliation receipt describes a lookup, including failed outcomes;
+    # it is deliberately not the merge-success receipt spec.
+    sc = lost()
+    sc.reconciliation("a1", outcome="failed", receipt_ref=sc.ref("provider-receipt", "a1", outcome="refused"))
+    resolve(sc, "failed")
+    expect("review #2 failed reconciliation can cite a refused receipt", sc, "accepted")
+
+    for kind, event, field, node_type, stop in (
+        ("operation-result", "operation.result", "operation_result_ref", "operation", None),
+        ("gate", "gate.result", "gate_ref", "unit", "commit"),
+        ("review", "review.recorded", "review_ref", "unit", "commit"),
+        ("publish", "publish.recorded", "publish_ref", "unit", "pr"),
+    ):
+        for mismatch in ("verdict", "content", "attempt", "unknown", "agree"):
+            sc = fresh(node_type, stop)
+            if kind == "operation-result":
+                rec = sc.operation(event, "a1", outcome="failed" if mismatch == "verdict" else "succeeded")
+            elif kind == "gate":
+                rec = sc.gate("a1", verdict="red" if mismatch == "verdict" else "green",
+                              gate_exit=1 if mismatch == "verdict" else 0)
+            elif kind == "review":
+                rec = sc.base("a1")
+                rec.update(content=COMMIT, reviewer="reviewer-1",
+                           request_id="r", reviewed_content_digest=D(COMMIT),
+                           verdict="iterate" if mismatch == "verdict" else "pass", findings_digest=D([]))
+                rec = sc.add(event, rec)
+            else:
+                rec = sc.publish("a1", outcome="failed" if mismatch == "verdict" else "published")
+            evidence = terminal_evidence(sc, "a1")
+            ref = evidence[field]
+            # Match all claims before planting a single disagreement.
+            keys = {"operation-result": {"outcome": "outcome", "content": "output_content"},
+                    "gate": {"verdict": "verdict", "input_content": "input_content", "content": "input_content"},
+                    "review": {"verdict": "verdict", "reviewer": "reviewer"},
+                    "publish": {"outcome": "outcome", "pr": "pr", "head_sha": "head_sha", "content": "content"}}[kind]
+            if mismatch != "verdict":
+                for key, source in keys.items(): ref[key] = rec[source]
+            if mismatch == "content":
+                if kind == "review": ref["reviewer"] = "another-reviewer"
+                elif kind == "gate": ref["content"] = ref["input_content"] = INPUT
+                else: ref["content"] = INPUT
+            if mismatch == "attempt":
+                sc.begin("n2", "a2", node_type, stop)
+                other = dict(rec, **sc.base("a2"))
+                if kind == "operation-result": sc.operation("operation.reserve", "a2")
+                rec = sc.add(event, other)
+            ref["digest"] = D("absent-record") if mismatch == "unknown" else fx.record_digest(event, rec)
+            succeed(sc, evidence)
+            expect(f"review #3 {kind} {mismatch}", sc,
+                   "accepted" if mismatch in ("unknown", "agree") else "reference-contradicted")
+
+    import ast
+    from pathlib import Path
+    journal = (Path(sys.argv[1]).parent / "scripts" / "loop-journal").read_text()
+    match = __import__("re").search(r'"backend": (\([^\n]+\))', journal)
+    emit("review #4 schema backend lists agree", match is not None and set(ast.literal_eval(match[1])) == set(vocabulary.BACKENDS))
+    sc = Scenario()
+    sc.begin("n1", "a1", "unit", "commit", dispatch=dict(fx.DISPATCH, backend="claude"))
+    expect("review #4 claude schema-2 attempt accepted", sc, "accepted")
+
+    for kind, stop in (("operation", None), ("unit", "pr")):
+        for to in ("succeeded", "failed"):
+            for unknown in (False, True):
+                sc = lost(kind, stop)
+                # An earlier reconciliation need not be used when the real record arrives.
+                sc.reconciliation("a1", outcome="failed" if to == "succeeded" else "succeeded",
+                                  substitutes="operation-result" if kind == "operation" else "publish")
+                if kind == "operation":
+                    event = "operation.result"
+                    rec = sc.operation(event, "a1", outcome=to)
+                    refkind, slot = "operation-result", "operation_result_ref"
+                else:
+                    event = "publish.recorded"
+                    rec = sc.publish("a1", outcome="published" if to == "succeeded" else "failed")
+                    refkind, slot = "publish", "publish_ref"
+                container = terminal_evidence(sc, "a1") if to == "succeeded" else failure_evidence(sc, "a1", phase="operation" if kind == "operation" else "publish")
+                ref = container[slot if to == "succeeded" else "failing_ref"]
+                ref["digest"] = D("absent") if unknown else fx.record_digest(event, rec)
+                for key in ("outcome", "pr", "head_sha"):
+                    if key in ref and key in rec: ref[key] = rec[key]
+                ref["content"] = rec["output_content"] if kind == "operation" else rec["content"]
+                extra = {"stop_point_result": "pr-open"} if kind == "unit" and to == "succeeded" else {}
+                sc.transition("a1", "unknown-outcome", to,
+                              {"terminal_evidence" if to == "succeeded" else "failure_evidence": container}, **extra)
+                expect(f"review #5 late {kind} {to} unknown={unknown}", sc,
+                       "reconciliation-required" if unknown else "accepted")
+    sc = lost("unit", "commit")
+    sc.transition("a1", "unknown-outcome", "succeeded", {"terminal_evidence": terminal_evidence(sc, "a1")}, stop_point_result="gated-commit")
+    expect("review #5 commit remains park-only", sc, "substitution-kind")
+
+    sc = lost("unit", "pr")
+    sc.reconciliation("a1", substitutes="publish")
+    resolve(sc, "succeeded")
+    sc.publish("a1")
+    expect("review #7 late publish after substitution refused", sc, "substituted")
+    sc = lost("unit", "pr")
+    sc.reconciliation("a1", substitutes="publish")
+    resolve(sc, "succeeded")
+    original = copy.deepcopy(sc.events)
+    full = reduce.reduce_run(sc.events)
+    emit("review #7 reducer does not mutate input", sc.events == original)
+    incremental = reduce.Reducer()
+    for index, event in enumerate(sc.events):
+        incremental.apply(event)
+        prefix = reduce.reduce_run(sc.events[:index + 1])
+        emit(f"review #7 prefix {index} matches streaming fold", prefix == incremental.result()
+             and prefix["records"] == full["records"][:index + 1])
+    sc = Scenario(); sc.begin("n1", "a1", "operation")
+    sc.transition("a1", "ready", "blocked", {"request_ref": sc.ref("request", "a1")}, markers=["stale"])
+    sc.transition("a1", "blocked", "ready", {"answer_ref": sc.ref("answer", "a1", answer="answered"), "revalidation_digest": D("valid")})
+    expect("review #7 later transition replaces markers", sc, "accepted", node_is("n1", "ready", markers=[]))
+    sc.events[-1]["attribution_failure"] = "missing"
+    expect("review #7 schema-2 attribution failure refused", sc, "envelope")
+
+    for field in ("gate_exit", "suite_exit", "round"):
+        sc = fresh("unit", "commit"); sc.gate("a1", **{field: field == "round"})
+        expect(f"review #8 bool for int {field}", sc, "mistyped")
+    for field in ("pid", "pgid"):
+        sc = fresh("operation"); sc.operation("operation.result", "a1", identity=dict(IDENTITY, **{field: True}))
+        expect(f"review #8 bool for identity {field}", sc, "mistyped")
+    sc = fresh("unit", "commit")
+    evidence = failure_evidence(sc, "a1", phase="gate")
+    # dispatch-end is the integer claim in the closed reference vocabulary.
+    ref = sc.ref("dispatch-end", "a1", exit=True)
+    try:
+        vocabulary.check_reference(ref, R(["dispatch-end"]), "ref", "n1", "a1")
+        code = None
+    except vocabulary.VocabularyError as error: code = error.code
+    emit("review #8 bool for dispatch-end exit", code == "evidence-mistyped", code)
+    sc = fresh("operation"); sc.transition("a1", "running", "unknown-outcome", {"lost_child": 1})
+    expect("review #8 integer is not true constant", sc, "evidence-mistyped")
+    sc = fresh("operation"); evidence = terminal_evidence(sc, "a1"); evidence["operation_result_ref"]["reviewer"] = "foreign"
+    succeed(sc, evidence); expect("review #8 foreign reference claim", sc, "evidence-mistyped")
+    sc = Scenario(); sc.begin("n1!", "a1", "operation")
+    expect("review #8 identifier trailing garbage", sc, "mistyped")
+    sc = fresh("unit", "commit"); evidence = terminal_evidence(sc, "a1"); evidence["gate_ref"]["input_content"] = INPUT
+    succeed(sc, evidence); expect("review #8 gate content agreement", sc, "evidence-inconsistent")
+    try:
+        canonical.check({"\ud800": "value"}); rejected = False
+    except canonical.CanonicalError: rejected = True
+    emit("review #8 surrogate dictionary key rejected before encoding", rejected)
+    sc = fresh("unit", "commit"); sc.gate("a1", reason="raw\nnewline")
+    expect("review #8 raw newline refused", sc, "newline")
+
+    sc = Scenario(); sc.begin("n1", "a1", "operation")
+    other = Scenario(); other.run_id = fx.OTHER_RUN_ID; other.begin("n2", "a2", "operation")
+    sc.events.extend(other.events)
+    expect("review #9 fold rejects another run", sc, "run-mismatch")
+    sc.events[-1]["schema"] = 1
+    expect("review #9 legacy line cannot switch runs", sc, "run-mismatch")
+    explicit = reduce.reduce_run([sc.events[0]], run=fx.OTHER_RUN_ID)
+    emit("review #9 caller can bind the expected run", explicit["rejected"][0]["code"] == "run-mismatch")
+
 for label, function in (
+    ("review regressions", review_regressions),
     ("oracle", oracle_checks),
     ("rows", row_checks),
     ("pairs", pair_checks),
