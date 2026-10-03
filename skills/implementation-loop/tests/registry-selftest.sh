@@ -587,11 +587,11 @@ READ_ONLY_IMPORTS = {
 # The authority store's modules, and the one name of them a read-only module
 # may use: 0a.2's read-only classification (what `loop-authority status` runs).
 STORE_MODULES = {"store", "tools", "ceremony", "registry", "anchor", "keys", "records", "frame", "recover"}
-READ_ONLY_STORE_NAMES = {"recover": {"classify"}}
+READ_ONLY_STORE_NAMES = {"recover": {"classify", "classify_stable"}}
 # The os names a read-only module may use: reads only (os.open's flags are
 # the general scan's READ_FLAGS rule).
 READ_ONLY_OS = {"path", "environ", "getuid", "lstat", "fstat", "stat_result", "open", "read", "close", "sep",
-                "O_RDONLY", "O_NOFOLLOW"}
+                "O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK"}
 LOCK_NAMES = {"fcntl", "flock", "lockf", "WriterLock", "ReaderLock"}
 # Module aliases are refused outright (fail closed), so the rules above and
 # the call graph only ever see a module by its own name: a name an import

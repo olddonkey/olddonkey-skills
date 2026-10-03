@@ -130,7 +130,7 @@ def read_run(workspace: object, run_id: object) -> dict:
         current = os.path.join(current, part)
         _check_directory(current)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError as error:
         raise JournalReadError("no-run", f"no segment for run {run_id} in this workspace's journal",
                                usage=True) from error

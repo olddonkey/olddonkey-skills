@@ -120,6 +120,19 @@ def main(argv: list[str]) -> int:
         if args.kind != "revoke" and args.epoch is not None:
             fail("usage", "only revoke takes --epoch", EXIT_USAGE)
     try:
+        if args.command == "refs":
+            if os.environ.get("LOOP_AUTHORITY_CRASH_AT") is not None and tools.test_mode():
+                fail("crash-point", "refs has no crash points", store.EXIT_REFUSED)
+            # Refuse invalid journals/claims before creating scratch directories.
+            prepared = refs.prepare_report(args.workspace, args.run)
+            tools.establish_scratch()
+            result = refs.observe_report(prepared)
+            try:
+                data = mods["canonical"].canonical(result)
+            except mods["canonical"].CanonicalError as error:
+                raise refs.RefsError("output", f"the report has no canonical encoding: {error}") from error
+            sys.stdout.buffer.write(data + b"\n")
+            return store.EXIT_OK
         tools.establish_scratch()
         if args.command == "ceremony":
             result = ceremony.run(args.kind, {"remote": args.remote, "epoch": args.epoch})
@@ -134,17 +147,6 @@ def main(argv: list[str]) -> int:
             return exit_for(store, recover, plan)
         if os.environ.get("LOOP_AUTHORITY_CRASH_AT") is not None and tools.test_mode():
             fail("crash-point", f"{args.command} has no crash points", store.EXIT_REFUSED)
-        if args.command == "refs":
-            # 0a.3: read-only verification of the run's claims. No lock is
-            # taken (neither this store's nor the journal's), nothing is
-            # written, and the exit is 0 whenever the report is printed.
-            result = refs.report(args.workspace, args.run)
-            try:
-                text = mods["canonical"].canonical(result).decode("utf-8")
-            except mods["canonical"].CanonicalError as error:
-                raise refs.RefsError("output", f"the report has no canonical encoding: {error}") from error
-            print(text)
-            return store.EXIT_OK
         with store.ReaderLock():
             plan = recover.classify()
         emit(plan.summary())

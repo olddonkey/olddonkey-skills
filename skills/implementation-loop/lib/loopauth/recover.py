@@ -1472,6 +1472,24 @@ def recover(max_steps: int = 12) -> Plan:
     raise store.AuthorityError("recover", "recovery did not reach a stable state")
 
 
+def classify_stable() -> Plan | None:
+    """Observe without a lock, accepting only an unchanged local snapshot.
+
+    A ceremony may replace or remove files between reads. Bound the retries;
+    callers must report unavailable/changing rather than a transient verdict.
+    """
+    for _ in range(3):
+        try:
+            before = store.snapshot_digest()
+            plan = classify()
+            after = store.snapshot_digest()
+        except OSError:
+            continue
+        if before == after:
+            return plan
+    return None
+
+
 def classify() -> Plan:
     """Read-only classification (status, verify)."""
     scratch = Scratch()
