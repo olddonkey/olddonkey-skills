@@ -239,13 +239,15 @@ run):
    revocation is its record anchored with writer, verifier, and refs
    classifying the store quarantined by its exact rule and position (the
    marker's exact bytes asserted once recovery completes from every cut), and
-   "abandoned" re-genesis needs the recorded old remote tip, each with
+   strict "both" also requires no residual intent; the marker-written intent
+   case is separately pinned as quarantined. "Abandoned" re-genesis needs
+   the recorded old remote tip, each with
    planted half-transitions, and the every-byte crash matrix's enumerator is
    checked to cover all three frame kinds -- ceremonies in-process with the TTY
-   stubbed, so no pty; needs `ssh-keygen` with `-Y` and `git`; the crash
+   stubbed, so no pty; needs `ssh-keygen` with `-Y`, `git`, and `ssh`; the crash
    matrix runs in parallel beside the other modes) — expect one `F1` … `F6`
    line each with `PASS`, `escape-hatch: none`,
-   `falsifier: PASS (2143 checks)`, and `selftest: PASS (2143 checks)`.
+   `falsifier: PASS (2446 checks)`, and `selftest: PASS (2446 checks)`.
 13. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
 14. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.

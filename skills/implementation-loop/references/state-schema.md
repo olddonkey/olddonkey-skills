@@ -1158,7 +1158,10 @@ adds nothing to the writer.
   five argv forms and its writes (confined to its own temporary directory),
   its complete fetch argv and git environment for `file://`, SSH, and HTTPS
   remotes (its transport plan, against frozen forms), the journal scripts'
-  imports, and six planted bypasses that must each fail. The scans of
+  imports, and planted bypasses that must each fail. The importer inventory
+  walks `scripts/`, `backends/`, and `lib/`; a fifth entry cannot silently
+  escape the frozen coverage. Sink declarations must equal the frozen set,
+  and each recorded token may complete only its frozen sinks. The scans of
   `loop-authority.py` and the verifier resolve every import and attribute
   chain against the real modules, so a primitive is caught however it is
   spelled (`import os as o; o.system`, `os.path.os.system`, `posix.system`,
@@ -1174,8 +1177,9 @@ adds nothing to the writer.
   (`s = mods["store"]` forging an open token through `s._new(s.Token(...))`,
   `s._grant`, and `s._fs_create`), which is also run through the planted
   entry to show it writes `authority/active`. The verifier's `Runner.run` is
-  its single frozen `subprocess.run(argv, ...)` statement, and an extra
-  process start planted inside it must fail.
+  frozen timeout-handling body with one `subprocess.run(argv, ...)`, and an
+  extra process start planted inside it must fail. Starred arguments and
+  `**` keywords on `open`, and dynamic stream factories, fail closed.
 - **F2** every external entry point maps to exactly one row: a frozen table
   equal to the real parser's subcommands and ceremony names; `recover` maps
   to the recovery routine, and for every case of the crash matrix its
@@ -1184,7 +1188,9 @@ adds nothing to the writer.
 - **F3** derived-only rows have no external entry point, and each compound
   child (the revocation's quarantine, replay-forward's delimiter completion,
   the head advance) refuses no token, its parent's own token, another
-  parent's token, and a spent parent token.
+  parent's token, and a spent parent token. The foreign-anchor probe captures
+  a durable, bound child and requires `stage-mismatch`; removing that binding
+  guard must fail the probe.
 - **F4** no generic sealing or append hatch: sealing and the frame append
   only from the row's driver, the record type fixed by the row and validated
   first -- the row's `registry.validate` dominates `prepare_record`: it runs
@@ -1197,7 +1203,9 @@ adds nothing to the writer.
   `approval.consume`, and every type
   `ALLOWED["tg-v1.0a"]` does not admit are refused (`type-not-admitted`).
   The suite prints `escape-hatch: none` only when no check needs an
-  exception.
+  exception. Record primitives are recognized under any receiver and refused
+  as values; every ceremony driver must prepare exactly one record. Registry
+  aliases, reflection, and dictionary rebinding are planted controls.
 - **F5** no recovery invents authority: after recovery every record and
   anchor pointer is byte-equal to one durable before it (the log, or the
   interrupted transaction's intent), no key file changes, and recovery never
@@ -1214,7 +1222,12 @@ adds nothing to the writer.
   position and nothing authorizing; the local quarantine marker is only its
   materialization, so once `recover` has run to completion from every cut
   the marker must exist with its writer's exact bytes (the ceremony's
-  quarantine child, or recovery's store-quarantine row). Neither means no
+  quarantine child, or recovery's store-quarantine row), with no residual
+  intent. The hand-built marker-before-intent-removal state is separately
+  pinned as quarantined with a residual intent, including two no-op recoveries;
+  it is never classified as both. `matrix_cut` itself is exercised against
+  scripted correct and incorrect markers, and bypassing its checks must fail.
+  Neither means no
   revocation anchored and the old epoch still active; pending means the
   writer itself classifies a pending state (its transaction's durable frame
   or intent not yet resolved by recovery) with nothing authorizing -- never
