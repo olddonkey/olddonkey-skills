@@ -113,8 +113,8 @@ a state that has no specific row to the same target (so `blocked → parked` and
 | running → succeeded | `terminal_evidence` (below) with a success outcome |
 | running → failed | `failure_evidence` (below) |
 | running → unknown-outcome | `lost_child: true` |
-| unknown-outcome → succeeded | `reconciliation_ref` of kind `reconciliation` or `receipt-lookup` (kind `attestation` refused, `tg:294`) **plus** the full `terminal_evidence` for the pinned row and the matching `stop_point_result` |
-| unknown-outcome → failed | `reconciliation_ref` of kind `reconciliation` or `receipt-lookup` (kind `attestation` refused) **plus** `failure_evidence` |
+| unknown-outcome → succeeded | the full `terminal_evidence` for the pinned row and the matching `stop_point_result`, in which the one lost reference is either **cited** (its digest must resolve to an accepted record of this attempt) or **replaced** by `reconciliation_ref` of kind `reconciliation` or `receipt-lookup` (kind `attestation` refused, `tg:294`) — never both |
+| unknown-outcome → failed | `failure_evidence`, in which `failing_ref` is either cited (must resolve) or replaced by `reconciliation_ref` of kind `reconciliation` or `receipt-lookup` (kind `attestation` refused) — never both |
 | unknown-outcome → parked | `unresolvable_reason` |
 | any non-terminal → cancelled | `cancel_ref`, `quiescence_ref` (`tg:296`) |
 | any non-terminal → parked | `park_reason` |
@@ -344,6 +344,8 @@ Unit 2). Schema-1 records reduce with every axis weakest and are never
 completion evidence. **Completion eligibility is always false in 0a.1**,
 because every guard is `claimed` (§3.1).
 
+The reducer binds each fold to a single run and refuses lines from another run (`run-mismatch`).
+
 ### 3.8 Fields
 
 C: `skills/implementation-loop/lib/loopauth/__init__.py`,
@@ -467,8 +469,9 @@ them here, and they bind 0a.1:
 - **Canonical limits.** Integers are limited to ±(2^53 − 1) and nesting to
   depth 64; anything beyond has no canonical encoding and is refused.
 
-- **A resolved journal reference must agree with its record.** When the `digest` of a reference of kind `operation-result`, `gate`, `review`, or `publish` equals the digest of a record the fold has already accepted, the reducer compares them — the record's event, `node_id`, `attempt_id`, the claimed outcome or verdict, and the content the record is about — and refuses the transition (`reference-contradicted`) if they differ. A digest that names no accepted record stays a claim. The guard is still `claimed`.
+- **A resolved journal reference must agree with its record.** When the `digest` of a reference of kind `operation-result`, `gate`, `review`, or `publish` equals the digest of a record the fold has already accepted, the reducer compares them and refuses the transition (`reference-contradicted`) if they differ in: the record's event; `node_id` or `attempt_id`; the reference's `content`, which must equal the record's `output_content` (operation-result), `input_content` (gate), or `content` (review, publish); or any claim **the reference carries** — `outcome`; `verdict`, `input_content`; `verdict`, `reviewer`; `outcome`, `pr`, `head_sha`, respectively. A claim the reference omits is not a contradiction; a claim it carries that the record does not state is. A digest that names no accepted record stays a claim. The guard is still `claimed`.
 - **A late real record exits `unknown-outcome` without a reconciliation.** `reconciliation_ref` is required exactly when the lost reference is substituted. If the lost record is in the journal, the transition carries the row's full evidence citing it and no `reconciliation_ref`; the reference must resolve to that record. A reference that does not resolve is refused (`reconciliation-required`), as is presenting both a reconciliation and the reference (`substitution-present`). Rows with no substitutable reference remain park-only.
+- **A reconciliation's receipt follows its outcome.** When `receipt_ref.outcome` is present on a `reconciliation.result`, `reconciliation_outcome: succeeded` requires `merged` and `failed` requires `refused`.
 
 ---
 
