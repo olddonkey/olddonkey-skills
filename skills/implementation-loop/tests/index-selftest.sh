@@ -31,6 +31,7 @@ export LC_ALL=C
 # A caller's declared attribution must not leak into fixture events.
 unset LOOP_UNIT LOOP_ROUND
 
+PINNED_CHECKS=111
 CHECKS=0
 FAILED_CHECKS=0
 CASE_STATUS=0
@@ -2084,6 +2085,10 @@ else
   fail "reviewer: unknown stored string and object values are not projected"
 fi
 
+if [[ $CHECKS -ne $PINNED_CHECKS ]]; then
+  printf 'selftest: FAIL (expected %d checks, ran %d)\n' "$PINNED_CHECKS" "$CHECKS" >&2
+  exit 1
+fi
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' "$FAILED_CHECKS" "$CHECKS" >&2
   exit 1

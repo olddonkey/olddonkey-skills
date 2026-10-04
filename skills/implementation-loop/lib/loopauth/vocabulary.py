@@ -1269,6 +1269,12 @@ def _reconciliation_result(payload: dict) -> None:
             check_reference(receipt, spec, "receipt_ref", payload["node_id"], payload["attempt_id"])
         except VocabularyError as error:
             _fail("mistyped", error.message)
+        expected_receipt = {"succeeded": "merged", "failed": "refused"}.get(outcome)
+        if expected_receipt is not None and "outcome" in receipt and receipt["outcome"] != expected_receipt:
+            _fail(
+                "evidence-inconsistent",
+                f"receipt_ref.outcome must be {expected_receipt} for reconciliation_outcome {outcome}",
+            )
     elif receipt is not None:
         _fail("unexpected-field", "receipt_ref applies only to method receipt-lookup")
     result = payload.get("substituted_result")

@@ -35,6 +35,7 @@ export PYTHONDONTWRITEBYTECODE=1
 # A caller's declared attribution or context must not leak into fixtures.
 unset LOOP_UNIT LOOP_ROUND LOOP_CONTEXT
 
+PINNED_CHECKS=803
 CHECKS=0
 FAILED_CHECKS=0
 CASE_STATUS=0
@@ -2407,8 +2408,7 @@ def review_regressions():
     evidence["provider_receipt_ref"]["outcome"] = "refused"
     succeed(sc, evidence)
     expect("review #2 refused receipt cannot prove merge success", sc, "evidence-claim")
-    # A reconciliation receipt describes a lookup, including failed outcomes;
-    # it is deliberately not the merge-success receipt spec.
+    # A failed reconciliation agrees with a refused provider receipt.
     sc = lost()
     sc.reconciliation("a1", outcome="failed", receipt_ref=sc.ref("provider-receipt", "a1", outcome="refused"))
     resolve(sc, "failed")
@@ -2560,7 +2560,168 @@ def review_regressions():
     explicit = reduce.reduce_run([sc.events[0]], run=fx.OTHER_RUN_ID)
     emit("review #9 caller can bind the expected run", explicit["rejected"][0]["code"] == "run-mismatch")
 
+def round3_record(sc, kind, failed=False, **extra):
+    if kind == "operation-result":
+        return sc.operation("operation.result", "a1", outcome="failed" if failed else "succeeded", **extra)
+    if kind == "gate":
+        return sc.gate("a1", verdict="red" if failed else "green", gate_exit=1 if failed else 0, **extra)
+    if kind == "publish":
+        return sc.publish("a1", outcome="failed" if failed else "published", **extra)
+    payload = sc.base("a1")
+    payload.update(content=COMMIT, reviewer="reviewer-1", request_id="r",
+                   reviewed_content_digest=D(COMMIT), verdict="iterate" if failed else "pass",
+                   findings_digest=D([]))
+    payload.update(extra)
+    return sc.add("review.recorded", payload)
+
+
+def round3_reference_checks():
+    # Frozen agreement cells, independent of the implementation table.
+    cells = (
+        ("operation-result", "operation.result", "operation", None, "output_content", ("outcome",)),
+        ("gate", "gate.result", "unit", "commit", "input_content", ("verdict", "input_content")),
+        ("review", "review.recorded", "unit", "commit", "content", ("verdict", "reviewer")),
+        ("publish", "publish.recorded", "unit", "pr", "content", ("outcome", "pr", "head_sha")),
+    )
+    for kind, event, node_type, stop, content_field, claims in cells:
+        sc = fresh(node_type, stop)
+        rec = round3_record(sc, kind)
+        expect(f"round3 agreement {kind}: accepted record control", sc, "accepted")
+        ref = sc.record_ref(kind, event, rec, rec[content_field], **{key: rec[key] for key in claims})
+        # Some vocabulary rules couple fields (gate content/input_content),
+        # and accepted attempt bindings couple node and attempt identities.
+        # Probe the comparison boundary with just one lookup/claim changed,
+        # so another rule cannot mask a missing comparison. Lifecycle cases
+        # below exercise real accepted digests through the whole reducer.
+        for field in ("content",) + claims + ("event", "node_id", "attempt_id"):
+            reducer = reduce.Reducer()
+            for line in sc.events:
+                reducer.apply(line)
+            changed = copy.deepcopy(ref)
+            if field == "event":
+                reducer.by_digest.pop((event, ref["digest"]))
+                reducer.by_digest[("another.event", ref["digest"])] = rec
+            elif field in ("node_id", "attempt_id"):
+                reducer.by_digest[(event, ref["digest"])] = dict(rec, **{field: "another-id"})
+            else:
+                changed[field] = {
+                    "content": WORKTREE, "input_content": WORKTREE, "outcome": "failed",
+                    "verdict": "red" if kind == "gate" else "iterate", "reviewer": "another-reviewer",
+                    "pr": "https://example.invalid/pr/2", "head_sha": "b" * 40,
+                }[field]
+            try:
+                reducer._check_journal_references(reducer.attempts["a1"], changed)
+                code = None
+            except reduce.Rejected as error:
+                code = error.code
+            emit(f"round3 agreement {kind}.{field}: single-field contradiction",
+                 code == "reference-contradicted", code)
+
+        phase = "operation" if kind == "operation-result" else kind
+        for mismatch in (False, True):
+            sc = fresh(node_type, stop)
+            rec = round3_record(sc, kind, failed=True)
+            evidence = failure_evidence(sc, "a1", phase=phase)
+            ref = evidence["failing_ref"]
+            ref["digest"] = fx.record_digest(event, rec)
+            ref["content"] = WORKTREE if mismatch else rec[content_field]
+            sc.transition("a1", "running", "failed", {"failure_evidence": evidence})
+            expect(f"round3 failing_ref {kind}: {'content contradiction' if mismatch else 'minimal real digest accepted'}",
+                   sc, "reference-contradicted" if mismatch else "accepted",
+                   node_is("n1", "running" if mismatch else "failed"))
+
+    for kind, claim, value in (("gate", "input_content", COMMIT), ("review", "reviewer", "another-reviewer")):
+        sc = fresh("unit", "commit")
+        # For gate, both claimed content fields agree with each other, but
+        # disagree with the record's input. For review, only reviewer differs.
+        rec = round3_record(sc, kind, failed=True, **({"input_content": INPUT} if kind == "gate" else {}))
+        evidence = failure_evidence(sc, "a1", phase=kind)
+        evidence["failing_ref"].update(digest=fx.record_digest(f"{kind}.{'result' if kind == 'gate' else 'recorded'}", rec),
+                                      **{claim: value})
+        sc.transition("a1", "running", "failed", {"failure_evidence": evidence})
+        expect(f"round3 failing_ref {kind}: optional {claim} contradiction", sc, "reference-contradicted")
+
+    for claim, value in (("pr", fx.PR_URL), ("head_sha", COMMIT_SHA)):
+        sc = fresh("unit", "pr")
+        rec = sc.publish("a1", outcome="failed")
+        evidence = failure_evidence(sc, "a1", phase="publish")
+        evidence["failing_ref"].update(digest=fx.record_digest("publish.recorded", rec), **{claim: value})
+        sc.transition("a1", "running", "failed", {"failure_evidence": evidence})
+        expect(f"round3 failing_ref publish: claimed {claim} absent from record", sc, "reference-contradicted")
+
+    # Outcome alone disagrees: the published record's PR/head claims match.
+    sc = fresh("unit", "pr")
+    rec = sc.publish("a1")
+    evidence = failure_evidence(sc, "a1", phase="publish")
+    evidence["failing_ref"].update(digest=fx.record_digest("publish.recorded", rec), pr=rec["pr"], head_sha=rec["head_sha"])
+    sc.transition("a1", "running", "failed", {"failure_evidence": evidence})
+    expect("round3 failing_ref publish: outcome alone contradicts published record", sc, "reference-contradicted")
+
+    for field, extra in (
+        ("pr", {"pr": "https://example.invalid/pr/2"}),
+        ("head_sha", {"sha": "b" * 40, "head_sha": "b" * 40}),
+        ("branch", {"branch": "another-branch"}),
+        ("stop_point", {"stop_point": "merge"}),
+    ):
+        sc = fresh("unit", "pr")
+        rec = sc.publish("a1", **extra)
+        evidence = terminal_evidence(sc, "a1")
+        evidence["publish_ref"]["digest"] = fx.record_digest("publish.recorded", rec)
+        succeed(sc, evidence)
+        expect(f"round3 direct publish: {field} alone contradicts terminal evidence or pin",
+               sc, "reference-contradicted", node_is("n1", "running"))
+
+    sc = fresh("unit", "commit")
+    rec = round3_record(sc, "review", content=WORKTREE, reviewed_content_digest=D(WORKTREE))
+    evidence = terminal_evidence(sc, "a1")
+    evidence["review_ref"]["digest"] = fx.record_digest("review.recorded", rec)
+    succeed(sc, evidence)
+    expect("round3 direct review: working tree is not the claimed commit", sc, "reference-contradicted")
+
+    for mismatch in (False, True):
+        sc = fresh("unit", "merge")
+        rec = sc.gate("a1", content=INTEGRATION, input_content=COMMIT if mismatch else INTEGRATION)
+        evidence = terminal_evidence(sc, "a1")
+        evidence["pre_merge_gate_ref"]["digest"] = fx.record_digest("gate.result", rec)
+        succeed(sc, evidence)
+        expect(f"round3 pre_merge_gate_ref: {'content contradiction' if mismatch else 'real digest accepted'}",
+               sc, "reference-contradicted" if mismatch else "accepted")
+
+
+def round3_reconciliation_checks():
+    for direction, receipt_outcome, accepted in (
+        ("succeeded", "merged", True), ("failed", "refused", True),
+        ("succeeded", "refused", False), ("failed", "merged", False),
+    ):
+        sc = lost()
+        sc.reconciliation("a1", outcome=direction,
+                          receipt_ref=sc.ref("provider-receipt", "a1", outcome=receipt_outcome))
+        if accepted:
+            resolve(sc, direction)
+        expect(f"round3 receipt direction: {direction}/{receipt_outcome}", sc,
+               "accepted" if accepted else "evidence-inconsistent",
+               node_is("n1", direction if accepted else "unknown-outcome"))
+
+    sc = lost("unit", "commit")
+    rec = sc.gate("a1", verdict="red", gate_exit=1)
+    evidence = failure_evidence(sc, "a1", phase="gate")
+    evidence["failing_ref"]["digest"] = fx.record_digest("gate.result", rec)
+    sc.transition("a1", "unknown-outcome", "failed", {"failure_evidence": evidence})
+    expect("round3 failed park-only: real gate without reconciliation", sc, "substitution-kind",
+           node_is("n1", "unknown-outcome"))
+
+    for direction in ("succeeded", "failed"):
+        sc = lost("unit", "pr")
+        sc.publish("a1", outcome="published" if direction == "succeeded" else "failed")
+        sc.reconciliation("a1", outcome=direction, substitutes="publish")
+        resolve(sc, direction)
+        expect(f"round3 publish {direction}: reconciliation present, slot absent, real record exists",
+               sc, "substitution-not-absent", node_is("n1", "unknown-outcome"))
+
+
 for label, function in (
+    ("round3 references", round3_reference_checks),
+    ("round3 reconciliation", round3_reconciliation_checks),
     ("review regressions", review_regressions),
     ("oracle", oracle_checks),
     ("rows", row_checks),
@@ -2818,6 +2979,10 @@ PY
 CLI_STATUS=$?
 tally "$TMP_ROOT/cli.tsv" "$TMP_ROOT/cli.stderr" "$CLI_STATUS" "cli segment checks"
 
+if [[ $CHECKS -ne $PINNED_CHECKS ]]; then
+  printf 'selftest: FAIL (expected %d checks, ran %d)\n' "$PINNED_CHECKS" "$CHECKS" >&2
+  exit 1
+fi
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' "$FAILED_CHECKS" "$CHECKS" >&2
   exit 1

@@ -38,6 +38,7 @@ export PYTHONDONTWRITEBYTECODE=1
 # A caller's declared attribution must not leak into fixture events.
 unset LOOP_UNIT LOOP_ROUND
 
+PINNED_CHECKS=604
 CHECKS=0
 FAILED_CHECKS=0
 CASE_STATUS=0
@@ -1883,6 +1884,18 @@ write("refuse", "a gate whose log_digest differs from its result_digest's is ref
       "[result-digest-mismatch]", dict(payload, log_digest=D("another log")))
 write("refuse", "approval.consume is refused with its distinct error", "approval.consume", 10,
       "approval.consume is refused in Phase A", dict(base("d1"), capability_ref=ref("authorization", "d1")))
+event, original = named["reconciliation.result (operation-result)"]
+for direction, receipt_outcome, accepted in (
+    ("succeeded", "merged", True), ("failed", "refused", True),
+    ("succeeded", "refused", False), ("failed", "merged", False),
+):
+    payload = dict(original, reconciliation_outcome=direction,
+                   receipt_ref=dict(original["receipt_ref"], outcome=receipt_outcome),
+                   substituted_result=dict(original["substituted_result"], outcome=direction))
+    payload = vocabulary.seal(event, payload)
+    write("accept" if accepted else "refuse",
+          f"round3 receipt direction {direction}/{receipt_outcome}", event,
+          0 if accepted else 2, "-" if accepted else "[evidence-inconsistent]", payload)
 for group, lines in rows.items():
     with open(os.path.join(out, f"{group}.tsv"), "w", encoding="utf-8") as handle:
         handle.write("".join(line + "\n" for line in lines))
@@ -2221,6 +2234,10 @@ ln -s "$JOURNAL" "$TMP_ROOT/bin/loop-journal"
 run_cmd lib-script-symlink "$TMP_ROOT/bin/loop-journal" --help
 expect_status 0 "lib: a symlinked script resolves lib/ from its real path"
 
+if [[ $CHECKS -ne $PINNED_CHECKS ]]; then
+  printf 'selftest: FAIL (expected %d checks, ran %d)\n' "$PINNED_CHECKS" "$CHECKS" >&2
+  exit 1
+fi
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' "$FAILED_CHECKS" "$CHECKS" >&2
   exit 1

@@ -90,21 +90,25 @@ only to snapshot bytes, and never write, repair, rebuild, or create a store.
   `run`, `ended`, `end_status`, `tail`, `complete`, and `events`. The events are
   the parsed segment objects in order, including a valid unterminated last
   line but excluding a torn last line. `tail` is `clean`, `unterminated`, or
-  `torn`; `complete` is true exactly for `clean`. `ended` reflects a `run.end`
-  event and `end_status` is its status or null. This works after context
+  `torn`; `complete` is true exactly for `clean`. `ended` reflects a schema-1
+  `run.end` event and `end_status` is the last such event's status or null;
+  schema-2 lines affect neither field. This works after context
   retirement and does not read context. A newline-terminated non-object line
   is mid-file corruption; an unterminated non-object last line is a torn tail.
   Output JSON is ASCII-safe, including stored non-ASCII and escaped surrogate
   strings. Exits: 0 when printed; 2 for usage,
   invalid or missing run, or no store; 3 for a busy lock; 4 for mid-file
-  corruption; 6 for a different event `run`, or an absent,
+  corruption; 6 for a different, absent, or non-string event `run`, or an absent,
   non-integer, repeated, or decreasing `seq`. It does not validate payloads
-  or dispatch ids.
+  or dispatch ids. Exit 9 means an unknown-schema line. Run and sequence
+  checks cover all parsed lines before the schema check, so an unknown-schema
+  line with an invalid run or sequence exits 6 rather than 9.
 - `loop-journal find-run --plan TEXT` prints one JSON object with `schema: 1`,
   sorted `runs` and `ambiguous` id lists. `runs` contains segments whose first
-  event is `run.begin` with the exact plan, including a valid first event
+  event is a schema-1 `run.begin` with the exact plan, including a valid first event
   without a trailing newline. `ambiguous` contains segments without a
-  parseable first event or whose first event is not `run.begin`; later
+  parseable first event, whose first event is not `run.begin`, or whose first
+  line is not schema 1 (including schema 2 or an unknown schema); later
   corruption does not affect the result. An absent plan on
   a valid `run.begin` is neither a match nor ambiguous. A missing store
   prints empty lists and creates nothing. Exits: 0 when printed; 2 for usage,
@@ -458,18 +462,37 @@ Relations are recorded, never refused, and never read as identity.
 
 **Resolved journal references.** A reference to an accepted `operation.result`,
 `gate.result`, `review.recorded` or `publish.recorded` must agree with the
-record's event, node, attempt and its outcome/verdict and associated content
-(or reviewer, and publication PR/head). Contradictions are refused as
+record's event, node and attempt. Its required `content` is always compared:
+
+| reference kind | record field compared with reference `content` | other claims compared when present |
+| --- | --- | --- |
+| `operation-result` | `output_content` | `outcome` |
+| `gate` | `input_content` | `verdict`, `input_content` |
+| `review` | `content` (what was reviewed) | `verdict`, `reviewer` |
+| `publish` | `content` | `outcome`, `pr`, `head_sha` |
+
+An omitted claim is not a contradiction; a carried claim that the record
+does not state is a contradiction. Required claims are still selected by the
+vocabulary's evidence row. A resolving publication must also match the
+attempt's pinned `stop_point` and, for success, the terminal evidence's
+`branch`, mirroring the substitution path. Contradictions are refused as
 `reference-contradicted`; unresolved digests remain claims. Only the accepted
 prefix can resolve a reference, and guards remain `claimed`. A reconciliation
-receipt describes the lookup, so unlike the merge-success receipt it may
-carry `outcome: refused` (including a failed reconciliation).
+receipt's `outcome` may be omitted; when present, a `succeeded` reconciliation
+requires `merged`, and a `failed` reconciliation requires `refused`.
+A mismatch is refused by the vocabulary as `evidence-inconsistent` (including
+through the journal CLI). An `unresolved` reconciliation constrains neither
+receipt outcome and substitutes nothing.
 
 **Late records and reconciliation.** An exit from `unknown-outcome` carries
 the full row evidence. Without `reconciliation_ref`, the operation-result or
 publish reference must resolve to an already accepted record of this attempt;
 an unresolved digest is refused (`reconciliation-required`). Rows without a
-substitutable slot remain park-only. Alternatively, exactly one missing reference
+substitutable slot remain park-only in both success and failure directions.
+This late-record form carries `evidence: {terminal_evidence: ...}` for success
+(and the pinned `stop_point_result`), or `evidence: {failure_evidence: ...}`
+for failure, with the resolving reference present in that full evidence.
+Alternatively, exactly one missing reference
 of the pinned row may be replaced by the `reconciliation_ref`'s record:
 `publish_ref` (unit `pr`/`merge`) or `operation_result_ref` (operation) into
 `succeeded`, the `failing_ref` of a `publish` or `operation` phase into
@@ -487,7 +510,7 @@ a record of that kind arriving after the substitution is refused. A lost
 dispatch cannot be substituted (schema-1 `dispatch.end` has no binding): it
 can only be parked.
 
-**The reducer** (`reduce.py`, pure). `reduce_run(events)` returns per-node
+**The reducer** (`reduce.py`, pure). `reduce_run(events, *, run=None)` returns per-node
 state, `stop_point_result`, markers, guards (all `claimed`), transitions with
 their relations, per-record axes (weakest) and declared `unit`/`round`
 attribution, `rejected` records with a reason code, `unknown_schema`
@@ -496,6 +519,14 @@ positions, `degraded`, and `gates` with `gate_ineligibility` reasons —
 `verdict-not-green`, `verdict-inconsistent`, `envelope-missing` — each rule
 contributing its own reason. Schema-1 records reduce with every axis weakest
 and are never completion evidence. `completion_eligible` is always false.
+The optional keyword `run=ID` binds the expected journal run. A schema-1 or
+schema-2 line carrying another string `run` is refused as `run-mismatch`.
+Without `run=`, the first recognized-schema line carrying a string `run`
+pins it, so a foreign first line can cause later genuine lines to be refused;
+callers that know the segment id should pass it. For compatibility, even
+with `run=`, a schema-1 line whose `run` is absent or non-string remains
+`legacy`; `read-run` instead exits 6 for that shape. Schema-2 lines still
+require a string envelope `run`.
 Across records it also refuses: a record naming an attempt with no
 `attempt.begin`, or disagreeing with that attempt's `node_id`, `run_id`,
 `run_snapshot_digest`, or `node_spec_digest`; a second open attempt for a
@@ -503,6 +534,12 @@ node; a `run_snapshot_digest` other than the run's first; a transition of a
 superseded attempt or from a state the attempt is not in; an
 `operation.spawned`, `.released`, or `.result` with no matching
 `operation.reserve`; and any new attempt after `graph.diverged`.
+Relevant rejection codes include `run-mismatch` (foreign string run),
+`reference-contradicted` (a resolving reference disagrees with its record or
+publication pin/branch), `reconciliation-required` (an unresolved late-record
+reference without reconciliation), `substitution-kind` (no substitutable slot;
+park only), `substitution-not-absent` (a real record already exists), and
+`substituted` (a late record arrives after substitution).
 
 ---
 

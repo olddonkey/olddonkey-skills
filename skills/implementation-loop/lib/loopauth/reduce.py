@@ -218,8 +218,6 @@ class Reducer:
         run = obj.get("run")
         if type(run) is not str:
             _reject("envelope", "a schema-2 line must carry the journal envelope run")
-        if self.run is not None and run != self.run:
-            _reject("run-mismatch", "line belongs to another run")
         if "attribution_failure" in obj:
             _reject("envelope", "a schema-2 record is never unattributed")
         name = obj.get("event")
@@ -330,7 +328,7 @@ class Reducer:
         row = v.select_row(*pair)
         assert row is not None
         evidence = payload["evidence"]
-        self._check_journal_references(attempt, evidence)
+        self._check_journal_references(attempt, evidence, evidence.get("terminal_evidence"))
         if pair == ("starting", "running"):
             self._check_observation(attempt, evidence)
         elif pair == ("starting", "blocked"):
@@ -432,29 +430,37 @@ class Reducer:
             _reject(code, f"the named {event} belongs to another attempt")
         return record
 
-    def _check_journal_references(self, attempt: dict, value: object) -> None:
+    def _check_journal_references(
+        self, attempt: dict, value: object, terminal: dict | None = None
+    ) -> None:
         """Only the already accepted prefix can contradict a reference claim."""
         if type(value) is not dict:
             return
         subjects = {
-            "operation-result": ("operation.result", {"outcome": "outcome", "content": "output_content"}),
-            "gate": ("gate.result", {"verdict": "verdict", "input_content": "input_content"}),
-            "review": ("review.recorded", {"verdict": "verdict", "reviewer": "reviewer"}),
-            "publish": ("publish.recorded", {"outcome": "outcome", "pr": "pr", "head_sha": "head_sha", "content": "content"}),
+            "operation-result": ("operation.result", "output_content", ("outcome",)),
+            "gate": ("gate.result", "input_content", ("verdict", "input_content")),
+            "review": ("review.recorded", "content", ("verdict", "reviewer")),
+            "publish": ("publish.recorded", "content", ("outcome", "pr", "head_sha")),
         }
         kind = value.get("kind")
         if type(kind) is str and kind in subjects and "digest" in value:
-            event, fields = subjects[kind]
+            event, content_field, claims = subjects[kind]
             matches = [(name, record) for (name, digest), record in self.by_digest.items()
                        if digest == value["digest"]]
             for name, record in matches:
                 if (name != event or record["node_id"] != attempt["node_id"]
                         or record["attempt_id"] != attempt["attempt_id"]
-                        or any(value.get(key) != record.get(field) for key, field in fields.items())):
+                        or value["content"] != record.get(content_field)
+                        or any(key in value and value[key] != record.get(key) for key in claims)):
                     _reject("reference-contradicted", f"{kind} reference contradicts its accepted record")
+                if kind == "publish" and (
+                    record["stop_point"] != attempt["stop_point"]
+                    or (terminal is not None and record["branch"] != terminal["branch"])
+                ):
+                    _reject("reference-contradicted", "publication differs from the pinned stop point or terminal branch")
         else:
             for child in value.values():
-                self._check_journal_references(attempt, child)
+                self._check_journal_references(attempt, child, terminal)
 
     def _check_late_record(self, attempt: dict, payload: dict) -> None:
         evidence = payload["evidence"]
