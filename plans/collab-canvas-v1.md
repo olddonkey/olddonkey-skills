@@ -981,6 +981,59 @@ coordinator. An agent that splits a requester's graph into better units (the
 engineer does that at admission). Live model output for cursor and grok. Gate
 containment (owed before unit 8). Proof-grade evidence.
 
+## 13. Implementation notes
+
+What building the units changed, relative to §4 and §7 above. Where this section and those differ, this section is what was built.
+
+### Unit 0, as merged (PR #69)
+
+- Every post-run check and the diff read one frozen copy of the work tree, taken after the CLI exits. A reviewer's stub that kept writing after the checks got a file applied in four runs of five before this.
+- The patch is not rewritten. It is `git diff --no-index --no-renames` applied with `git apply -p2`. The header rewriting the cursor adapter does breaks renames, paths such as `lib/work/x`, and hunk lines that look like headers; the cursor adapter still has it and that is a separate change.
+- New paths that the real repository ignores are dropped and reported, not applied.
+- The real CLI creates an empty `.claude/.cc-writes/` in its working directory whenever Bash runs. So new paths under any `.claude/` directory are dropped and reported, and only a change to or deletion of an existing one is refused.
+- The real CLI refuses a compound shell command it cannot analyse statically, because there is nobody to approve it. The real-CLI containment case therefore runs three separate simple commands and is judged from the stream.
+- §12's carried falsifier was run against CLI 2.1.285 and was not triggered: an in-copy edit lands, an out-of-copy write is refused by the OS sandbox, and `curl` is refused.
+
+### Unit 1, as merged (PR #70)
+
+- `read-run` returns exactly the events the journal's own parser returns. A line that is valid JSON and not an object is therefore corruption (exit 4) or a torn tail, never exit 6.
+- `find-run` treats a complete `run.begin` that lacks its newline as a run, as the parser does.
+- Both print ASCII-only JSON.
+
+### Unit 2, as specified for implementation
+
+- `loop-journal` gains a third read-only subcommand, `read-context`, because nothing else lets a caller ask which run the context names.
+- A quarantine has its own id and a list of runs, which may be empty, and is released with `release-quarantine --id`. A released unit is in a new terminal state, `released`; its run stays unterminated in the journal.
+- The lost-state case is `unknown-outcome(state-lost)`, not a `blocked` state: its run is still open and it leaves by `abandon`.
+- The cap is on the whole prompt, `caps.prompt_bytes`, at most 120000, because three adapters pass the prompt as one argument and Linux limits an argument to 131072 bytes. There is no separate diff cap.
+- The spec's Environment section comes from a new `references/coordinator-environment.md`, not from `dispatch-prompt.md`, whose block has an unfilled placeholder.
+- A judge that explains under Why that the request cannot be specified, and leaves Change empty, ends the unit `parked(spec-declined)` with no retry.
+- Under `deep`, the spec-blind review is dispatched only after the first review passes.
+- A unit that ends parked, blocked, or abandoned with a clean tree at the base commit is returned to the base branch and its `canvas/<id>` branch is deleted.
+- An `init` command creates the config directory and prints the workspace key.
+- The own-write rule tolerates a `journal.repaired` event before the expected one, since the journal emits it when it repairs a torn tail.
+
+### Unit 2, as built
+
+Review of the implementation changed these. `references/coordinator.md` is the operator's reference.
+
+- Unlike the §7 preflight list, `approve-spec` needs neither config nor calibration: it compares the engineer-supplied digest and records those exact approved bytes. It does not dispatch an agent or grant standing authorization; `spec` and `check-diff` still validate both stores before dispatch.
+- `abandon` has two paths. With a readable state file, the run is bound by its `coordinator:<attempt_token>` plan, and `unit.end` is written only if the unit began; a unit killed between `run.begin` and `unit.begin` is closed, not quarantined. Without one, `--run ID` is enough and the unit is read from the run's events.
+- `abandon` refuses while the last dispatch's process group is alive, unless `--dispatches-terminated` is given. Writing while the adapter could still append its own events quarantined a healthy run, and in unit 3 that process is an implementer editing the tree.
+- Reconciliation reads the journal again for a unit already in `unknown-outcome`. A run closed from outside becomes `abandoned(run-ended-externally)`.
+- A busy journal lock is retried for ten seconds and then stops the command with exit 3. It is never a quarantine.
+- Children inherit no `LOOP_*` variable and none of the `GIT_DIR` family. `GIT_DIR=<other repo>` used to create the unit branch in the other repository.
+- A dispatch has a time cap, `caps.dispatch_seconds` (1 to 14400, default 3600). On expiry, or on SIGINT, SIGTERM, or SIGHUP, the adapter's process group gets TERM and then KILL. After any adapter exit a surviving descendant is stopped, and one that cannot be stopped leaves the unit `unknown-outcome`.
+- Every path the coordinator writes into a prompt or prints is a JSON string. A file name with a newline could otherwise forge a section of the review prompt.
+- A spec is invalid when it holds a control character, a bidirectional control (U+202A to U+202E, U+2066 to U+2069), or a zero-width space, word joiner, or BOM. So is a verdict with one in any string. Joiners and direction marks (U+200C to U+200F) are allowed, since emoji and several scripts need them.
+- A spec is also invalid when a line other than the five exact headings would render as a level-2 heading with one of the five section names: an ATX `##` line or a name underlined with dashes, compared after removing invisible characters and ignoring case and spacing. A level-1 or level-3 heading and a bare name are ordinary text. Homoglyphs are not caught; the engineer's approval of the exact bytes is the control. The refusal names the line.
+- A unit name read from journal events must match the unit id pattern before `abandon` uses it as a path; otherwise the run is quarantined.
+- The combined verdict is stored as `verdict.json` and printed before the run is closed.
+- An unreadable `state.json` shows as `unreadable` in `status`. `abandon --unit ID` moves it aside when no open run can belong to it.
+- Exit 1 is an internal error with the traceback in `last-error.txt`; exit 130 is a signal during a dispatch.
+- `read-context` reads without the lock when the store has none, and exits 5 for a context file with unsafe permissions.
+- The selftest runs its cases four at a time (`COORD_SELFTEST_JOBS`) and prints them in declaration order. It must run from a checkout outside `/tmp`: the codex adapter refuses a state root under a sandbox-writable root.
+
 ## 12. Review record
 
 Codex read-only review, `gpt-6-sol` at `max`, one thread

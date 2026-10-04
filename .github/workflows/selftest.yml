@@ -33,6 +33,7 @@ jobs:
           bash -n skills/implementation-loop/scripts/grok-verify-worktree.sh
           bash -n skills/implementation-loop/scripts/integration-test.sh
           bash -n skills/implementation-loop/scripts/loop-journal
+          bash -n skills/implementation-loop/scripts/loop-coordinator
           bash -n skills/implementation-loop/scripts/loop-run
           bash -n skills/implementation-loop/scripts/loop-index
           bash -n skills/implementation-loop/scripts/loop-console
@@ -45,6 +46,7 @@ jobs:
           bash -n skills/implementation-loop/tests/gate-selftest.sh
           bash -n skills/implementation-loop/tests/integration-test.sh
           bash -n skills/implementation-loop/tests/journal-selftest.sh
+          bash -n skills/implementation-loop/tests/coordinator-selftest.sh
           bash -n skills/implementation-loop/tests/index-selftest.sh
           bash -n skills/implementation-loop/tests/console-selftest.sh
           bash -n skills/implementation-loop/tests/calibration-selftest.sh
@@ -103,6 +105,8 @@ jobs:
         run: bash skills/implementation-loop/tests/calibration-selftest.sh
       - name: Evidence card selftest
         run: bash skills/implementation-loop/tests/evidence-selftest.sh
+      - name: Coordinator selftest
+        run: bash skills/implementation-loop/tests/coordinator-selftest.sh
       - name: Cursor gate selftest
         run: bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
       - name: Cursor installer selftest

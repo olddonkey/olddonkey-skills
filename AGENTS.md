@@ -21,7 +21,10 @@ Components:
   backend-neutral gate, while the other eight `scripts/*.sh` executables are
   one-release forwarding shims removed in 0.5.0. The shared observable interface
   is recorded in `references/dispatch-contract.md` and enforced by the contract
-  suites.
+  suites. `scripts/loop-coordinator` is the foreground, headless coordinator:
+  it drafts specs through a judge, records engineer approval, and performs a
+  diagnostic diff review. Its operator guide is `references/coordinator.md`;
+  `tests/coordinator-selftest.sh` uses temporary repositories and CLI stubs.
 - `skills/engineering-mode/` — goal-first wrapper over the loop. Shared
   playbooks in `references/playbooks/`, plus `scripts/tree-oid.sh` and its
   selftest.
@@ -75,7 +78,7 @@ run):
    `bash skills/implementation-loop/backends/claude/selftest.sh` — expect
    `selftest: PASS (303 checks)`.
 7. `bash skills/implementation-loop/tests/journal-selftest.sh` — expect
-   `selftest: PASS (237 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
+   `selftest: PASS (251 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
    — expect `selftest: PASS (103 checks)`; and
    `bash skills/implementation-loop/tests/console-selftest.sh` — expect
    `selftest: PASS (151 checks)`.
@@ -87,14 +90,18 @@ run):
    `contract-negative: PASS (42 checks; 21 broken adapters rejected)`.
 9. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
    `scripts/loop-evidence` record card) — expect `selftest: PASS (152 checks)`.
-10. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
+10. `bash skills/implementation-loop/tests/coordinator-selftest.sh` — expect
+    `selftest: PASS (735 checks)`. It uses only local temporary repositories
+    and backend CLI stubs, and never calls a real agent. `COORD_SELFTEST_JOBS`
+    defaults to 4; set it to 1 for declaration-order serial execution.
+11. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
-11. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
-12. Packaging checks: both marketplace JSON manifests must parse; every
+12. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
+13. Packaging checks: both marketplace JSON manifests must parse; every
    `SKILL.md` (under `skills/` and `cursor-implementation-loop/skills/`) must
    have non-empty `name:` and `description:` frontmatter; engineering-mode and
    Codex-loop Markdown must have no dangling relative links.
-13. `tree-oid` job (runs on ubuntu **and** macos):
+14. `tree-oid` job (runs on ubuntu **and** macos):
    `bash skills/engineering-mode/scripts/tree-oid-selftest.sh` and the
    Cursor copy — expect `selftest: PASS (202 checks)` each. Keep these scripts
    portable across GNU and BSD userlands.
