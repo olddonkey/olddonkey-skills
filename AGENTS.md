@@ -81,7 +81,7 @@ run):
    `selftest: PASS (251 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
    — expect `selftest: PASS (103 checks)`; and
    `bash skills/implementation-loop/tests/console-selftest.sh` — expect
-   `selftest: PASS (151 checks)`.
+   `selftest: PASS (155 checks)`.
 8. `bash skills/implementation-loop/tests/contract-core.sh`,
    `bash skills/implementation-loop/tests/contract-negative.sh`, and
    `bash skills/implementation-loop/tests/shim-selftest.sh` — expect all green.
