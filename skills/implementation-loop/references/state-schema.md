@@ -253,33 +253,38 @@ top-level `unattributed_events` count is unchanged.
 
 ### Codex
 
-State root pattern (`backends/codex/dispatch.sh:264`, `:722-723`, `:770-771`):
+State root pattern (`backends/codex/dispatch.sh:293`, `:1056-1057`, `:1122-1123`):
 
 `$HOME/.config/olddonkey-loop/codex/<workspace-key>/<dispatch-id>/`
 
-`workspace-key` is `sha256(canonical workspace)` (`:722-723`).
-`<dispatch-id>` is `YYYYMMDDTHHMMSSZ-` plus 8 hex digits (`:742`). The
-dispatch directory is created at `:771` after the workspace lock
-(`.lock`, `:726-730`) and before `journal_dispatch_start` (`:800`) and the
-child (`:804`). Early failure after that mkdir therefore has a dispatch
+`workspace-key` is `sha256(canonical workspace)` (`:1056-1057`).
+`<dispatch-id>` is `YYYYMMDDTHHMMSSZ-` plus 8 hex digits (`:1089`). The
+dispatch directory is created at `:1123` after the workspace lock
+(`.lock`, `:1071-1075`) and before `journal_dispatch_start` (`:1150`) and the
+child (`:1163`). Early failure after that mkdir therefore has a dispatch
 directory. The directory enforces a file allowlist
-(`:535`: `meta.tsv`, `prompt.txt`, `transcript.log`, `last-message.txt`).
-Workspace-root files `.lock` (`:726`) and `current` (`:552-563`) are not
-per-dispatch artifacts.
+(`:587`: `meta.tsv`, `prompt.txt`, `transcript.log`, `last-message.txt`).
+Workspace-root files `.lock` (`:1071`) and `current` (`:604-615`) are not
+per-dispatch artifacts. `.lock` holds one holder line (`read_holder`, `:805`;
+`write_holder`, `:847`): the lock holder's id and wrapper pid, plus the
+process group and start time of the last CLI the workspace spawned. Only the
+adapter's own `--recover-stale` reads it.
 
-All four dispatch files are created together (`:785-788`) before launch, so
+All four dispatch files are created together (`:1137-1140`) before launch, so
 every class that has a dispatch directory has the same names. `last-message.txt`
-is created empty (`:787`) and required non-empty only on success (`:943`).
+is created empty (`:1139`) and required non-empty only on success (`:1310`).
 `meta.tsv` is rewritten across `initializing` / `running` / `ready` / `failed`
-(`:482-484`, `:788-790`, `:901-947`). Parse failure is banner/session
-verification failure after the child (`:901-942`), not a JSON parser.
+(`:534-536`, `:1140`, `:1161-1162`, `:1268-1314`); a stop signal, a closed
+output reader, or `--recover-stale` also writes `failed` (`:715-720`,
+`:907`). Parse failure is banner/session verification failure after the
+child (`:1268-1309`), not a JSON parser.
 
 | artifact | writer | early failure | parse failure | read-only | implement | successful terminal | format |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| meta.tsv | backends/codex/dispatch.sh:484 | present | present | present | present | present | TSV rows schema,state,generation,session_id,workspace,created,updated |
-| prompt.txt | backends/codex/dispatch.sh:785 | present | present | present | present | present | UTF-8 prompt body |
-| transcript.log | backends/codex/dispatch.sh:786 | present | present | present | present | present | bytes; created empty, appended live at :823 |
-| last-message.txt | backends/codex/dispatch.sh:787 | present | present | present | present | present | CLI last-message file; empty until success (:943) |
+| meta.tsv | backends/codex/dispatch.sh:536 | present | present | present | present | present | TSV rows schema,state,generation,session_id,workspace,created,updated |
+| prompt.txt | backends/codex/dispatch.sh:1137 | present | present | present | present | present | UTF-8 prompt body |
+| transcript.log | backends/codex/dispatch.sh:1138 | present | present | present | present | present | bytes; created empty, appended live at :1190 |
+| last-message.txt | backends/codex/dispatch.sh:1139 | present | present | present | present | present | CLI last-message file; empty until success (:1310) |
 
 ### Grok
 
@@ -386,7 +391,7 @@ for a nonempty patch on the apply path.
 
 Journal `dispatch_id` correlates to a state-directory basename by **exact
 match only**. The adapters use the same id as the directory name
-(`backends/codex/dispatch.sh:742` and `:770`;
+(`backends/codex/dispatch.sh:1089` and `:1122`;
 `backends/grok/dispatch.sh:186` and `:452`;
 `backends/cursor/dispatch.sh:161` and `:163`;
 `backends/claude/dispatch.sh:141` and `:143`). Timestamp-proximity
@@ -401,7 +406,9 @@ guessed path.
 
 ## 4. Liveness evidence (D4)
 
-v1 records no process identity. States are evidence words only.
+v1 records no process identity in the journal or in per-dispatch state.
+States are evidence words only. The Codex adapter's `.lock` holder line (§2)
+is private to that adapter's own recovery; the index does not read it.
 `dispatch open` is a journal fact (start without `dispatch.end` or
 `dispatch.abandoned`). It is refined by exactly these words:
 `recent activity`, `idle N min`, `suspected stall`, `unknown`.
@@ -410,7 +417,7 @@ No other liveness word is a v1 state.
 | backend | activity signal | source |
 | --- | --- | --- |
 | claude | named artifact mtimes in the dispatch dir | backends/claude/dispatch.sh:186 |
-| codex | `transcript.log` growth (size/mtime) | backends/codex/dispatch.sh:786, :823 |
+| codex | `transcript.log` growth (size/mtime) | backends/codex/dispatch.sh:1138, :1190 |
 | grok | named artifact mtimes in the dispatch dir | backends/grok/dispatch.sh:746 |
 | cursor | named artifact mtimes in the dispatch dir | backends/cursor/dispatch.sh:205 |
 
