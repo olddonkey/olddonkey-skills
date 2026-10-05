@@ -83,7 +83,7 @@ run):
    `selftest: PASS (251 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
    — expect `selftest: PASS (106 checks)`;
    `bash skills/implementation-loop/tests/console-selftest.sh` — expect
-   `selftest: PASS (157 checks)`; and
+   `selftest: PASS (158 checks)`; and
    `bash skills/implementation-loop/tests/calibration-selftest.sh` — expect
    `selftest: PASS (114 checks)`.
 8. `bash skills/implementation-loop/tests/contract-core.sh`,

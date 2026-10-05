@@ -2082,6 +2082,11 @@
       return;
     }
     dialsBusy = true;
+    // A new attempt supersedes the last failure's message. The status
+    // region empties while the request is in flight (an empty status
+    // announces nothing), a success leaves it empty, and a repeated
+    // failure is announced again even when its text is the same.
+    setDialError("");
     if (lastDials) {
       renderDials(lastDials);
     }
@@ -2113,6 +2118,7 @@
           return;
         }
         renderDials(result.payload);
+        setDialError("");
       })
       .catch(function () {
         dialsBusy = false;
@@ -2128,6 +2134,8 @@
       return;
     }
     dialsBusy = true;
+    // As in postDial: a new attempt supersedes the last failure's message.
+    setDialError("");
     if (lastDials) {
       renderDials(lastDials);
     }
@@ -2159,6 +2167,7 @@
           return;
         }
         renderDials(result.payload);
+        setDialError("");
       })
       .catch(function () {
         dialsBusy = false;

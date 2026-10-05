@@ -2869,6 +2869,10 @@ process.on("exit", function () {
   });
 });
 
+// The async checks share dialNodes and dialRequests, so each one starts
+// after the previous one has settled, in declaration order.
+let laterChain = Promise.resolve();
+
 function checkLater(name, fn) {
   unsettledChecks.push(name);
   function settle(error) {
@@ -2879,7 +2883,7 @@ function checkLater(name, fn) {
       console.log("ok - %s", name);
     }
   }
-  return Promise.resolve()
+  laterChain = laterChain
     .then(fn)
     .then(
       function () {
@@ -2889,6 +2893,7 @@ function checkLater(name, fn) {
         settle(error || new Error("rejected"));
       }
     );
+  return laterChain;
 }
 
 // The reply handlers in postDial/resetDial run as promise jobs.
@@ -2941,6 +2946,78 @@ checkLater("dials: a failed Apply keeps the pick for a retry, a successful one s
   dialPick(box._select, "strict");
   dialPress(box._apply);
   expectSent(4, 'POST /api/dials {"key":"gate","value":"strict"}', "Apply after Reset");
+});
+
+checkLater("dials: a failed Apply or Reset shows the server's error until the next Apply or Reset starts; a success leaves it clear, a repeated failure is announced again (headless)", async function () {
+  const box = dialPage("gate", { gate: "strict" });
+  const region = dialNodes["dials-error"];
+  function expectError(want, when) {
+    if (region.textContent !== want) {
+      throw new Error(when + ": error text is " + JSON.stringify(region.textContent) + ", want " + JSON.stringify(want));
+    }
+  }
+  if (countWrites(region).total !== 0) {
+    throw new Error("rendering the page wrote the error region");
+  }
+  dialPick(box._select, "skip");
+  dialPress(box._apply);
+  expectError("", "first Apply in flight");
+  if (countWrites(region).total !== 0) {
+    throw new Error("an Apply with no error to clear wrote the error region");
+  }
+  await dialReply(0, 503, { error: "lock busy" });
+  expectError("lock busy", "after a failed Apply");
+  let written = countWrites(region).total;
+
+  // Polls do not speak for the user's write, so they leave the message.
+  dialPoll({ gate: "strict" });
+  expectError("lock busy", "poll after a failed Apply");
+  if (countWrites(region).total !== written) {
+    throw new Error("a poll rewrote the error region");
+  }
+
+  // The retry empties the region at once; the same failure again is a
+  // fresh write, which is what a live region announces.
+  dialPress(box._apply);
+  expectSent(1, 'POST /api/dials {"key":"gate","value":"skip"}', "retry");
+  expectError("", "retry in flight");
+  written = countWrites(region).total;
+  await dialReply(1, 503, { error: "lock busy" });
+  expectError("lock busy", "after the retry failed the same way");
+  if (countWrites(region).total <= written) {
+    throw new Error("the repeated failure was not written to the error region");
+  }
+
+  dialPress(box._apply);
+  expectError("", "second retry in flight");
+  await dialReply(2, 200, dialDoc({ gate: "skip" }));
+  expectError("", "after a successful Apply");
+  if (box._value.textContent !== "skip") {
+    throw new Error("stored value text " + box._value.textContent + " after a successful Apply");
+  }
+  dialPoll({ gate: "skip" });
+  expectError("", "poll after a successful Apply");
+
+  // Reset follows the same rule, and a Reset clears a failed Apply's message.
+  dialPress(box._reset);
+  expectSent(3, 'POST /api/dials/reset {"key":"gate"}', "Reset");
+  await dialReply(3, 502, { error: "loop-calibration failed" });
+  expectError("loop-calibration failed", "after a failed Reset");
+  dialPress(box._reset);
+  expectError("", "Reset retry in flight");
+  await dialReply(4, 200, dialDoc({}));
+  expectError("", "after a successful Reset");
+  expectSelect(box, "baseline", "after a successful Reset");
+
+  dialPick(box._select, "strict");
+  dialPress(box._apply);
+  await dialReply(5, 502, {});
+  expectError("Dial update failed.", "after a failed Apply with no error string");
+  dialPress(box._reset);
+  expectSent(6, 'POST /api/dials/reset {"key":"gate"}', "Reset after a failed Apply");
+  expectError("", "Reset after a failed Apply, in flight");
+  await dialReply(6, 200, dialDoc({}));
+  expectError("", "after the Reset that followed a failed Apply");
 });
 JS
 then
@@ -2999,6 +3076,7 @@ else
   fail "dials: an unchanged poll leaves an unapplied pick alone, focused or not, and Apply still posts it (headless)"
   fail "dials: a stored value that changes while the select has focus is applied when focus leaves (headless)"
   fail "dials: a failed Apply keeps the pick for a retry, a successful one shows the stored value, and Reset drops an unapplied pick (headless)"
+  fail "dials: a failed Apply or Reset shows the server's error until the next Apply or Reset starts; a success leaves it clear, a repeated failure is announced again (headless)"
 fi
 
 # ---------------------------------------------------------------------------
