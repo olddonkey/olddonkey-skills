@@ -25,7 +25,7 @@ Components:
   it drafts specs through a judge, records engineer approval, and performs a
   diagnostic diff review. Its operator guide is `references/coordinator.md`;
   `tests/coordinator-selftest.sh` uses temporary repositories and CLI stubs.
-  suites. `lib/loopauth/` is stdlib-only python3 shared by `scripts/loop-journal`
+  `lib/loopauth/` is stdlib-only python3 shared by `scripts/loop-journal`
   and `scripts/loop-index` (canonical JSON and digests, the task-graph-v1
   schema-2 vocabulary, and the pure reducer); both import it only from the
   `lib/` beside their real `scripts/` directory and refuse a symlinked `lib/`.
