@@ -66,11 +66,13 @@ run):
    and no `codex-dispatch` references anywhere under either
    `references/playbooks/` tree.
 4. `bash skills/implementation-loop/backends/codex/selftest.sh` — expect
-   `selftest: PASS (166 checks)`, then
+   `selftest: PASS (243 checks)`, then
    `bash skills/implementation-loop/tests/gate-selftest.sh` — expect
-   `selftest: PASS (207 checks)`. Their split total is 373. The Codex cases
+   `selftest: PASS (207 checks)`. Their split total is 450. The Codex cases
    use python3 for secure state, argv, and fixture validation; python3 3.11+ is
-   part of the repo toolchain.
+   part of the repo toolchain. The Codex suite also starts, signals, and kills
+   real stub processes to cover stop signals and `--recover-stale`; it needs no
+   network and no codex CLI.
 5. `bash skills/implementation-loop/backends/grok/selftest.sh` — expect
    `selftest: PASS (276 checks)`.
 6. `bash skills/implementation-loop/backends/cursor/selftest.sh` — expect

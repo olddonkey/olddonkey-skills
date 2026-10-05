@@ -278,14 +278,19 @@ dispatch directory (`:dispatch_directory`) is created after the workspace lock
 directory. The directory enforces a file allowlist (`:scan_records`:
 `meta.tsv`, `prompt.txt`, `transcript.log`, `last-message.txt`).
 Workspace-root files `.lock` (`:lock_path`) and `current` (`:repair_current`)
-are not per-dispatch artifacts.
+are not per-dispatch artifacts. `.lock` holds one holder line (`:read_holder`,
+`:write_holder`): the lock holder's id and wrapper pid, plus the process group
+and start time of the last CLI the workspace spawned. Only the adapter's own
+`--recover-stale` reads it.
 
 All four dispatch files are created together before launch (three
 `:create_regular` calls, then `:write_meta`), so every class that has a
 dispatch directory has the same names. `last-message.txt` (`:last_message`)
 is created empty and required non-empty only on success (`:validate_regular`
 with `allow_empty=False`). `meta.tsv` is rewritten by `:write_meta` across
-`initializing` / `running` / `ready` / `failed`. Parse failure is
+`initializing` / `running` / `ready` / `failed`; a stop signal or a closed
+output reader (`:fail_generation`) and `--recover-stale` (`:recover_stale`)
+also write `failed`. Parse failure is
 banner/session verification failure after the child (`:banner_error` and the
 checks that follow `:child_status`), not a JSON parser.
 
@@ -421,7 +426,9 @@ guessed path.
 
 ## 4. Liveness evidence (D4)
 
-v1 records no process identity. States are evidence words only.
+v1 records no process identity in the journal or in per-dispatch state.
+States are evidence words only. The Codex adapter's `.lock` holder line (§2)
+is private to that adapter's own recovery; the index does not read it.
 `dispatch open` is a journal fact (start without `dispatch.end` or
 `dispatch.abandoned`). It is refined by exactly these words:
 `recent activity`, `idle N min`, `suspected stall`, `unknown`.
