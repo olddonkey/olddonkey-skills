@@ -311,6 +311,27 @@ def create_regular(path: str, content: bytes = b"") -> None:
     validate_regular(path)
 
 
+def ensure_lock_file(path: str) -> None:
+    # Create or accept, never check-then-create: another first writer, or
+    # loop-calibration, can create the lock in between.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        pass
+    except OSError as error:
+        raise JournalError(f"cannot open {path}: {error}", EXIT_D4A) from error
+    else:
+        try:
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    validate_regular(path)
+
+
 def resolve_workspace(raw: str) -> str:
     if not raw or contains_newline(raw):
         fail("workspace path is invalid", EXIT_USAGE)
@@ -375,10 +396,7 @@ def bootstrap_store(paths: dict[str, str]) -> None:
     ensure_directory(paths["root"])
     no_symlink_from(paths["root"], paths["runs_dir"])
     ensure_directory(paths["runs_dir"])
-    if not os.path.lexists(paths["lock"]):
-        create_regular(paths["lock"])
-    else:
-        validate_regular(paths["lock"])
+    ensure_lock_file(paths["lock"])
     if not os.path.lexists(paths["generation"]):
         atomic_write(paths["generation"], "0\n")
     else:
