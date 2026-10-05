@@ -1155,13 +1155,21 @@ adds nothing to the writer.
   registry suite's AST scan re-run, an exact map from each sink in
   `store.SINK_FUNCTIONS` to the row transaction drivers that call it (every
   `lib/loopauth` module and `loop-authority.py`), the independent verifier's
-  five argv forms and its writes (confined to its own temporary directory),
+  six argv forms and its writes (confined to its own temporary directory),
   its complete fetch argv and git environment for `file://`, SSH, and HTTPS
   remotes (its transport plan, against frozen forms), the journal scripts'
   imports, and planted bypasses that must each fail. The importer inventory
-  walks `scripts/`, `backends/`, and `lib/`; a fifth entry cannot silently
-  escape the frozen coverage. Sink declarations must equal the frozen set,
-  and each recorded token may complete only its frozen sinks. The scans of
+  parses Python files and embedded Python throughout the shipped skill,
+  excluding only the root `tests/`, and freezes each file's loopauth import
+  edges (including relative imports in subpackages and empty Python entries).
+  Comments do not count as imports. The entry and journal/index loaders have
+  frozen complete call sites; additional computed imports, `__import__` of
+  loopauth, and `exec`/`eval` are refused. Importer reflection also has frozen
+  complete call sites, so reflective acquisition of an importer is refused.
+  Symlinked directories and bytecode are refused rather than silently pruned. Both authority wrappers' Python
+  is inspected. Sink declarations must equal the frozen set, and each
+  completed sink must name a token already minted in its trace and fit that
+  token's frozen sinks; absent and unknown token ids fail. The scans of
   `loop-authority.py` and the verifier resolve every import and attribute
   chain against the real modules, so a primitive is caught however it is
   spelled (`import os as o; o.system`, `os.path.os.system`, `posix.system`,
@@ -1180,6 +1188,13 @@ adds nothing to the writer.
   frozen timeout-handling body with one `subprocess.run(argv, ...)`, and an
   extra process start planted inside it must fail. Starred arguments and
   `**` keywords on `open`, and dynamic stream factories, fail closed.
+  `type()` is confined to operands of `is`/`is not`, apart from the verifier's
+  frozen terminal type-name diagnostic; `.__init__` calls are refused apart
+  from `Bad`'s frozen `super().__init__(detail or rule)` statement. Neither
+  exception admits a stream constructor, an alias, or another call position.
+  The reviewed wildcard fetch/push refspecs, exact-anchor `ls-remote`, scratch
+  `git.update-anchor`, read `git.anchor-refs`, and remote `git.push-anchor`
+  sink retain their distinct frozen argv forms and effects.
 - **F2** every external entry point maps to exactly one row: a frozen table
   equal to the real parser's subcommands and ceremony names; `recover` maps
   to the recovery routine, and for every case of the crash matrix its
@@ -1203,9 +1218,25 @@ adds nothing to the writer.
   `approval.consume`, and every type
   `ALLOWED["tg-v1.0a"]` does not admit are refused (`type-not-admitted`).
   The suite prints `escape-hatch: none` only when no check needs an
-  exception. Record primitives are recognized under any receiver and refused
-  as values; every ceremony driver must prepare exactly one record. Registry
-  aliases, reflection, and dictionary rebinding are planted controls.
+  exception. `prepare_record`, `bind_record`, `begin`, and `child` are
+  recognized under any receiver and refused as values. Each ceremony's
+  single preparation must be the direct assignment at its frozen position in
+  the driver's main `try` body, never a conditional decoy. Reflection in lib
+  is allowed only at frozen complete existing call sites; `__dict__`, `vars`,
+  `attrgetter`/`methodcaller`, and module-namespace lookups are refused.
+  Registry chains cannot be stored to, deleted, mutated, or passed as call
+  arguments. Runtime checks import registry alone first, compare its original
+  function definitions and dispatch/row declarations with its AST, then
+  capture the actual function objects. After the entry's module set loads and
+  after each recorded ceremony returns (including exception paths),
+  `registry.validate` and every `VALIDATORS` value must retain those exact
+  identities, every row's `validator` key must retain its declared value, and
+  sibling modules must retain the same registry module. Interrupted processes
+  cannot run a post-return check; their pre-import check and static controls
+  still apply. Table mutations, sibling/parameter/named-expression aliases,
+  mock patching, reflective hatches and conditional preparations are planted
+  controls that must each be detected. `--static` runs these source and
+  identity controls without the full crash matrix.
 - **F5** no recovery invents authority: after recovery every record and
   anchor pointer is byte-equal to one durable before it (the log, or the
   interrupted transaction's intent), no key file changes, and recovery never
@@ -1225,8 +1256,12 @@ adds nothing to the writer.
   quarantine child, or recovery's store-quarantine row), with no residual
   intent. The hand-built marker-before-intent-removal state is separately
   pinned as quarantined with a residual intent, including two no-op recoveries;
-  it is never classified as both. `matrix_cut` itself is exercised against
-  scripted correct and incorrect markers, and bypassing its checks must fail.
+  it is never classified as both. The target-qualified marker rename crash
+  reaches that same state through the real writer and is checked with two
+  byte-preserving, empty-trace recoveries; a verify-only revocation never
+  reaches a marker cut. Target-qualified intent and marker temp-fsync cuts
+  each retain their own frozen ordered recovery traces. `matrix_cut` itself
+  is exercised against scripted correct and incorrect markers, and bypassing its checks must fail.
   Neither means no
   revocation anchored and the old epoch still active; pending means the
   writer itself classifies a pending state (its transaction's durable frame

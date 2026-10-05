@@ -6,6 +6,7 @@
 # suite states each claim as its own executable check over the final 0a tree
 # (0a.1 + 0a.2 + 0a.3) and fails if any claim fails:
 #
+# --static runs only the source/identity checks and their planted controls.
 # F1 every mutation sink is reachable only through an admitted row: the p2 s7
 #    AST scan re-run (registry-selftest.sh's own static mode and scanner,
 #    unmodified), plus an exact sink -> transaction-driver map over every
@@ -222,6 +223,7 @@ import os
 import re
 import runpy
 import shutil
+import shlex
 import stat
 import subprocess
 import sys
@@ -466,9 +468,27 @@ EXPECTED["regenesis"].update({"fs-create-after-temp-fsync": ([], "abandoned"),
     "fs-replace-after-temp-fsync": ([T_RC, T_TD], "completed"), "fs-replace-after-rename": ([T_RC, T_TD], "completed"),
     "archive-after-rename": ([T_RC, T_TD], "completed"), "archive-after-readonly": ([T_RC, T_TD], "completed")})
 
+# #66 target-qualified creates select the intent/marker instead of the first
+# generic create. A temp-only intent is absent; a renamed intent must be tidied.
+for _kind in EXPECTED:
+    EXPECTED[_kind].update({
+        "fs-create-intent-after-temp-fsync": ([], WHOLE[_kind][0]),
+        "fs-create-intent-after-rename": (
+            [T_GA] if _kind == "genesis" else [T_RA] if _kind == "regenesis" else [T_TD], WHOLE[_kind][0]),
+    })
+EXPECTED["revocation"].update({
+    "fs-create-marker-after-temp-fsync": ([], "both"),
+    "fs-create-marker-after-rename": ([], "both"),
+})
+EXPECTED["revocation-active"].update({
+    "fs-create-marker-after-temp-fsync": ([T_TD, T_QT], "both"),
+    "fs-create-marker-after-rename": ([], "residual-intent"),
+})
+
 RC_OF = {("genesis", "none"): 0, ("genesis", "committed"): 0, ("rotation", "neither"): 0, ("rotation", "both"): 0,
          ("revocation", "neither"): 0, ("revocation", "both"): 0, ("revocation-active", "neither"): 0,
          ("revocation-active", "both"): 6, ("regenesis", "abandoned"): 6, ("regenesis", "completed"): 0}
+RC_OF[("revocation-active", "residual-intent")] = 6
 
 
 def run_spec(trace, rc, **extra):
@@ -548,6 +568,11 @@ EXTRA_SPECS += [
     dict(label="recover marker after publication", kind="revocation-active", point="after-readback",
          runs=[run_spec([T_TD, T_QT], 137, crash="fs-create-after-rename"), run_spec([], 6)], outcome="both"),
 ]
+for _point in ("fs-create-marker-after-temp-fsync", "fs-create-marker-after-rename"):
+    EXTRA_SPECS.append(dict(label="recover targeted marker " + _point, kind="revocation-active", point="after-readback",
+        runs=[run_spec([T_TD, T_QT], 137, crash=_point),
+              run_spec([T_QT] if _point.endswith("temp-fsync") else [], 6)], outcome="both"))
+
 for _point in ("fs-replace-after-temp-fsync", "fs-replace-after-rename"):
     EXTRA_SPECS.append(dict(label="recover cursor " + _point, kind="rotation", point="after-frame-fsync",
         runs=[run_spec([T_RP, T_TD], 137, crash=_point),
@@ -1093,7 +1118,9 @@ class Trace:
                     if event["e"] == "mint":
                         tokens[event["id"]] = dict(event, sinks=[])
                         order.append(event["id"])
-                    elif event["e"] == "sink" and event.get("id") in tokens:
+                    elif event["e"] == "sink":
+                        if event.get("id") is None or event["id"] not in tokens:
+                            raise ValueError(f"trace-sink: completed {event['fn']} with unminted token {event.get('id')!r}")
                         tokens[event["id"]]["sinks"].append(event["fn"])
                     elif event["e"] == "run":
                         self.commands.append(event["cmd"])
@@ -1126,6 +1153,102 @@ def token_label(token):
     if kind == "child":
         return f"child({token['parent']}): {row}"
     return f"{kind}: {row}"
+
+
+class RegistryIdentity:
+    """Original registry definitions from its AST, then actual object identities
+    captured by importing registry alone, before the entry's module set.
+    Cross-interpreter object ids are meaningless: code is compared only at this
+    initial boundary; every subsequent check uses `is` on the captured objects."""
+
+    def __init__(self):
+        path = os.path.join(LIB, "loopauth", "registry.py")
+        tree = ast.parse(read_text(path), path)
+        definitions, assignments = {}, {}
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                definitions.setdefault(node.name, node)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        assignments.setdefault(target.id, node.value)
+        # Compile original def nodes alone; executing a def does not run its body.
+        reference = {"__name__": "loopauth.registry"}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
+                                   + list(definitions.values()), type_ignores=[])), path, "exec"), reference)
+        rows = assignments["ROWS"]
+        self.rows = {constant(call.args[0]): constant(keyword(call, "validator")) for call in rows.elts}
+        table = assignments["VALIDATORS"]
+        names = {constant(key): value.id for key, value in zip(table.keys, table.values)}
+        for name in self.rows.values():
+            names.setdefault(name, "_dormant_validator")
+        self.registry = importlib.import_module("loopauth.registry")  # registry alone imports only re
+        actual = self.registry
+        problems = []
+        for name in {"validate"} | set(names.values()):
+            value = getattr(actual, name, None)
+            if not isinstance(value, types.FunctionType) or value.__code__ != reference[name].__code__ \
+                    or value.__globals__ is not vars(actual):
+                problems.append(f"registry.{name} differs from its original AST definition")
+        self.validate = actual.validate
+        self.validators = {key: getattr(actual, name, None) for key, name in names.items()}
+        problems += self.problems()
+        if problems:
+            raise ValueError(f"registry-identity: {problems}")
+
+    def problems(self):
+        registry = self.registry
+        found = []
+        if registry.validate is not self.validate:
+            found.append("registry.validate object replaced")
+        if not isinstance(registry.VALIDATORS, dict) or set(registry.VALIDATORS) != set(self.validators):
+            found.append("registry.VALIDATORS key set changed")
+        else:
+            found += [f"registry.VALIDATORS[{key!r}] object replaced" for key, expected in self.validators.items()
+                      if registry.VALIDATORS[key] is not expected]
+        actual_rows = registry.ROW_BY_ID
+        if not isinstance(actual_rows, dict) or set(actual_rows) != set(self.rows):
+            found.append("registry.ROW_BY_ID key set changed")
+        else:
+            found += [f"registry.ROW_BY_ID[{key!r}]['validator'] changed" for key, expected in self.rows.items()
+                      if not isinstance(actual_rows[key], dict) or actual_rows[key].get("validator") != expected]
+        # A sibling can use a stand-in without changing the real registry.
+        for name, module in list(sys.modules.items()):
+            if name.startswith("loopauth.") and isinstance(module, types.ModuleType) \
+                    and "registry" in vars(module) and module.registry is not registry:
+                found.append(f"{name}.registry module replaced")
+        return found
+
+    def check(self, phase):
+        found = self.problems()
+        if found:
+            raise ValueError(f"registry-identity after {phase}: {found}")
+
+
+def load_identity():
+    sys.path.insert(0, LIB)
+    identity = RegistryIdentity()
+    tree = ast.parse(read_text(AUTH_PY), AUTH_PY)
+    if ast.unparse(tree.body[-1]) != "sys.exit(main(sys.argv[1:]))":
+        raise ValueError("registry-identity: unfrozen entry dispatch")
+    tree.body.pop()  # load the real entry definitions without invoking its CLI
+    entry = {"__file__": AUTH_PY, "__name__": "identity_entry"}
+    exec(compile(tree, AUTH_PY, "exec"), entry)
+    entry["load_loopauth"]()
+    identity.check("entry module import")
+    return identity
+
+
+def mode_identity():
+    try:
+        identity = load_identity()
+        if ARGS:  # delayed mutation control: simulate the post-ceremony boundary
+            exec(ARGS[0], {"registry": identity.registry})
+            identity.check("recorded ceremony")
+        print("registry-identity: intact")
+    except ValueError as error:
+        print(error)
+        raise SystemExit(1)
 
 
 class Case:
@@ -1349,44 +1472,244 @@ def load_registry_scanner():
     return path, namespace
 
 
-AUTHORITY_IMPORTERS = {
-    "lib/loopauth/store.py", "lib/loopauth/tools.py", "scripts/loop-authority-verify",
-    "scripts/loop-authority.py", "scripts/loop-calibration", "scripts/loop-index", "scripts/loop-journal",
+# F1 freezes import edges, including empty Python entry points; prose is not an import.
+AUTHORITY_IMPORTERS = {'backends/claude/dispatch.sh': set(),
+ 'backends/claude/fixture-driver.sh': set(),
+ 'backends/claude/selftest.sh': set(),
+ 'backends/codex/dispatch.sh': set(),
+ 'backends/codex/fixture-driver.sh': set(),
+ 'backends/codex/selftest.sh': set(),
+ 'backends/cursor/dispatch.sh': set(),
+ 'backends/cursor/fixture-driver.sh': set(),
+ 'backends/cursor/runtime.md': set(),
+ 'backends/cursor/selftest.sh': set(),
+ 'backends/grok/dispatch.sh': set(),
+ 'backends/grok/fixture-driver.sh': set(),
+ 'backends/grok/runtime.md': set(),
+ 'backends/grok/selftest.sh': set(),
+ 'backends/grok/verify-worktree.sh': set(),
+ 'lib/loopauth/__init__.py': set(),
+ 'lib/loopauth/anchor.py': {'loopauth.tools', 'loopauth.records'},
+ 'lib/loopauth/canonical.py': set(),
+ 'lib/loopauth/ceremony.py': {'loopauth.canonical',
+                              'loopauth.records',
+                              'loopauth.recover',
+                              'loopauth.registry',
+                              'loopauth.store',
+                              'loopauth.tools'},
+ 'lib/loopauth/eligibility.py': set(),
+ 'lib/loopauth/frame.py': set(),
+ 'lib/loopauth/journal_read.py': {'loopauth.vocabulary'},
+ 'lib/loopauth/keys.py': {'loopauth.tools', 'loopauth.records'},
+ 'lib/loopauth/records.py': {'loopauth.canonical'},
+ 'lib/loopauth/recover.py': {'loopauth.anchor',
+                             'loopauth.canonical',
+                             'loopauth.frame',
+                             'loopauth.keys',
+                             'loopauth.records',
+                             'loopauth.registry',
+                             'loopauth.store',
+                             'loopauth.tools'},
+ 'lib/loopauth/reduce.py': {'loopauth.VOCABULARY', 'loopauth.canonical', 'loopauth.vocabulary'},
+ 'lib/loopauth/refs.py': {'loopauth.eligibility',
+                          'loopauth.journal_read',
+                          'loopauth.recover',
+                          'loopauth.reduce',
+                          'loopauth.vocabulary'},
+ 'lib/loopauth/registry.py': set(),
+ 'lib/loopauth/store.py': {'loopauth.anchor',
+                           'loopauth.canonical',
+                           'loopauth.frame',
+                           'loopauth.keys',
+                           'loopauth.records',
+                           'loopauth.recover',
+                           'loopauth.registry',
+                           'loopauth.tools'},
+ 'lib/loopauth/tools.py': {'loopauth.store', 'loopauth.records'},
+ 'lib/loopauth/vocabulary.py': {'loopauth.VOCABULARY', 'loopauth.canonical'},
+ 'scripts/loop-authority-verify.py': set(),
+ 'scripts/loop-authority.py': {'loopauth',
+                               'loopauth.canonical',
+                               'loopauth.ceremony',
+                               'loopauth.recover',
+                               'loopauth.refs',
+                               'loopauth.registry',
+                               'loopauth.store',
+                               'loopauth.tools'},
+ 'scripts/loop-calibration': set(),
+ 'scripts/loop-console': set(),
+ 'scripts/loop-coordinator': set(),
+ 'scripts/loop-evidence': set(),
+ 'scripts/loop-index': {'loopauth', 'loopauth.vocabulary'},
+ 'scripts/loop-journal': {'loopauth', 'loopauth.canonical', 'loopauth.vocabulary'},
+ 'scripts/loop-run': set()}
+# Existing loaders cannot be removed from production in this test-only unit.
+# These exact scope/call pairs are the only computed loopauth loads admitted.
+LOADER_CALLS = {
+    ("scripts/loop-authority.py", "loop-authority.load_loopauth", "importlib.import_module('loopauth')"): {"loopauth"},
+    ("scripts/loop-authority.py", "loop-authority.load_loopauth", "importlib.import_module(f'loopauth.{name}')"):
+        {"loopauth." + name for name in ENTRY_LOADED},
+    ("scripts/loop-journal", "loop-journal.load_loopauth", "importlib.import_module('loopauth')"): {"loopauth"},
+    ("scripts/loop-journal", "loop-journal.load_loopauth", "importlib.import_module('loopauth.canonical')"): {"loopauth.canonical"},
+    ("scripts/loop-journal", "loop-journal.load_loopauth", "importlib.import_module('loopauth.vocabulary')"): {"loopauth.vocabulary"},
+    ("scripts/loop-index", "loop-index.load_vocabulary", "importlib.import_module('loopauth')"): {"loopauth"},
+    ("scripts/loop-index", "loop-index.load_vocabulary", "importlib.import_module('loopauth.vocabulary')"): {"loopauth.vocabulary"},
 }
 
 
-def authority_importers(root):
-    found = set()
-    for folder in ("scripts", "backends", "lib"):
-        base = os.path.join(root, folder)
-        if not os.path.isdir(base):
-            continue
-        for directory, dirs, files in os.walk(base, followlinks=False):
-            dirs[:] = [name for name in dirs if name != "__pycache__"]
-            for filename in files:
-                path = os.path.join(directory, filename)
-                if os.path.islink(path):
-                    found.add("symlink:" + os.path.relpath(path, root))
+def shipped_python(root):
+    """Walk the entire shipped skill except its root tests/. Never ignore a
+    symlink or executable bytecode; neither has source this inventory can prove.
+    Parse Python files, Python shebangs, heredocs and literal python -c bodies."""
+    sources, problems = {}, []
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        if directory == root:
+            dirs[:] = [name for name in dirs if name != "tests"]
+        for name in list(dirs):
+            path = os.path.join(directory, name)
+            if os.path.islink(path) or name == "__pycache__":
+                problems.append(f"uninspectable shipped directory: {os.path.relpath(path, root)}")
+                dirs.remove(name)
+        for filename in sorted(files):
+            path = os.path.join(directory, filename)
+            relative = os.path.relpath(path, root)
+            if os.path.islink(path) or filename.endswith((".pyc", ".pyo")):
+                problems.append(f"uninspectable shipped file: {relative}")
+                continue
+            text = read_bytes(path).decode("utf-8", "replace")
+            python = filename.endswith(".py") or bool(re.match(r"#![^\n]*python", text))
+            bodies = [text] if python else []
+            if not python:
+                for match in HEREDOC_RE.finditer(text):
+                    header = text[text.rfind("\n", 0, match.start()) + 1:match.start()]
+                    body = match.group(2)
+                    required = match.group(1).upper().startswith("PY") or bool(re.search(r"\bpython[0-9.]*\b", header))
+                    try:
+                        ast.parse(body)
+                    except SyntaxError:
+                        if required:
+                            bodies.append(body)  # report an unparsed Python body
+                    else:
+                        bodies.append(body)  # delimiter spelling cannot hide Python imports
+            if not python and not filename.endswith(".md"):
+                for line in text.splitlines():
+                    try:
+                        words = shlex.split(line, comments=True)
+                    except ValueError:
+                        continue  # a multiline shell construct; heredocs handled above
+                    for i, word in enumerate(words[:-2]):
+                        if re.fullmatch(r"python[0-9.]*", word) and words[i + 1] == "-c":
+                            bodies.append(words[i + 2])
+            if bodies:
+                sources[relative] = bodies
+    return sources, problems
+
+
+def python_imports(relative, body):
+    tree = ast.parse(body, relative)
+    module = os.path.basename(relative).removesuffix(".py")
+    index = Index({module: tree})
+    calls = {id(call.func): call for _m, _s, call in index.calls}
+    edges, problems, loaders, reflected = set(), [], set(), set()
+    # Imported code can obtain an importer reflectively without an import
+    # statement naming loopauth. Freeze existing reflection here as well as F4.
+    reflections = REFLECTION_CALLS | {
+        ("loop-calibration.main", "getattr(args, 'workspace', None)"),
+        ("loop-coordinator.private_file", "getattr(os, 'O_NOFOLLOW', 0)"),
+        ("loop-coordinator.lock", "getattr(os, 'O_NOFOLLOW', 0)"),
+    }
+    sensitive = {"getattr", "setattr", "delattr", "vars", "attrgetter", "methodcaller", "__dict__", "modules",
+                 "globals", "locals", "__builtins__", "__getattr__", "__getattribute__"}
+    package = "loopauth." + relative[len("lib/loopauth/"):].replace("/", ".").removesuffix(".py") \
+        if relative.startswith("lib/loopauth/") else None
+    if package and package.endswith(".__init__"):
+        package = package.removesuffix(".__init__")
+    elif package:
+        package = package.rpartition(".")[0]
+    bindings = import_bindings(tree)
+    for _module, scope, node in index.nodes:
+        if isinstance(node, ast.Import):
+            edges |= {a.name for a in node.names if a.name == "loopauth" or a.name.startswith("loopauth.")}
+        elif isinstance(node, ast.ImportFrom):
+            target = node.module or ""
+            if node.level:
+                if not package:
+                    problems.append(f"{relative}:{node.lineno}: relative import outside loopauth")
                     continue
-                text = read_bytes(path).decode("utf-8", "replace")
-                if re.search(r"\bloopauth\b|\bimportlib\b|\b__import__\b", text):
-                    found.add(os.path.relpath(path, root))
-    return found
+                parts = package.split(".")
+                target = ".".join(parts[:len(parts) - node.level + 1] + ([target] if target else []))
+            if target == "loopauth" or target.startswith("loopauth."):
+                if target == "loopauth" or node.level and node.module is None:
+                    for alias in node.names:
+                        candidate = target + "." + alias.name
+                        module_path = os.path.join(LIB, *candidate.split("."))
+                        edges.add(candidate if os.path.isfile(module_path + ".py") or os.path.isdir(module_path) else target)
+                else:
+                    edges.add(target)
+        if not isinstance(node, (ast.Name, ast.Attribute)) or not isinstance(node.ctx, ast.Load):
+            continue
+        base, chain = attribute_chain(node) if isinstance(node, ast.Attribute) else (node, [])
+        resolved = ".".join([bindings.get(base.id, base.id)] + chain) if isinstance(base, ast.Name) else ""
+        primitive = resolved.rsplit(".", 1)[-1] if resolved else (node.attr if isinstance(node, ast.Attribute) else node.id)
+        if primitive not in sensitive | {"__import__", "import_module", "exec", "eval"}:
+            continue
+        call = calls.get(id(node))
+        if primitive in sensitive:
+            key = (scope, ast.unparse(call)) if call else None
+            if key in reflections and key not in reflected:
+                reflected.add(key)
+            else:
+                problems.append(f"{relative}:{node.lineno}: unfrozen importer reflection: {ast.unparse(node)}")
+        if primitive not in ("__import__", "import_module", "exec", "eval"):
+            continue
+        key = (relative, scope, ast.unparse(call)) if call else None
+        if key in LOADER_CALLS and key not in loaders:
+            edges |= LOADER_CALLS[key]
+            loaders.add(key)
+            continue
+        target = constant(call.args[0]) if call and call.args else None
+        if primitive in ("__import__", "import_module") and isinstance(target, str) \
+                and target != "loopauth" and not target.startswith("loopauth."):
+            continue  # a literal stdlib import, including __import__('re')
+        problems.append(f"{relative}:{node.lineno}: unfrozen dynamic import/execution: {ast.unparse(node)}")
+    expected_loaders = {key for key in LOADER_CALLS if key[0] == relative}
+    if loaders != expected_loaders:
+        problems.append(f"{relative}: missing frozen loader sites {sorted(expected_loaders - loaders)}")
+    return edges, problems
+
+
+def authority_importers(root):
+    sources, problems = shipped_python(root)
+    found = {}
+    for relative, bodies in sources.items():
+        edges = set()
+        for body in bodies:
+            try:
+                imported, errors = python_imports(relative, body)
+                edges |= imported
+                problems += errors
+            except SyntaxError as error:
+                problems.append(f"{relative}: unparsed Python: {error}")
+        found[relative] = edges
+    return found, problems
 
 
 def writer_sources(root):
-    """{module: (path, source)}: every lib/loopauth module, the Python of
-    scripts/loop-authority (its heredocs, if any), and loop-authority.py,
-    which that wrapper runs."""
-    package = os.path.join(root, "lib", "loopauth")
+    """All lib Python, recursively, and both authority entry wrappers' Python.
+    Import edges in other shipped Python are judged by authority_importers()."""
     sources = {}
-    for filename in sorted(os.listdir(package)):
-        if filename.endswith(".py"):
-            path = os.path.join(package, filename)
-            sources[filename[:-3]] = (path, read_text(path))
-    wrapper = os.path.join(root, "scripts", "loop-authority")
-    for number, body in enumerate(heredocs(read_text(wrapper)), 1):
-        sources[f"loop-authority-heredoc-{number}"] = (wrapper, body)
+    package = os.path.join(root, "lib", "loopauth")
+    for directory, dirs, files in os.walk(package, followlinks=False):
+        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(directory, d))]
+        for filename in sorted(files):
+            if filename.endswith(".py") and not os.path.islink(os.path.join(directory, filename)):
+                path = os.path.join(directory, filename)
+                name = os.path.relpath(path, package).removesuffix(".py").replace(os.sep, ".")
+                sources[name] = (path, read_text(path))
+    for name in ("loop-authority", "loop-authority-verify"):
+        wrapper = os.path.join(root, "scripts", name)
+        for number, body in enumerate(heredocs(read_text(wrapper)), 1):
+            sources[f"{name}-heredoc-{number}"] = (wrapper, body)
     entry = os.path.join(root, "scripts", "loop-authority.py")
     sources["loop-authority"] = (entry, read_text(entry))
     return sources
@@ -1558,19 +1881,18 @@ def minter_problems(index, registry):
     for module, scope, call in index.calls:
         owner, attr = callee(call)
         at = f"{scope}:{call.lineno}"
-        in_store = owner == "store" or (module == "store" and owner is None)
-        if in_store and attr == "begin":
+        if store_call(module, call, "begin"):
             row = constant(call.args[0]) if call.args else None
             kind = scope.rsplit(".", 1)[-1]
             if not (module == "ceremony" and scope == f"ceremony.{kind}" and CEREMONY_ROWS.get(kind) == row):
                 problems.append(f"store.begin({row!r}) at {at}: only each ceremony's driver begins its own row")
-        elif in_store and attr == "child":
+        elif store_call(module, call, "child"):
             row = constant(call.args[1]) if len(call.args) > 1 else None
             parents = rows_reaching(index, scope)
             if row is None or not parents or any(row not in registry.ROW_BY_ID[parent]["children"]
                                                  for parent in parents):
                 problems.append(f"store.child(..., {row!r}) at {at} under rows {sorted(parents)}")
-        elif in_store and attr in ("begin_recovery", "begin_finish") and scope != "recover._mint":
+        elif any(store_call(module, call, name) for name in ("begin_recovery", "begin_finish")) and scope != "recover._mint":
             problems.append(f"store.{attr} at {at}: only recover._mint mints recovery and finish tokens")
         elif attr == "_mint" and (owner in (None, "recover")) and scope not in RECOVERY_EXECUTORS \
                 and not (module == "recover" and scope == "recover._mint"):
@@ -1617,7 +1939,7 @@ PRIMITIVE_MODULES = {"subprocess": "process", "pty": "process", "multiprocessing
 # Modules a chain is resolved against even when the file may not import them
 # (the import itself is refused): os's own implementation module included.
 RESOLVABLE = {"os", "posix", "nt", "sys"} | set(PRIMITIVE_MODULES)
-DUNDERS_ALLOWED = {"__file__", "__name__", "__init__"}
+DUNDERS_ALLOWED = {"__file__", "__name__"}
 MISSING = object()
 
 
@@ -1697,6 +2019,26 @@ class AliasScan(ast.NodeVisitor):
         self.receivers = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
         self.calls = {id(n.func): n for n in ast.walk(tree) if isinstance(n, ast.Call)}
         self.stack, self.findings = [], []
+        self.identity_types = {id(operand) for n in ast.walk(tree) if isinstance(n, ast.Compare)
+                               for i, op in enumerate(n.ops) if isinstance(op, (ast.Is, ast.IsNot))
+                               for operand in ([n.left] + n.comparators)[i:i + 2]}
+        self.safe_dunder_calls = set()
+        # Two existing verifier expressions cannot construct an arbitrary
+        # stream: one exception's super initializer and its type-name error.
+        # Freeze whole statements and positions, never the primitive name.
+        for definition in ast.walk(tree):
+            if not isinstance(definition, ast.FunctionDef):
+                continue
+            if definition.name == "_canon_check" and definition.body \
+                    and ast.unparse(definition.body[-1]) == "raise Bad('canonical', f'unsupported value {type(value).__name__}')":
+                self.identity_types |= {id(n) for n in ast.walk(definition.body[-1])
+                                        if isinstance(n, ast.Call) and ast.unparse(n) == "type(value)"}
+        for definition in tree.body:
+            if isinstance(definition, ast.ClassDef) and definition.name == "Bad":
+                for function in definition.body:
+                    if isinstance(function, ast.FunctionDef) and function.name == "__init__" and function.body \
+                            and ast.unparse(function.body[0]) == "super().__init__(detail or rule)":
+                        self.safe_dunder_calls.add(id(function.body[0].value.func))
 
     def where(self):
         return ".".join(self.stack) or "<module>"
@@ -1733,6 +2075,8 @@ class AliasScan(ast.NodeVisitor):
 
     def visit_Name(self, node):
         if isinstance(node.ctx, ast.Load):
+            if node.id == "type" and id(node) not in self.calls:
+                self.flag("aliases", node, "type taken as a value")
             if node.id in self.dynamic:
                 self.flag("aliases", node, f"dynamic attribute access: {node.id}")
             elif node.id in self.namespace or (dunder(node.id) and node.id not in DUNDERS_ALLOWED):
@@ -1746,6 +2090,8 @@ class AliasScan(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node):
+        if isinstance(node.func, ast.Name) and node.func.id == "type" and id(node) not in self.identity_types:
+            self.flag("aliases", node, "type() outside an is / is not operand (a stream factory)")
         if isinstance(node.func, (ast.Call, ast.Lambda, ast.Subscript)):
             self.flag("aliases", node, "dynamic callable construction")
         self.generic_visit(node)
@@ -1758,7 +2104,8 @@ class AliasScan(ast.NodeVisitor):
     def visit_Attribute(self, node):
         if node.attr in self.dynamic:
             self.flag("aliases", node, f"dynamic attribute access: .{node.attr}")
-        if (dunder(node.attr) and node.attr not in DUNDERS_ALLOWED) or node.attr in self.frames:
+        if (dunder(node.attr) and node.attr not in DUNDERS_ALLOWED and id(node) not in self.safe_dunder_calls) \
+                or node.attr in self.frames:
             self.flag("aliases", node, f"a namespace lookup: .{node.attr}")
         if id(node) not in self.receivers:  # the outermost attribute of its chain
             base, chain = attribute_chain(node)
@@ -2212,9 +2559,13 @@ def f1_findings(root, rs, registry):
     trees, errors = parse_modules(writer_sources(root))
     index = Index(trees)
     found = [("parse", error) for error in errors]
-    importers = authority_importers(root)
-    if importers != AUTHORITY_IMPORTERS:
-        found.append(("entry importer inventory", sorted(importers ^ AUTHORITY_IMPORTERS)))
+    importers, import_errors = authority_importers(root)
+    differences = {path: (sorted(importers.get(path, ())), sorted(AUTHORITY_IMPORTERS.get(path, ())))
+                   for path in importers.keys() | AUTHORITY_IMPORTERS.keys()
+                   if path not in importers or path not in AUTHORITY_IMPORTERS
+                   or importers[path] != AUTHORITY_IMPORTERS[path]}
+    if differences or import_errors:
+        found.append(("entry importer inventory", (differences, import_errors)))
     found += [("p2 s7 scan", f"{where}:{line}: {what}") for where, line, what in rs["scan"](lib)]
     direct, paths, _reached = rs["read_only_scan"](lib)
     found += [("0a.3 read-only rules", f"{m}:{line}: {what}") for m, line, what in direct]
@@ -2231,8 +2582,7 @@ def planted_copy(name, edits):
     """A copy of lib/ and scripts/loop-authority(.py) with code appended to
     (or, given a pair, replaced in) the named files."""
     root = os.path.join(TMP, "plant", name)
-    for folder in ("lib", "scripts", "backends"):
-        shutil.copytree(os.path.join(SKILL, folder), os.path.join(root, folder), ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(SKILL, root, symlinks=True, ignore=shutil.ignore_patterns("tests", "__pycache__"))
     for relative, code in edits:
         path = os.path.join(root, relative)
         if isinstance(code, tuple):
@@ -2242,6 +2592,7 @@ def planted_copy(name, edits):
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(text.replace(code[0], code[1], 1))
         else:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "a", encoding="utf-8") as handle:
                 handle.write("\n\n" + code)
     return root
@@ -2297,13 +2648,19 @@ REVIEW_OPEN_PLANTS = (
     ("double-starred open mode", 'def _b(path):\n    print("x", file=open(path, **{"mode": "w"}))\n'),
     ("dynamic stream type construction", 'def _b(path):\n    type(sys.stdout)(type(sys.stdout.buffer.raw)(path, "w"))\n'),
 )
+STREAM_PLANTS = (
+    ("two-statement stream factory", 'def _b(path):\n    factory = type(sys.stdout.buffer.raw)\n    factory(path, "w")\n', "type() outside"),
+    ("stream __init__ call", 'def _b(path):\n    sys.stdout.buffer.raw.__init__(path, "w")\n', ".__init__"),
+)
+ENTRY_ALIAS_PLANTS += tuple((label, code, needle) for label, code, needle in STREAM_PLANTS)
+VERIFIER_ALIAS_PLANTS += tuple((label, "aliases", code) for label, code, _needle in STREAM_PLANTS)
 ENTRY_ALIAS_PLANTS += tuple((label, code, "dynamic" if "type" in label else "open") for label, code in REVIEW_OPEN_PLANTS)
 VERIFIER_ALIAS_PLANTS += tuple((label, "aliases" if "type" in label else "writes", code) for label, code in REVIEW_OPEN_PLANTS)
 
 # Unlisted commands planted inside the runner itself, the one scope the alias
 # scan allows subprocess.run in: (label, the rules that must fire, (the text
 # replaced, its replacement)).
-RUNNER_DEF = '    def run(self, argv: list[str], *, git: bool, stdin: bytes = b"") -> subprocess.CompletedProcess:\n'
+RUNNER_DEF = '    def run(self, argv: list[str], *, git: bool, stdin: bytes = b"", form: str = "") -> subprocess.CompletedProcess:\n'
 RUNNER_RETURN = "            return subprocess.run(argv, input=stdin,"
 RUNNER_PLANTS = (
     ("an extra subprocess.run of git push inside Runner.run, guarded by an SSH or HTTPS remote (the transports "
@@ -2538,13 +2895,84 @@ def validator_dominates(function, call, rows):
             return True
 
 
+# Exact existing reflection call sites (scope + entire AST call), once each.
+# Every other reference, including a value or imported alias, fails closed.
+REFLECTION_CALLS = {
+    ("store._durable_fsync", "getattr(fcntl, 'F_FULLFSYNC', 51)"),
+    ("recover._copy_epoch", "setattr(copy, name, getattr(epoch, name))"),
+    ("recover._copy_epoch", "getattr(epoch, name)"),
+    ("recover.observe_bootstrap", "getattr(error, 'detail', None)"),
+    ("recover.observe_bootstrap", "getattr(error, 'message', str(error))"),
+    ("recover.observe_regenesis", "getattr(error, 'detail', None)"),
+    ("recover.observe_regenesis", "getattr(error, 'message', str(error))"),
+    ("recover._mint", "getattr(plan, 'row', None)"),
+    ("reduce.Reducer._apply_schema_2", "getattr(self, '_on_' + name.replace('.', '_'))"),
+}
+PREPARATION_POSITIONS = {
+    "ceremony.genesis": ((5, "body"), (9, "body"), (9, "value")),
+    "ceremony.rotate": ((11, "body"), (6, "value")),
+    "ceremony.revoke": ((15, "body"), (2, "value")),
+    "ceremony.regenesis": ((8, "body"), (14, "body"), (6, "value")),
+}
+
+
+def preparation_at(function, path):
+    block = function.body
+    for index, field in path:
+        if index >= len(block):
+            return None
+        statement = block[index]
+        if field == "value":
+            return statement.value if isinstance(statement, ast.Assign) else None
+        if not isinstance(statement, ast.Try):
+            return None  # never an if, loop, handler, with, or nested def
+        block = getattr(statement, field)
+    return None
+
+
+def reflection_findings(index):
+    found, seen = [], set()
+    sensitive = {"getattr", "setattr", "delattr", "vars", "attrgetter", "methodcaller", "__dict__", "modules"}
+    calls = {id(call.func): call for _m, _s, call in index.calls}
+    for module, scope, node in index.nodes:
+        if module.startswith("loop-authority"):
+            continue  # stricter AliasScan rules already cover the entry
+        name = node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) else None
+        if isinstance(node, ast.ImportFrom) and any(a.name in sensitive for a in node.names):
+            found.append(("unfrozen reflection", f"imported reflection primitive at {scope}:{node.lineno}"))
+        if name not in sensitive:
+            continue
+        call = calls.get(id(node))
+        key = (scope, ast.unparse(call)) if call else None
+        if key in REFLECTION_CALLS and key not in seen:
+            seen.add(key)
+        else:
+            found.append(("unfrozen reflection", f"{ast.unparse(node)} outside the frozen reflection sites at {scope}:{node.lineno}"))
+    missing = REFLECTION_CALLS - seen
+    if missing:
+        found.append(("unfrozen reflection", f"missing reflection sites: {sorted(missing)}"))
+    return found
+
+
+def registry_chain(node, aliases):
+    if isinstance(node, ast.Name):
+        return node.id in aliases
+    if isinstance(node, ast.Attribute):
+        return node.attr == "registry" or registry_chain(node.value, aliases)
+    if isinstance(node, ast.Subscript):
+        return constant(node.slice) == "registry" or registry_chain(node.value, aliases)
+    if isinstance(node, ast.NamedExpr):
+        return registry_chain(node.value, aliases)
+    return False
+
+
 def f4_findings(root):
     """F4's structural check: sealing, pointer sealing, and the frame append
     only from the transaction driver, the record type fixed by the row and
     validated first; no caller-supplied record type reaches a seal."""
     trees, errors = parse_modules(writer_sources(root))
     index = Index(trees)
-    found = [("parse", error) for error in errors]
+    found = [("parse", error) for error in errors] + reflection_findings(index)
     primitives = {"prepare_record", "bind_record", "begin", "child"}
     for module, scope, node in index.nodes:
         name = node.attr if isinstance(node, ast.Attribute) else (node.id if module == "store" and isinstance(node, ast.Name) else None)
@@ -2556,6 +2984,11 @@ def f4_findings(root):
         calls = [call for module, scope, call in index.calls if scope == driver and store_call(module, call, "prepare_record")]
         if len(calls) != 1:
             found.append(("missing or duplicate preparation", f"{driver}: {len(calls)} recognized prepare_record calls"))
+        function = index.functions.get(driver)
+        frozen = preparation_at(function, PREPARATION_POSITIONS[driver]) if function else None
+        if len(calls) != 1 or calls[0] is not frozen:
+            found.append(("preparation outside its frozen position", f"{driver}: prepare_record must be the direct assignment "
+                          f"at {PREPARATION_POSITIONS[driver]} in the main try body"))
     _problems, pairs = sink_problems(index)
     for sink in ("seal", "seal_pointer"):
         for caller in sorted(pairs.get(sink, set()) - {"store.prepare_record"}):
@@ -2637,6 +3070,15 @@ def f4_findings(root):
             changed = before != aliases
         for node in ast.walk(tree):
             at = f"{module}:{getattr(node, 'lineno', 0)}"
+            changed_target = isinstance(node, (ast.Attribute, ast.Subscript)) and not isinstance(node.ctx, ast.Load) \
+                and registry_chain(node, aliases)
+            mutator = isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in {"update", "pop", "popitem", "setdefault", "clear", "__setitem__", "__delitem__"} \
+                and registry_chain(node.func.value, aliases)
+            passed = isinstance(node, ast.Call) and any(registry_chain(arg, aliases) for arg in
+                list(node.args) + [kw.value for kw in node.keywords])
+            if changed_target or mutator or passed:
+                found.append(("the row validator rebound", f"registry target changed or passed: {ast.unparse(node)[:160]} at {at}"))
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("setattr", "delattr", "vars", "getattr") and node.args and isinstance(node.args[0], ast.Name) and node.args[0].id in aliases:
                 found.append(("the row validator rebound", f"registry reflection at {at}"))
             if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in aliases and (node.attr == "__dict__" or not isinstance(node.ctx, ast.Load)):
@@ -2664,6 +3106,8 @@ def f4_findings(root):
 
 
 F4_RULES = (
+    ("unfrozen reflection", "reflection in lib/loopauth occurs only at its frozen complete call sites"),
+    ("preparation outside its frozen position", "every driver's preparation is at its frozen direct assignment in the main try body"),
     ("record primitive used as a value", "record/token primitives cannot escape as values or bare imports"),
     ("missing or duplicate preparation", "each ceremony driver contains exactly one recognized preparation"),
     ("seal outside the write-protocol driver",
@@ -2754,7 +3198,7 @@ def verifier_grammar():
 
 VERIFIER_KEYGEN_FORMS = (("-Y", "verify", "-f", None, "-I", None, "-n", None, "-s", None),
                          ("-l", "-E", "sha256", "-f", None))
-VERIFIER_GIT_FORMS = ("init", "fetch", "cat-file")
+VERIFIER_GIT_FORMS = ("init", "fetch", "ls-remote", "cat-file")
 # The only primitives the verifier may reference, and where: its one runner
 # starts processes, and its temporary-directory functions write.
 VERIFIER_ALLOWED = {"Runner.run": {"subprocess.run", "subprocess.CompletedProcess", "subprocess.TimeoutExpired"},
@@ -2762,7 +3206,7 @@ VERIFIER_ALLOWED = {"Runner.run": {"subprocess.run", "subprocess.CompletedProces
                     "Runner.init_repo": {"os.mkdir"}, "Runner.cleanup": {"shutil.rmtree"}}
 # That runner, whole: one subprocess.run with fixed argv/env/timeout and the
 # explicit F2 TimeoutExpired-to-Unreachable mapping; no other process start.
-RUNNER_RUN = "def run(self, argv: list[str], *, git: bool, stdin: bytes=b'') -> subprocess.CompletedProcess:\n    try:\n        return subprocess.run(argv, input=stdin, capture_output=True, env=self.env(git), cwd=self.temp, timeout=120, check=False, close_fds=True)\n    except subprocess.TimeoutExpired as error:\n        raise Unreachable('remote command timed out') from error"
+RUNNER_RUN = "def run(self, argv: list[str], *, git: bool, stdin: bytes=b'', form: str='') -> subprocess.CompletedProcess:\n    try:\n        return subprocess.run(argv, input=stdin, capture_output=True, env=self.env(git), cwd=self.temp, timeout=120 if form in ('fetch', 'ls-remote') else 60, check=False, close_fds=True)\n    except subprocess.TimeoutExpired as error:\n        if form in ('fetch', 'ls-remote'):\n            raise Unreachable(f'git {form} timed out') from error\n        raise EnvError('local command timed out') from error"
 
 
 def verifier_findings(path, rs):
@@ -3018,10 +3462,14 @@ def journal_findings(paths, lib):
 def mode_static():
     sys.path.insert(0, LIB)
     sys.dont_write_bytecode = True
+    identity = load_identity()
     from loopauth import ceremony, records, registry, store  # noqa: E402
 
     rs_path, rs = load_registry_scanner()
     live_index = Index(parse_modules(writer_sources(SKILL))[0])
+
+    emit("F1", "registry identity after importing the entry module set: validate, every dispatch object and every row key",
+         identity.problems() == [], identity.problems())
 
     # ---------------------------------------------------------------- F1
     rs_tmp = os.path.join(TMP, "rs-static")
@@ -3049,6 +3497,20 @@ def mode_static():
         hits = [what for name, what in live if name == rule]
         emit("F1", f"the live tree passes F1's rule [{rule}] (every lib/loopauth module and loop-authority.py)",
              not hits, hits[:6])
+    from loopauth import tools
+    expected_commands = {
+        "git.fetch-anchor": {"binary": "git", "argv": ("<git-prefix>", "<transport>", "-C", "<scratch>", "fetch", "--no-tags",
+            "--no-write-fetch-head", "<remote>", "+refs/olddonkey-loop/*:refs/readback/*"), "effect": "scratch"},
+        "git.update-anchor": {"binary": "git", "argv": ("<git-prefix>", "-C", "<scratch>", "update-ref",
+            "refs/olddonkey-loop/anchor", "<commit>"), "effect": "scratch"},
+        "git.anchor-refs": {"binary": "git", "argv": ("<git-prefix>", "-C", "<scratch>", "for-each-ref",
+            "--format=%(objectname) %(refname)", "refs/olddonkey-loop/"), "effect": "read"},
+        "git.push-anchor": {"binary": "git", "argv": ("<git-prefix>", "<transport>", "-C", "<scratch>", "push", "<remote>",
+            "refs/olddonkey-loop/*:refs/olddonkey-loop/*"), "effect": "sink"},
+    }
+    for command, expected in expected_commands.items():
+        actual = tools.COMMAND_TABLE.get(command)
+        emit("F1", f"reviewed base command form/effect remains frozen: {command}", actual == expected, actual)
     _problems, pairs = sink_problems(live_index)
     stale = [f"{caller} -> {sink}" for sink in SINK_FUNCTIONS for caller in sorted(SINK_DRIVERS[sink] - pairs.get(sink, set()))]
     emit("F1", "the frozen sink -> driver map is exact: every frozen sink (store.SINK_FUNCTIONS) is called by exactly "
@@ -3162,7 +3624,7 @@ def mode_static():
                                   "subprocess.run(argv, input=stdin, capture_output=True, env=self.env(git), "
                                   "cwd=self.temp, timeout=120, check=False, close_fds=True)` with argv its own "
                                   "parameter, and nothing else: no other call, command, or statement inside it"),
-                       ("argv", "runs only its frozen argv forms -- git init, fetch, cat-file (-t|-p) through "
+                       ("argv", "runs only its frozen argv forms -- git init, fetch, ls-remote, cat-file (-t|-p) through "
                                 "git_argv, which refuses any other, and ssh-keygen -Y verify and -l -- through direct "
                                 "self.run / RUN.run calls only"),
                        ("writes", "writes only its own temporary directory under $HOME/.cache/olddonkey-loop/verify "
@@ -3217,6 +3679,67 @@ def mode_static():
     emit("F1", "planted fifth importer: a new sidecar forging a token is visible to the inventory guard",
          any(rule == "entry importer inventory" for rule, _detail in sidecar_findings), sidecar_findings[:3])
 
+    importer_plants = [
+        ("forge inside loop-calibration", [("scripts/loop-calibration", ("import argparse\n",
+             "import argparse\nfrom loopauth import store\n" + FORGE_ACTIVE +
+             "\n_forge_active({'store': store}, b'{\"forged\":true}')\n"))], "scripts/loop-calibration"),
+        ("__import__ inside loop-journal", [("scripts/loop-journal", ("import fcntl\n",
+             'import fcntl\n__import__("loopauth.store")\n'))], "scripts/loop-journal"),
+        ("alias of __import__ inside loop-index", [("scripts/loop-index", ("import argparse\n",
+             'import argparse\nloader = __import__\nloader("loopauth.store")\n'))], "scripts/loop-index"),
+        ("verify wrapper Python heredoc", [("scripts/loop-authority-verify",
+             "python3 - <<'PYCONTROL'\nfrom loopauth import store\nPYCONTROL\n")], "scripts/loop-authority-verify"),
+        ("verify wrapper arbitrary heredoc delimiter", [("scripts/loop-authority-verify",
+             "python3 - <<'BLOCK'\nfrom loopauth import store\nBLOCK\n")], "scripts/loop-authority-verify"),
+        ("skill-root Python", [("unlisted.py", "from loopauth import store")], "unlisted.py"),
+        ("hook Python", [("hooks/forge.py", "from loopauth import store")], "hooks/forge.py"),
+        ("reference Python", [("references/forge.py", "from loopauth import store")], "references/forge.py"),
+        ("relative import in lib subpackage", [("lib/loopauth/extra/__init__.py", "from .. import store")],
+             "lib/loopauth/extra/__init__.py"),
+        ("reflective __import__", [("scripts/loop-calibration", ("import argparse\n",
+             'import argparse\nimport builtins\ngetattr(builtins, "__import__")("loopauth.store")\n'))], "scripts/loop-calibration"),
+        ("import_module alias", [("scripts/loop-journal", ("import fcntl\n",
+             'import fcntl\nfrom importlib import import_module as load\nload("loopauth.store")\n'))], "scripts/loop-journal"),
+        ("exec of import text", [("scripts/loop-calibration", ("import argparse\n",
+             'import argparse\nexec("from loopauth import store")\n'))], "scripts/loop-calibration"),
+        ("eval of import text", [("scripts/loop-calibration", ("import argparse\n",
+             'import argparse\neval(\'__import__("loopauth.store")\')\n'))], "scripts/loop-calibration"),
+    ]
+    for number, (label, edits, needle) in enumerate(importer_plants):
+        copy = planted_copy(f"importer-{number}", edits)
+        got, errors = authority_importers(copy)
+        different = {path for path in got.keys() | AUTHORITY_IMPORTERS.keys()
+                     if got.get(path) != AUTHORITY_IMPORTERS.get(path)}
+        detected = needle in different or any(needle in error for error in errors)
+        emit("F1", f"planted importer control: {label} is DETECTED by its file/import edges or dynamic-import refusal",
+             detected, (sorted(different), errors[:3]))
+    for number, (label, edits) in enumerate((
+        ("comment mentioning lib/loopauth", [("scripts/run-gate.sh", "# lib/loopauth is only prose")]),
+        ("stdlib import cleanup", [("scripts/loop-calibration", ('import argparse\n', 'import argparse\nimport re\n')),
+                                  ("scripts/loop-calibration", ('__import__("re")', 're'))]),
+    )):
+        copy = planted_copy(f"inventory-positive-{number}", edits)
+        got, errors = authority_importers(copy)
+        emit("F1", f"importer positive control: {label} leaves the frozen module map intact",
+             got == AUTHORITY_IMPORTERS and not errors, errors)
+    for label, relative, kind in (("cached bytecode", "scripts/__pycache__", "cache"),
+                                  ("symlinked directory", "hooks-linked", "symlink")):
+        copy = planted_copy("inventory-" + kind, [])
+        if kind == "cache":
+            os.makedirs(os.path.join(copy, relative))
+            write_private(os.path.join(copy, relative, "forge.pyc"), b"uninspectable bytecode")
+        else:
+            os.symlink(os.path.join(copy, "lib"), os.path.join(copy, relative))
+        _got, errors = authority_importers(copy)
+        emit("F1", f"planted importer control: {label} is DETECTED, never silently pruned",
+             any(relative in error for error in errors), errors)
+    for primitive in ("begin", "child"):
+        copy = planted_copy("minter-alias-" + primitive, [("lib/loopauth/ceremony.py",
+            f'def _unlisted_minter(token):\n    s = store\n    s.{primitive}("authority-genesis", token)\n')])
+        problems = minter_problems(Index(parse_modules(writer_sources(copy))[0]), registry)
+        emit("F1", f"planted minter control: s = store; s.{primitive}(...) outside a driver is DETECTED",
+             any("_unlisted_minter" in problem and primitive in problem for problem in problems), problems)
+
     unknown_sink = planted_copy("review-new-sink", [("lib/loopauth/store.py", ('SINK_FUNCTIONS = (', 'SINK_FUNCTIONS = ("unlisted_sink",'))])
     unknown_problems, _ = sink_problems(Index(parse_modules(writer_sources(unknown_sink))[0]))
     emit("F1", "planted unfrozen sink: a new declared sink with no caller is still refused",
@@ -3237,6 +3760,19 @@ def mode_static():
         rejected_trace = "trace-sink" in str(error)
     emit("F3", "planted wrong-token sink: completed sinks are checked, not only recorded",
          trace_control.sinks == [["write_cursor"]] and rejected_trace)
+
+    for label, token_id, late in (("unminted id", "missing", False), ("None id", None, False),
+                                  ("id minted only after its sink", "late", True)):
+        events = [{"e": "sink", "id": token_id, "fn": "write_cursor"}]
+        if late:
+            events += [{"e": "mint", "id": token_id, "kind": "recovery", "row": "recovery-tidy"}]
+        write_private(trace_path, ("".join(json.dumps(event) + "\n" for event in events)).encode())
+        try:
+            Trace(trace_path)
+            detected = False
+        except ValueError as error:
+            detected = "trace-sink" in str(error) and "unminted token" in str(error)
+        emit("F3", f"planted completed-sink trace: {label} is DETECTED", detected)
 
     # ---------------------------------------------------------------- F2
     table, top, groups = enumerate_parser()
@@ -3346,6 +3882,76 @@ def mode_static():
         ("planted registry mutation", "dictionary access replaces the validator", [("lib/loopauth/recover.py", 'registry.__dict__["validate"] = lambda *args: None')],
          {"the row validator rebound"}),
     ]
+    dict_hatch = alias_seal.replace("s.prepare_record(", 's.__dict__["prepare_record"](')
+    revoke_tree = ast.parse(revoke_source)
+    revoke_node = next(n for n in revoke_tree.body if isinstance(n, ast.FunctionDef) and n.name == "revoke")
+    validate_node = next(n for n in revoke_node.body if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+                         and callee(n.value) == ("registry", "validate"))
+    preparation = next(n for n in ast.walk(revoke_node) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                       and callee(n.value) == ("store", "prepare_record"))
+    prepare_text = "".join(revoke_source.splitlines(keepends=True)[preparation.lineno - 1:preparation.end_lineno])
+    decoy = ('        if os.environ.get("DECOY_PREPARATION"):\n            ' + ast.unparse(validate_node) + "\n"
+             + "".join("    " + line for line in prepare_text.splitlines(keepends=True))
+             + prepare_text.replace("store.prepare_record(", 'store.__dict__["prepare_record"]('))
+    decoy_revoke = revoke.replace(ast.get_source_segment(revoke_source, validate_node), "pass  # validator removed")
+    decoy_revoke = decoy_revoke.replace(prepare_text, decoy, 1)
+    f4_plants += [
+        ("planted reflection hatch", "store.__dict__ preparation hatch", [("lib/loopauth/ceremony.py", dict_hatch)],
+         {"unfrozen reflection"}),
+        ("planted reflection hatch", "env-gated decoy plus __dict__ preparation with the validator deleted",
+         [("lib/loopauth/ceremony.py", (revoke, decoy_revoke))],
+         {"unfrozen reflection", "preparation outside its frozen position"}),
+    ]
+    for label, code in (
+        ("alias getattr preparation", 's = store; getattr(s, "prepare_record")(None)'),
+        ("attrgetter preparation", 'import operator\noperator.attrgetter("prepare_record")(store)(None)'),
+        ("methodcaller preparation", 'import operator\noperator.methodcaller("prepare_record", None)(store)'),
+        ("helper getattr", 'def _reflect(mod, name):\n    return getattr(mod, name)\n_reflect(store, "bind_record")(None)'),
+        ("__dict__ binding", 'store.__dict__["bind_record"](None)'),
+        ("vars lookup", 'vars(store)["prepare_record"](None)'),
+        ("sys.modules lookup", 'import sys\nsys.modules["loopauth.store"].prepare_record(None)'),
+    ):
+        f4_plants.append(("planted reflection hatch", label, [("lib/loopauth/ceremony.py", code)], {"unfrozen reflection"}))
+
+    registry_plants = (
+        ("dispatch-table assignment", 'registry.VALIDATORS["V-epoch-revoke"] = lambda state, evidence: None'),
+        ("dispatch-table update", 'registry.VALIDATORS.update({"V-epoch-revoke": lambda *args: None})'),
+        ("dispatch-table pop", 'registry.VALIDATORS.pop("V-epoch-revoke")'),
+        ("dispatch-table del", 'del registry.VALIDATORS["V-epoch-revoke"]'),
+        ("dispatch-table setdefault", 'registry.VALIDATORS.setdefault("unlisted", lambda *args: None)'),
+        ("dispatch-table clear", 'registry.VALIDATORS.clear()'),
+        ("dispatch-table __setitem__", 'registry.VALIDATORS.__setitem__("V-epoch-revoke", lambda *args: None)'),
+        ("row validator key", 'registry.ROW_BY_ID["epoch-revocation"]["validator"] = "V-genesis"'),
+        ("sibling-module mutation", 'store.registry.validate = lambda *args: None'),
+        ("helper-parameter mutation", 'def _w(m):\n    m.validate = lambda *args: None\n_w(registry)'),
+        ("named-expression mutation", '(r := registry).validate = lambda *args: None'),
+        ("mock.patch.object mutation", 'from unittest import mock\nmock.patch.object(registry, "validate", lambda *args: None).start()'),
+    )
+    for number, (label, code) in enumerate(registry_plants):
+        edits = [("lib/loopauth/ceremony.py", code)]
+        f4_plants.append(("planted registry mutation", label, edits, {"the row validator rebound"}))
+        copy = planted_copy(f"identity-{number}", edits)
+        result = run_cmd([sys.executable, FZ, "identity", copy, os.path.join(TMP, f"identity-probe-{number}")], cli_env(os.path.join(TMP, "identity-home")))
+        emit("F4", f"planted runtime registry identity: {label} is DETECTED after entry imports",
+             result.rc == 1 and "registry-identity after entry module import" in result.out, result)
+    copy = planted_copy("identity-registry-self", [("lib/loopauth/registry.py", 'validate = lambda *args: None')])
+    result = run_cmd([sys.executable, FZ, "identity", copy, os.path.join(TMP, "identity-self")], cli_env(os.path.join(TMP, "identity-home")))
+    emit("F4", "planted runtime registry identity: registry.py's own rebind is DETECTED against its original AST",
+         result.rc == 1 and "registry.validate differs from its original AST definition" in result.out, result)
+    result = run_cmd([sys.executable, FZ, "identity", SKILL, os.path.join(TMP, "identity-delayed"), registry_plants[0][1]], cli_env(os.path.join(TMP, "identity-home")))
+    emit("F4", "planted runtime registry identity: a post-import table mutation is DETECTED after a recorded ceremony",
+         result.rc == 1 and "registry-identity after recorded ceremony" in result.out, result)
+    delayed = ('_original_genesis = genesis\ndef genesis(*args, **kwargs):\n'
+               '    result = _original_genesis(*args, **kwargs)\n    ' + registry_plants[0][1] + '\n    return result\n')
+    copy = planted_copy("identity-live-ceremony", [("lib/loopauth/ceremony.py", delayed)])
+    case = Case(os.path.join(TMP, "identity-ceremony"), "identity after real ceremony")
+    result = run_cmd([sys.executable, FZ, "cli", copy, os.path.join(TMP, "identity-real"),
+                      os.path.join(case.dir, "trace.jsonl"), json.dumps({"tty": True}),
+                      "ceremony", "genesis", "--remote", case.url], cli_env(case.home))
+    emit("F4", "planted runtime registry identity: mutation inside a completed real genesis is DETECTED at the ceremony boundary",
+         result.rc != 0 and "registry-identity after recorded ceremony genesis" in result.err
+         and os.path.isfile(auth(case.home, "active")), result)
+
     f4_plants += [("planted dead validator", label, edits, {"no row validator before the record"})
                   for label, edits in DEAD_VALIDATOR_PLANTS]
     f4_plants.append(("planted stand-in validator", "ceremony.py rebinding registry to an object whose validate "
@@ -3565,7 +4171,7 @@ def live_registry():
 # ===========================================================================
 
 FROZEN_PATH = "/usr/bin:/opt/homebrew/bin:/usr/local/bin"
-ANCHOR_REFSPEC = "+refs/olddonkey-loop/anchor:refs/verify/anchor"
+ANCHOR_REFSPEC = "+refs/olddonkey-loop/*:refs/readback/*"
 # The environment every git run gets (an allowlist; SSH_AUTH_SOCK is the one
 # variable passed through, when set), and every ssh-keygen run.
 FROZEN_GIT_ENV = {"PATH": FROZEN_PATH, "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1",
@@ -3579,7 +4185,7 @@ GIT_DECOYS = {"GIT_SSH_COMMAND": "false", "GIT_SSH": "false", "GIT_ASKPASS": "fa
 
 
 def frozen_transport_plan(url, transport, bins, home, ssh_auth_sock=None):
-    """The verifier's transport plan, frozen test-side: its three git argv
+    """The verifier's transport plan, frozen test-side: its four git argv
     forms, the fetch with the complete transport options of a file://, SSH,
     or HTTPS remote, and the git environment -- given the binaries it
     resolves ({git, ssh, gh: path or None})."""
@@ -3598,6 +4204,7 @@ def frozen_transport_plan(url, transport, bins, home, ssh_auth_sock=None):
     repo = ["-C", "<temp>/anchor.git"]
     return {"init": prefix + repo + ["init", "--bare", "--template=", "--object-format=sha1", "."],
             "fetch": prefix + options + repo + ["fetch", "--no-tags", "--no-write-fetch-head", url, ANCHOR_REFSPEC],
+            "ls-remote": prefix + options + repo + ["ls-remote", url, ANCHOR_REF],
             "cat-file": prefix + repo + ["cat-file", "-p", "0" * 40], "env": env}
 
 
@@ -3613,8 +4220,11 @@ def verifier_form(argv, home, url):
             rest = rest[4:]
             if len(rest) == 7 and rest[0] == "-C" and re.fullmatch(repo, rest[1]) \
                     and rest[2:] == ["fetch", "--no-tags", "--no-write-fetch-head", url,
-                                     "+refs/olddonkey-loop/anchor:refs/verify/anchor"]:
+                                     "+refs/olddonkey-loop/*:refs/readback/*"]:
                 return "git fetch"
+            if len(rest) == 5 and rest[0] == "-C" and re.fullmatch(repo, rest[1]) \
+                    and rest[2:] == ["ls-remote", url, ANCHOR_REF]:
+                return "git ls-remote"
             return None
         if len(rest) == 7 and rest[0] == "-C" and re.fullmatch(repo, rest[1]) \
                 and rest[2:] == ["init", "--bare", "--template=", "--object-format=sha1", "."]:
@@ -3713,8 +4323,8 @@ def mode_verifier():
             for parts in lines]
     forms = [verifier_form(argv, case.home, case.url) for argv in argvs]
     emit("F1", f"the verifier's {len(argvs)} recorded commands (wrapper fixtures for git and ssh-keygen) are each one of "
-         "its five frozen argv forms, and every form was seen",
-         argvs and None not in forms and set(forms) == {"git init", "git fetch", "git cat-file",
+         "its six frozen argv forms, and every form was seen",
+         argvs and None not in forms and set(forms) == {"git init", "git fetch", "git ls-remote", "git cat-file",
                                                         "ssh-keygen -Y verify", "ssh-keygen -l"},
          [argv for argv, form in zip(argvs, forms) if form is None][:3])
     temp = re.escape(os.path.join(case.home, ".cache", "olddonkey-loop", "verify")) + r"/[1-9][0-9]*-[0-9a-f]{16}"
@@ -4374,11 +4984,17 @@ def matrix_job(spec, journal):
         if crashed is not None:
             command, point, *extra = crashed
             rc, err = case.child(command, point, *extra)
-            checks("F6", f"{label}: the cut is injected ({command} crashed at {point}, exit 137)", rc == 137, err)
+            checks("F6", f"{label}: the cut is injected (exit 137), or is unreachable for a verify-only marker (exit 0)",
+                   rc == spec.get("crash_rc", 137), err)
         if spec.get("mutate"):
             mutate(case, spec["mutate"])
         pre = case.durable()
+        residual_digests = [tree_digest(root) for root in case.roots()] if spec.get("residual_intent") else None
         observation = case.observe()
+        if spec.get("cut_residual"):
+            got = outcome_of("revocation-active", base, observation, case)
+            checks("F6", f"{label}: the real marker-written cut is residual-intent, never strict both",
+                   got == "residual-intent", got)
         ran = "status, loop-authority-verify, and refs" if observation.r is not None else \
             "status and loop-authority-verify"
         checks("F2", f"{label}: {ran} leave the authority directory, the journal store, and the remote byte-identical "
@@ -4418,6 +5034,13 @@ def matrix_job(spec, journal):
             # when pending).
             observation = case.observe(writer_result=res if final else None, previous=observation)
             judge(checks, spec, case, base, observation, f"after {where}", final=final)
+            if residual_digests is not None:
+                checks("F6", f"{label}: {where} preserves the exact marker, intent, authority, journal and remote bytes",
+                       [tree_digest(root) for root in case.roots()] == residual_digests)
+            if spec.get("cut_residual"):
+                got = outcome_of("revocation-active", base, observation, case)
+                checks("F6", f"{label}: after {where} the residual intent still prevents strict both",
+                       got == "residual-intent", got)
         if kind == "revocation-active" and spec["outcome"] == "both":
             # the anchored quarantine, materialized: once recovery has run to
             # completion from this cut, the marker exists with its exact bytes
@@ -4638,9 +5261,17 @@ def matrix_specs(store):
                                                 (None, None))
             if trace is None:
                 continue
-            specs.append(dict(label=f"{kind} crashed at {point}", kind=kind,
-                              steps=BASE_STEPS[kind] + [(command, point, *extra)],
-                              runs=[run_spec(trace, RC_OF[(kind, outcome)])], outcome=outcome))
+            spec = dict(label=f"{kind} crashed at {point}", kind=kind,
+                        crash_rc=0 if kind == "revocation" and point.startswith("fs-create-marker-") else 137,
+                        steps=BASE_STEPS[kind] + [(command, point, *extra)],
+                        runs=[run_spec(trace, RC_OF[(kind, outcome)])], outcome=outcome)
+            if outcome == "residual-intent":
+                # New #66 cut reaches the already pinned marker-written terminal
+                # state. It is never admitted by is_safe() or called "both".
+                spec.update(kind="state", state="quarantined", rule="active-epoch-revoked",
+                            residual_intent=True, cut_residual=True,
+                            runs=[run_spec([], 6), run_spec([], 6)])
+            specs.append(spec)
     for spec in EXTRA_SPECS:
         command, *extra = TRANSACTION[spec["kind"]]
         steps = BASE_STEPS[spec["kind"]] + ([(command, spec["point"], *extra)] if spec["point"] else [])
@@ -4695,6 +5326,7 @@ def mode_child():
         os.environ["LOOP_AUTHORITY_CRASH_AT"] = "frame-byte-1" if sample else point
     sys.path.insert(0, LIB)
     sys.dont_write_bytecode = True
+    identity = load_identity()
     from loopauth import ceremony, store, tools  # noqa: E402
     ceremony.challenge = lambda envelope: None
     if sample is not None:
@@ -4720,6 +5352,7 @@ def mode_child():
             else:
                 raise SystemExit(f"unknown command {command}")
     finally:
+        identity.check("recorded ceremony")
         tools.cleanup()
 
 
@@ -4735,12 +5368,23 @@ def mode_cli():
     argv = ARGS[2:]
     sys.path.insert(0, LIB)
     sys.dont_write_bytecode = True
+    identity = load_identity()
     from loopauth import ceremony, store, tools  # noqa: E402
     fd = os.open(trace_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
 
     def record(event):
         os.write(fd, (json.dumps(event, sort_keys=True) + "\n").encode())
 
+    def checked_ceremony(name, real):
+        def checked(*args, **kwargs):
+            try:
+                return real(*args, **kwargs)
+            finally:
+                identity.check("recorded ceremony " + name)
+        return checked
+
+    for name in CEREMONY_ROWS:
+        setattr(ceremony, name, checked_ceremony(name, getattr(ceremony, name)))
     real_new = store._new
 
     def new(token):
@@ -4793,6 +5437,7 @@ def mode_cli():
         code = 0
     except SystemExit as error:
         code = error.code if isinstance(error.code, int) else (0 if error.code is None else 1)
+    identity.check("recorded entry")
     sys.stdout.flush()
     sys.stderr.flush()
     raise SystemExit(code)
@@ -4801,7 +5446,9 @@ def mode_cli():
 MODES = {"parent-control": ("F3", mode_parent_control), "static": ("F1", mode_static), "entry": ("F2", mode_entry), "verifier": ("F1", mode_verifier),
          "journal": ("F1", mode_journal), "compound": ("F3", mode_compound), "types": ("F4", mode_types),
          "sweep": ("F6", mode_sweep), "matrix": ("F6", mode_matrix)}
-if MODE == "child":
+if MODE == "identity":
+    mode_identity()
+elif MODE == "child":
     mode_child()
 elif MODE == "cli":
     mode_cli()
@@ -4814,6 +5461,21 @@ run_mode() { # $1=mode: its checks to $TMP_ROOT/<mode>.tsv, its exit status to <
   python3 "$TMP_ROOT/fz.py" "$1" "$SKILL" "$TMP_ROOT/$1" > "$TMP_ROOT/$1.tsv" 2> "$TMP_ROOT/$1.stderr"
   printf '%d\n' "$?" > "$TMP_ROOT/$1.status"
 }
+
+if [[ ${1:-} == --static && $# -eq 1 ]]; then
+  run_mode static
+  status="$(cat "$TMP_ROOT/static.status")"
+  tally "$TMP_ROOT/static.tsv" "$TMP_ROOT/static.stderr" "$status" "falsifier static checks" 1
+  if [[ $FAILED_CHECKS -eq 0 && "$ESCAPE_HATCH" == none ]]; then
+    printf 'static: PASS (%d checks), escape-hatch: none\n' "$CHECKS"
+    exit 0
+  fi
+  printf 'static: FAIL (%d of %d checks failed), escape-hatch: %s\n' "$FAILED_CHECKS" "$CHECKS" "$ESCAPE_HATCH" >&2
+  exit 1
+elif [[ $# -ne 0 ]]; then
+  printf 'usage: %s [--static]\n' "$0" >&2
+  exit 2
+fi
 
 # The crash matrix (the long pole, its own worker pool) runs beside the other
 # modes; every mode is then tallied in this fixed order, each with the claim

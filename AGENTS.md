@@ -228,13 +228,20 @@ run):
    and `s._fs_create` fails, and is shown live), the verifier's runner frozen
    to its one `subprocess.run(argv, ...)` (an extra call planted inside it
    fails), and the verifier's complete fetch argv and git environment frozen
-   for file://, SSH, and HTTPS remotes; F2 the frozen entry-point table
+   for file://, SSH, and HTTPS remotes, the wildcard fetch/push and exact
+   ls-remote forms, the whole-skill Python import-edge inventory and its
+   dynamic-import, subpackage, symlink and bytecode controls, alias begin/child
+   and stream-factory controls; F2 the frozen entry-point table
    against the real parser and the ordered token trace of `recover` for every
    case of the crash matrix;
-   F3 derived rows with no entry and the compound children's token refusals;
+   F3 derived rows with no entry, unminted sink traces, and the compound
+   children's token refusals;
    F4 no generic sealing or append hatch, each row validator dominating its
    record (planted dead validators, and stand-in validators in lib/loopauth or
-   the entry, fail); F5 recovery that never invents authority; F6 compound
+   the entry, fail), runtime registry function/table identities and row
+   validator values after entry imports and recorded ceremonies, frozen
+   reflection call sites and preparation positions; F5 recovery that never
+   invents authority; F6 compound
    transitions that never come apart -- "both" for the active epoch's
    revocation is its record anchored with writer, verifier, and refs
    classifying the store quarantined by its exact rule and position (the
@@ -247,7 +254,7 @@ run):
    stubbed, so no pty; needs `ssh-keygen` with `-Y`, `git`, and `ssh`; the crash
    matrix runs in parallel beside the other modes) — expect one `F1` … `F6`
    line each with `PASS`, `escape-hatch: none`,
-   `falsifier: PASS (2446 checks)`, and `selftest: PASS (2446 checks)`.
+   `falsifier: PASS (2679 checks)`, and `selftest: PASS (2679 checks)`.
 13. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
 14. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
