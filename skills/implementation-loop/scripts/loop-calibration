@@ -45,6 +45,8 @@ EXIT_D4A = 5
 EXIT_STORE = 6
 
 OWNER = os.getuid()
+# How many times validate_regular looks at a path whose link count reads 0.
+RESTAT_ATTEMPTS = 16
 ISO_Z_RE = __import__("re").compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
 )
@@ -321,12 +323,28 @@ def ensure_directory(path: str) -> None:
 
 
 def validate_regular(path: str, *, allow_missing: bool = False) -> os.stat_result | None:
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        if allow_missing:
-            return None
-        raise CalibrationError(f"file is missing: {path}", EXIT_D4A) from None
+    # A link count of 0 is not a hard link. It is the file a concurrent
+    # atomic replace has just renamed over: lstat resolved the name to the
+    # old inode and read it after the rename unlinked it (measured on Linux
+    # and macOS). The name now refers to the replacement, so look again: a
+    # bounded number of times, with a growing pause because the stale
+    # result can persist for milliseconds. Only a count above 1 is a hard
+    # link.
+    for attempt in range(RESTAT_ATTEMPTS):
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            if allow_missing:
+                return None
+            raise CalibrationError(f"file is missing: {path}", EXIT_D4A) from None
+        if info.st_nlink != 0:
+            break
+        time.sleep(0.001 * attempt)
+    else:
+        raise CalibrationError(
+            f"file link count stayed at 0 across {RESTAT_ATTEMPTS} checks: {path}",
+            EXIT_D4A,
+        )
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise CalibrationError(f"not a regular file: {path}", EXIT_D4A)
     if info.st_uid != OWNER:
@@ -422,11 +440,11 @@ def metadata_lock_paths(home: str, key: str) -> dict[str, str]:
 
 
 def ensure_metadata_lock(home: str, paths: dict[str, str]) -> None:
-    # The leading steps of loop-journal's bootstrap_store, in its order, and
-    # nothing after the lock. Every step tolerates a concurrent creator. The
-    # journal's readers treat the result as a store with no runs (a root
-    # holding only meta.lock makes find-run exit 5), and its first write
-    # adds generation and runs.tsv.
+    # The same steps as loop-journal's bootstrap_store, in its order. Every
+    # step tolerates a concurrent creator. The journal's readers treat the
+    # result as a store with no runs (a root holding only meta.lock makes
+    # find-run exit 5), and its first write adds generation and runs.tsv
+    # under the lock.
     loop_root = ensure_loop_root(home)
     ensure_directory(paths["journal"])
     no_symlink_from(loop_root, paths["root"])
