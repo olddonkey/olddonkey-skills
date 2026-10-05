@@ -80,12 +80,14 @@ run):
    `bash skills/implementation-loop/backends/claude/selftest.sh` — expect
    `selftest: PASS (303 checks)`.
 7. `bash skills/implementation-loop/tests/journal-selftest.sh` — expect
-   `selftest: PASS (251 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
+   `selftest: PASS (258 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
    — expect `selftest: PASS (106 checks)`;
    `bash skills/implementation-loop/tests/console-selftest.sh` — expect
-   `selftest: PASS (153 checks)`; and
+   `selftest: PASS (160 checks)`; and
    `bash skills/implementation-loop/tests/calibration-selftest.sh` — expect
-   `selftest: PASS (114 checks)`.
+   `selftest: PASS (121 checks)`. The journal, console, and calibration suites
+   each run `tests/link-count-cases.py`, which loads that script's Python body
+   and calls its `validate_regular` directly.
 8. `bash skills/implementation-loop/tests/contract-core.sh`,
    `bash skills/implementation-loop/tests/contract-negative.sh`, and
    `bash skills/implementation-loop/tests/shim-selftest.sh` — expect all green.
