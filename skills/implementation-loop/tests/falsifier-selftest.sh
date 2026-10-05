@@ -1510,7 +1510,7 @@ AUTHORITY_IMPORTERS = {'backends/claude/dispatch.sh': set(),
                              'loopauth.registry',
                              'loopauth.store',
                              'loopauth.tools'},
- 'lib/loopauth/reduce.py': {'loopauth.VOCABULARY', 'loopauth.canonical', 'loopauth.vocabulary'},
+ 'lib/loopauth/reduce.py': {'loopauth', 'loopauth.canonical', 'loopauth.vocabulary'},
  'lib/loopauth/refs.py': {'loopauth.eligibility',
                           'loopauth.journal_read',
                           'loopauth.recover',
@@ -1526,7 +1526,7 @@ AUTHORITY_IMPORTERS = {'backends/claude/dispatch.sh': set(),
                            'loopauth.registry',
                            'loopauth.tools'},
  'lib/loopauth/tools.py': {'loopauth.store', 'loopauth.records'},
- 'lib/loopauth/vocabulary.py': {'loopauth.VOCABULARY', 'loopauth.canonical'},
+ 'lib/loopauth/vocabulary.py': {'loopauth', 'loopauth.canonical'},
  'scripts/loop-authority-verify.py': set(),
  'scripts/loop-authority.py': {'loopauth',
                                'loopauth.canonical',
@@ -1605,7 +1605,28 @@ def shipped_python(root):
     return sources, problems
 
 
-def python_imports(relative, body):
+def exact_submodule(lib, module):
+    """Match every module component to directory-entry names, never an OS
+    path lookup that can fold case. Preserve the file-or-directory rule."""
+    parts = module.split(".")
+    parent = lib
+    try:
+        for name in parts[:-1]:
+            with os.scandir(parent) as entries:
+                entry = next((item for item in entries if item.name == name), None)
+            if entry is None or not entry.is_dir(follow_symlinks=False):
+                return False
+            parent = entry.path
+        name = parts[-1]
+        with os.scandir(parent) as entries:
+            return any((entry.name == name + ".py" and entry.is_file(follow_symlinks=False))
+                       or (entry.name == name and entry.is_dir(follow_symlinks=False)) for entry in entries)
+    except OSError:
+        return False
+
+
+def python_imports(relative, body, lib=None):
+    lib = LIB if lib is None else lib
     tree = ast.parse(body, relative)
     module = os.path.basename(relative).removesuffix(".py")
     index = Index({module: tree})
@@ -1642,8 +1663,7 @@ def python_imports(relative, body):
                 if target == "loopauth" or node.level and node.module is None:
                     for alias in node.names:
                         candidate = target + "." + alias.name
-                        module_path = os.path.join(LIB, *candidate.split("."))
-                        edges.add(candidate if os.path.isfile(module_path + ".py") or os.path.isdir(module_path) else target)
+                        edges.add(candidate if exact_submodule(lib, candidate) else target)
                 else:
                     edges.add(target)
         if not isinstance(node, (ast.Name, ast.Attribute)) or not isinstance(node.ctx, ast.Load):
@@ -1685,13 +1705,66 @@ def authority_importers(root):
         edges = set()
         for body in bodies:
             try:
-                imported, errors = python_imports(relative, body)
+                imported, errors = python_imports(relative, body, os.path.join(root, "lib"))
                 edges |= imported
                 problems += errors
             except SyntaxError as error:
                 problems.append(f"{relative}: unparsed Python: {error}")
         found[relative] = edges
     return found, problems
+
+
+def importer_case_exactness_control():
+    """A real temporary package, plus a case-insensitive path-probe fixture
+    so the regression remains non-vacuous on case-sensitive hosts too."""
+    fixture = os.path.join(TMP, "case-exact-imports", "lib")
+    package = os.path.join(fixture, "loopauth")
+    os.makedirs(package)
+    with open(os.path.join(package, "__init__.py"), "w", encoding="utf-8") as handle:
+        handle.write('VOCABULARY = "package constant"\n')
+    source = 'VALUE = "lowercase module"\n'
+    with open(os.path.join(package, "vocabulary.py"), "w", encoding="utf-8") as handle:
+        handle.write(source)
+    upper = os.path.join(package, "VOCABULARY.py")
+    try:
+        with open(upper, encoding="utf-8") as handle:
+            native_uppercase_open = handle.read() == source
+    except FileNotFoundError:
+        native_uppercase_open = False
+    probes = (("from . import VOCABULARY", {"loopauth"}),
+              ("from . import vocabulary", {"loopauth.vocabulary"}))
+    observations = []
+
+    def check(mode):
+        for body, expected in probes:
+            edges, errors = python_imports("lib/loopauth/probe.py", body, fixture)
+            observations.append((mode, body, sorted(edges), errors, edges == expected and not errors))
+
+    check("native")
+    real_isfile, real_isdir = os.path.isfile, os.path.isdir
+
+    def folded_path(path):
+        parent, name = os.path.split(path)
+        try:
+            matches = [entry for entry in os.listdir(parent) if entry.casefold() == name.casefold()]
+        except OSError:
+            return path
+        return os.path.join(parent, matches[0]) if len(matches) == 1 else path
+
+    # The old resolver must see VOCABULARY.py as existing in this fixture;
+    # the new resolver must still use exact directory-entry names.
+    os.path.isfile = lambda path: real_isfile(folded_path(path))
+    os.path.isdir = lambda path: real_isdir(folded_path(path))
+    try:
+        insensitive_probe_matches = os.path.isfile(upper)
+        check("case-insensitive probes")
+    finally:
+        os.path.isfile, os.path.isdir = real_isfile, real_isdir
+    return insensitive_probe_matches and all(row[-1] for row in observations), {
+        "native_uppercase_open": native_uppercase_open,
+        "case_insensitive_probe_matches": insensitive_probe_matches,
+        "observations": observations,
+    }
 
 
 def writer_sources(root):
@@ -3678,6 +3751,10 @@ def mode_static():
     sidecar_findings = f1_findings(sidecar, rs, registry)
     emit("F1", "planted fifth importer: a new sidecar forging a token is visible to the inventory guard",
          any(rule == "entry importer inventory" for rule, _detail in sidecar_findings), sidecar_findings[:3])
+
+    case_exact, case_detail = importer_case_exactness_control()
+    emit("F1", "importer case-exactness control: package attributes and submodules stay distinct even when "
+         "case-insensitive probes open the uppercase spelling", case_exact, case_detail)
 
     importer_plants = [
         ("forge inside loop-calibration", [("scripts/loop-calibration", ("import argparse\n",
