@@ -607,6 +607,20 @@ else
 fi
 rm -f "$TMP_ROOT/d4a-hard-other.tsv"
 
+# A link count of 0 is a file being replaced, not a hard link.
+link_count_case() { # $1=case $2=description
+  run_cmd "link-count-$1" env TMPDIR="$TMP_ROOT" \
+    python3 "$SCRIPT_DIR/link-count-cases.py" "$CAL" "$1"
+  expect_status 0 "link count: $2"
+}
+link_count_case replaced-once "0 on the first look is read again and the file accepted"
+link_count_case replaced-repeatedly "0 on five looks in a row is still accepted"
+link_count_case never-settles "0 on every look is refused after a bounded number of looks, not as a hard link"
+link_count_case hard-link "a second link is refused as a hard link"
+link_count_case hard-link-after-replace "0 and then a second link is refused as a hard link"
+link_count_case removed-after-replace "0 and then no file is reported missing"
+link_count_case live-replace "a file being replaced in a tight loop is never refused"
+
 # 0644
 chmod 644 "$STORE_D4A"
 cp "$STORE_D4A" "$TMP_ROOT/d4a-mode-before.tsv"
