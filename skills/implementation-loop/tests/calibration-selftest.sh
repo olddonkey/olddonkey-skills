@@ -6,12 +6,20 @@ set -uo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 CAL="$SCRIPT_DIR/../scripts/loop-calibration"
+JOURNAL="$SCRIPT_DIR/../scripts/loop-journal"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/calibration-selftest.XXXXXX")" || exit 1
 TMP_ROOT="$(CDPATH= cd -- "$TMP_ROOT" && pwd -P)"
 
+LOCK_HOLDER_PID=""
+WAITER_PID=""
+
 cleanup() {
-  local status="$1"
+  local status="$1" pid
   trap - EXIT HUP INT TERM
+  for pid in $LOCK_HOLDER_PID $WAITER_PID; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
   rm -rf -- "$TMP_ROOT" || true
   exit "$status"
 }
@@ -107,6 +115,90 @@ print(os.path.join(home, ".config", "olddonkey-loop", "calibration", key + ".tsv
 PY
 }
 
+journal_dir() { # $1=workspace
+  printf '%s\n' "$HOME/.config/olddonkey-loop/journal/$(workspace_key "$1")"
+}
+
+hold_lock() { # $1=lock-path; holds it until release_lock
+  local ready="$TMP_ROOT/lock-held.ready"
+  rm -f "$ready"
+  python3 - "$1" "$ready" <<'PY' &
+import fcntl, os, sys, time
+lock_path, ready_path = sys.argv[1], sys.argv[2]
+fd = os.open(lock_path, os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX)
+with open(ready_path, "w", encoding="utf-8") as handle:
+    handle.write("ready\n")
+time.sleep(120)
+PY
+  LOCK_HOLDER_PID=$!
+  for _ in $(seq 1 100); do
+    [[ -f "$ready" ]] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
+release_lock() {
+  if [[ -n "$LOCK_HOLDER_PID" ]]; then
+    kill "$LOCK_HOLDER_PID" 2>/dev/null || true
+    wait "$LOCK_HOLDER_PID" 2>/dev/null || true
+    LOCK_HOLDER_PID=""
+  fi
+}
+
+# Starts every writer at once, then waits for all of them. Each writer is
+# "set:KEY:VALUE" or "unset:KEY". PARALLEL_FAILED counts nonzero exits.
+parallel_writes() { # $1=workspace $2=log-file, remaining=writers
+  local ws="$1" log="$2" spec op key value pid
+  local pids=()
+  shift 2
+  PARALLEL_FAILED=0
+  for spec in "$@"; do
+    IFS=: read -r op key value <<<"$spec"
+    if [[ "$op" == set ]]; then
+      env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=60 "$CAL" set --workspace "$ws" \
+        --key "$key" --value "$value" --set-by console >>"$log" 2>&1 &
+    else
+      env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=60 "$CAL" unset --workspace "$ws" \
+        --key "$key" --set-by console >>"$log" 2>&1 &
+    fi
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do
+    if ! wait "$pid"; then
+      PARALLEL_FAILED=$((PARALLEL_FAILED + 1))
+    fi
+  done
+}
+
+# The store must be valid and hold exactly the given rows. Mismatch detail
+# is appended to the log file.
+stored_rows_are() { # $1=workspace $2=log-file, remaining=key=value
+  local ws="$1" log="$2"
+  shift 2
+  "$CAL" show --workspace "$ws" --json >"$TMP_ROOT/stored-rows.json" 2>>"$log" || return 1
+  python3 - "$TMP_ROOT/stored-rows.json" "$@" >>"$log" 2>&1 <<'PY'
+import json, sys
+doc = json.loads(open(sys.argv[1], encoding="utf-8").read())
+expected = dict(item.split("=", 1) for item in sys.argv[2:])
+if doc.get("store") != "present":
+    raise SystemExit("store %r reason %r" % (doc.get("store"), doc.get("reason")))
+stored = {
+    key: row["value"] for key, row in doc["dials"].items() if row["source"] == "store"
+}
+if stored != expected:
+    raise SystemExit(
+        "missing %r, unexpected %r, wrong %r"
+        % (
+            sorted(set(expected) - set(stored)),
+            sorted(set(stored) - set(expected)),
+            sorted(k for k in set(stored) & set(expected) if stored[k] != expected[k]),
+        )
+    )
+PY
+}
+
 ensure_cal_dir() {
   local dir="$HOME/.config/olddonkey-loop/calibration"
   mkdir -p "$dir"
@@ -167,6 +259,8 @@ expect_output stdout "Exit codes:" "help: documents exit codes"
 expect_output stdout "2  usage" "help: documents usage exit 2"
 expect_output stdout "5  D4a" "help: documents D4a exit 5"
 expect_output stdout "6  store rejected" "help: documents store-rejected exit 6"
+expect_output stdout "3  lock busy" "help: documents lock-busy exit 3"
+expect_output stdout "meta.lock" "help: names the metadata lock"
 
 # ---------------------------------------------------------------------------
 # 1. Absent store → defaults, store absent, exit 0
@@ -552,6 +646,371 @@ if [[ "$mode" == "0600" ]]; then
 else
   fail "atomic: store keeps mode 0600 (got $mode)"
 fi
+
+# ---------------------------------------------------------------------------
+# 10. Concurrent writers leave every row — workspace with no journal store
+# ---------------------------------------------------------------------------
+CASE_STDOUT=""
+CONC_LOG="$TMP_ROOT/concurrent.log"
+: >"$CONC_LOG"
+CONC_ROUNDS=5
+conc_exit_bad=0
+conc_rows_bad=0
+for round in $(seq 1 "$CONC_ROUNDS"); do
+  WS_CONC="$(workspace "concurrent-$round")"
+  printf '== round %s ==\n' "$round" >>"$CONC_LOG"
+  parallel_writes "$WS_CONC" "$CONC_LOG" \
+    set:backend:grok set:stop:pr set:cadence:continuous \
+    set:dispatch-mode:read-only set:gate:strict set:on-red:iterate set:depth:deep
+  if [[ $PARALLEL_FAILED -ne 0 ]]; then
+    conc_exit_bad=$((conc_exit_bad + 1))
+    printf 'round %s: %s writer(s) exited nonzero\n' "$round" "$PARALLEL_FAILED" >>"$CONC_LOG"
+  fi
+  if ! stored_rows_are "$WS_CONC" "$CONC_LOG" \
+    backend=grok stop=pr cadence=continuous dispatch-mode=read-only \
+    gate=strict on-red=iterate depth=deep; then
+    conc_rows_bad=$((conc_rows_bad + 1))
+  fi
+done
+conc_temps="$(find "$HOME/.config/olddonkey-loop/calibration" -name '.tmp-*' | wc -l | tr -d ' ')"
+CASE_STDERR="$CONC_LOG"
+if [[ $conc_exit_bad -eq 0 ]]; then
+  pass "concurrent: seven parallel sets all exit 0 in each of $CONC_ROUNDS rounds"
+else
+  fail "concurrent: seven parallel sets all exit 0 in each of $CONC_ROUNDS rounds ($conc_exit_bad bad)"
+fi
+if [[ $conc_rows_bad -eq 0 ]]; then
+  pass "concurrent: every row survives in each of $CONC_ROUNDS rounds"
+else
+  fail "concurrent: every row survives in each of $CONC_ROUNDS rounds ($conc_rows_bad lost rows)"
+fi
+if [[ "$conc_temps" == "0" ]]; then
+  pass "concurrent: no temp file remains"
+else
+  fail "concurrent: no temp file remains ($conc_temps left)"
+fi
+
+# ---------------------------------------------------------------------------
+# 11. Concurrent set and unset on a workspace with a live journal run
+# ---------------------------------------------------------------------------
+MIX_LOG="$TMP_ROOT/mixed.log"
+: >"$MIX_LOG"
+MIX_ROUNDS=3
+mix_seed_bad=0
+mix_exit_bad=0
+mix_rows_bad=0
+mix_journal_bad=0
+for round in $(seq 1 "$MIX_ROUNDS"); do
+  WS_MIX="$(workspace "mixed-$round")"
+  printf '== round %s ==\n' "$round" >>"$MIX_LOG"
+  if ! "$JOURNAL" begin-run --workspace "$WS_MIX" >>"$MIX_LOG" 2>&1; then
+    mix_seed_bad=$((mix_seed_bad + 1))
+  fi
+  for seed in backend:grok stop:pr cadence:continuous; do
+    if ! "$CAL" set --workspace "$WS_MIX" --key "${seed%%:*}" --value "${seed#*:}" \
+      --set-by console >>"$MIX_LOG" 2>&1; then
+      mix_seed_bad=$((mix_seed_bad + 1))
+    fi
+  done
+  parallel_writes "$WS_MIX" "$MIX_LOG" \
+    unset:backend unset:stop set:gate:strict set:on-red:iterate set:depth:deep \
+    set:dispatch-mode:read-only set:fix-lane:claude-trivial-ok
+  if [[ $PARALLEL_FAILED -ne 0 ]]; then
+    mix_exit_bad=$((mix_exit_bad + 1))
+    printf 'round %s: %s writer(s) exited nonzero\n' "$round" "$PARALLEL_FAILED" >>"$MIX_LOG"
+  fi
+  if ! stored_rows_are "$WS_MIX" "$MIX_LOG" \
+    cadence=continuous gate=strict on-red=iterate depth=deep \
+    dispatch-mode=read-only fix-lane=claude-trivial-ok; then
+    mix_rows_bad=$((mix_rows_bad + 1))
+  fi
+  if ! "$JOURNAL" read-context --workspace "$WS_MIX" 2>>"$MIX_LOG" \
+    | grep -Fq '"state":"active"'; then
+    mix_journal_bad=$((mix_journal_bad + 1))
+    printf 'round %s: journal context is no longer active\n' "$round" >>"$MIX_LOG"
+  fi
+done
+CASE_STDERR="$MIX_LOG"
+if [[ $mix_seed_bad -eq 0 ]]; then
+  pass "concurrent mixed: journal run and seed rows are in place"
+else
+  fail "concurrent mixed: journal run and seed rows are in place ($mix_seed_bad failed)"
+fi
+if [[ $mix_exit_bad -eq 0 ]]; then
+  pass "concurrent mixed: parallel sets and unsets all exit 0 in each of $MIX_ROUNDS rounds"
+else
+  fail "concurrent mixed: parallel sets and unsets all exit 0 in each of $MIX_ROUNDS rounds ($mix_exit_bad bad)"
+fi
+if [[ $mix_rows_bad -eq 0 ]]; then
+  pass "concurrent mixed: every set lands and every unset sticks in each of $MIX_ROUNDS rounds"
+else
+  fail "concurrent mixed: every set lands and every unset sticks in each of $MIX_ROUNDS rounds ($mix_rows_bad wrong)"
+fi
+if [[ $mix_journal_bad -eq 0 ]]; then
+  pass "concurrent mixed: the journal run stays active"
+else
+  fail "concurrent mixed: the journal run stays active ($mix_journal_bad lost)"
+fi
+CASE_STDERR=""
+
+# ---------------------------------------------------------------------------
+# 12. A held metadata lock: clean refusal, file unchanged, success on release
+# ---------------------------------------------------------------------------
+WS_LOCK="$(workspace lock)"
+run_cmd lock-seed "$CAL" set --workspace "$WS_LOCK" \
+  --key backend --value grok --set-by console
+expect_status 0 "lock: seed a store"
+STORE_LOCK="$(store_file "$WS_LOCK")"
+META_LOCK="$(journal_dir "$WS_LOCK")/meta.lock"
+cp "$STORE_LOCK" "$TMP_ROOT/lock-before.tsv"
+CASE_STDOUT=""
+CASE_STDERR=""
+if hold_lock "$META_LOCK"; then
+  pass "lock: another process holds meta.lock"
+else
+  fail "lock: another process holds meta.lock"
+fi
+
+run_cmd lock-set env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=0.3 "$CAL" set \
+  --workspace "$WS_LOCK" --key gate --value strict --set-by console
+expect_status 3 "lock: set against a held lock exits 3"
+expect_output stderr "lock busy" "lock: the refusal says lock busy"
+if cmp -s "$STORE_LOCK" "$TMP_ROOT/lock-before.tsv"; then
+  pass "lock: refused set leaves the store byte-identical"
+else
+  fail "lock: refused set leaves the store byte-identical"
+fi
+
+run_cmd lock-unset env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=0.3 "$CAL" unset \
+  --workspace "$WS_LOCK" --key backend --set-by console
+expect_status 3 "lock: unset against a held lock exits 3"
+if cmp -s "$STORE_LOCK" "$TMP_ROOT/lock-before.tsv"; then
+  pass "lock: refused unset leaves the store byte-identical"
+else
+  fail "lock: refused unset leaves the store byte-identical"
+fi
+
+run_cmd lock-zero env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=0 "$CAL" set \
+  --workspace "$WS_LOCK" --key gate --value strict --set-by console
+expect_status 3 "lock: a zero wait is one attempt, then exit 3"
+
+temps="$(find "$(dirname "$STORE_LOCK")" -name '.tmp-*' | wc -l | tr -d ' ')"
+if [[ "$temps" == "0" ]]; then
+  pass "lock: refused writes leave no temp file"
+else
+  fail "lock: refused writes leave no temp file"
+fi
+
+run_cmd lock-show "$CAL" show --workspace "$WS_LOCK" --json
+expect_status 0 "lock: show does not wait for the lock"
+expect_output stdout '"backend":{"value":"grok"' "lock: show still reads the stored row"
+
+# A writer that starts while the lock is held waits, then lands on release.
+env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=60 "$CAL" set --workspace "$WS_LOCK" \
+  --key depth --value deep --set-by console \
+  >"$TMP_ROOT/lock-waiter.stdout" 2>"$TMP_ROOT/lock-waiter.stderr" &
+WAITER_PID=$!
+sleep 0.5
+CASE_STDOUT="$TMP_ROOT/lock-waiter.stdout"
+CASE_STDERR="$TMP_ROOT/lock-waiter.stderr"
+if kill -0 "$WAITER_PID" 2>/dev/null && cmp -s "$STORE_LOCK" "$TMP_ROOT/lock-before.tsv"; then
+  pass "lock: a writer inside its wait is still waiting and has written nothing"
+else
+  fail "lock: a writer inside its wait is still waiting and has written nothing"
+fi
+release_lock
+if wait "$WAITER_PID"; then
+  pass "lock: the waiting writer exits 0 once the lock is released"
+else
+  fail "lock: the waiting writer exits 0 once the lock is released"
+fi
+WAITER_PID=""
+
+run_cmd lock-after "$CAL" set --workspace "$WS_LOCK" \
+  --key gate --value strict --set-by console
+expect_status 0 "lock: the refused set succeeds after release"
+CASE_STDOUT=""
+CASE_STDERR="$TMP_ROOT/lock-rows.log"
+: >"$CASE_STDERR"
+if stored_rows_are "$WS_LOCK" "$CASE_STDERR" backend=grok depth=deep gate=strict; then
+  pass "lock: after release the store holds the old row and both new rows"
+else
+  fail "lock: after release the store holds the old row and both new rows"
+fi
+
+cp "$STORE_LOCK" "$TMP_ROOT/lock-env-before.tsv"
+for bad in abc nan inf -1; do
+  run_cmd "lock-env-$bad" env "LOOP_JOURNAL_LOCK_TIMEOUT_SEC=$bad" "$CAL" set \
+    --workspace "$WS_LOCK" --key on-red --value iterate --set-by console
+  expect_status 2 "lock: LOOP_JOURNAL_LOCK_TIMEOUT_SEC=$bad is a usage error"
+done
+if cmp -s "$STORE_LOCK" "$TMP_ROOT/lock-env-before.tsv"; then
+  pass "lock: a bad timeout value writes nothing"
+else
+  fail "lock: a bad timeout value writes nothing"
+fi
+
+# ---------------------------------------------------------------------------
+# 13. No journal store yet: what a write creates and how the journal reads it
+# ---------------------------------------------------------------------------
+WS_NOJ="$(workspace nojournal)"
+JDIR_NOJ="$(journal_dir "$WS_NOJ")"
+STORE_NOJ="$(store_file "$WS_NOJ")"
+run_cmd noj-unset "$CAL" unset --workspace "$WS_NOJ" --key backend --set-by console
+expect_status 0 "no-journal: unset with no store exits 0"
+if [[ ! -e "$JDIR_NOJ" && ! -e "$STORE_NOJ" ]]; then
+  pass "no-journal: unset with no store creates neither a lock nor a store"
+else
+  fail "no-journal: unset with no store creates neither a lock nor a store"
+fi
+
+run_cmd noj-set "$CAL" set --workspace "$WS_NOJ" \
+  --key backend --value grok --set-by console
+expect_status 0 "no-journal: first set exits 0"
+if python3 - "$JDIR_NOJ" >"$TMP_ROOT/noj-skeleton.stdout" 2>"$TMP_ROOT/noj-skeleton.stderr" <<'PY'
+import os, stat, sys
+root = sys.argv[1]
+
+def mode(path):
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+if sorted(os.listdir(root)) != ["meta.lock", "runs"]:
+    raise SystemExit("entries %r" % sorted(os.listdir(root)))
+for directory in (os.path.dirname(root), root, os.path.join(root, "runs")):
+    info = os.lstat(directory)
+    if not stat.S_ISDIR(info.st_mode) or mode(directory) != 0o700:
+        raise SystemExit("directory %s mode %04o" % (directory, mode(directory)))
+if os.listdir(os.path.join(root, "runs")):
+    raise SystemExit("runs/ is not empty")
+lock = os.lstat(os.path.join(root, "meta.lock"))
+if not stat.S_ISREG(lock.st_mode) or stat.S_IMODE(lock.st_mode) != 0o600:
+    raise SystemExit("meta.lock mode %04o" % stat.S_IMODE(lock.st_mode))
+if lock.st_size != 0 or lock.st_nlink != 1:
+    raise SystemExit("meta.lock size %d nlink %d" % (lock.st_size, lock.st_nlink))
+PY
+then
+  pass "no-journal: first set creates only runs/ and an empty 0600 meta.lock under 0700 dirs"
+else
+  CASE_STDOUT="$TMP_ROOT/noj-skeleton.stdout"
+  CASE_STDERR="$TMP_ROOT/noj-skeleton.stderr"
+  fail "no-journal: first set creates only runs/ and an empty 0600 meta.lock under 0700 dirs"
+fi
+
+run_cmd noj-context "$JOURNAL" read-context --workspace "$WS_NOJ"
+expect_status 0 "no-journal: loop-journal read-context accepts the store"
+expect_output stdout '"state":"none"' "no-journal: read-context reports no run"
+run_cmd noj-find "$JOURNAL" find-run --plan any-plan --workspace "$WS_NOJ"
+expect_status 0 "no-journal: loop-journal find-run accepts the store"
+expect_output stdout '"runs":[],"ambiguous":[]' "no-journal: find-run reports no runs"
+run_cmd noj-begin "$JOURNAL" begin-run --workspace "$WS_NOJ"
+expect_status 0 "no-journal: loop-journal begin-run completes the store"
+if [[ -f "$JDIR_NOJ/generation" && -f "$JDIR_NOJ/runs.tsv" ]]; then
+  pass "no-journal: the journal added generation and runs.tsv"
+else
+  fail "no-journal: the journal added generation and runs.tsv"
+fi
+run_cmd noj-set-after "$CAL" set --workspace "$WS_NOJ" \
+  --key gate --value strict --set-by console
+expect_status 0 "no-journal: set still works once the journal owns the store"
+CASE_STDOUT=""
+CASE_STDERR="$TMP_ROOT/noj-rows.log"
+: >"$CASE_STDERR"
+if stored_rows_are "$WS_NOJ" "$CASE_STDERR" backend=grok gate=strict; then
+  pass "no-journal: both rows are stored"
+else
+  fail "no-journal: both rows are stored"
+fi
+
+# ---------------------------------------------------------------------------
+# 14. D4a on the lock path: no lock, no write
+# ---------------------------------------------------------------------------
+WS_LD4A="$(workspace lockd4a)"
+run_cmd ld4a-seed "$CAL" set --workspace "$WS_LD4A" \
+  --key backend --value grok --set-by console
+expect_status 0 "lock d4a: seed a store"
+STORE_LD4A="$(store_file "$WS_LD4A")"
+JDIR_LD4A="$(journal_dir "$WS_LD4A")"
+cp "$STORE_LD4A" "$TMP_ROOT/ld4a-before.tsv"
+
+mv "$JDIR_LD4A/meta.lock" "$TMP_ROOT/ld4a-real.lock"
+ln -s "$TMP_ROOT/ld4a-real.lock" "$JDIR_LD4A/meta.lock"
+run_cmd ld4a-sym-set "$CAL" set --workspace "$WS_LD4A" \
+  --key gate --value strict --set-by console
+expect_status 5 "lock d4a: symlinked meta.lock is refused (set)"
+run_cmd ld4a-sym-unset "$CAL" unset --workspace "$WS_LD4A" --key backend --set-by console
+expect_status 5 "lock d4a: symlinked meta.lock is refused (unset)"
+run_cmd ld4a-sym-show "$CAL" show --workspace "$WS_LD4A" --json
+expect_status 0 "lock d4a: show does not depend on the lock path"
+rm -f "$JDIR_LD4A/meta.lock"
+mv "$TMP_ROOT/ld4a-real.lock" "$JDIR_LD4A/meta.lock"
+
+chmod 644 "$JDIR_LD4A/meta.lock"
+run_cmd ld4a-mode-set "$CAL" set --workspace "$WS_LD4A" \
+  --key gate --value strict --set-by console
+expect_status 5 "lock d4a: 0644 meta.lock is refused"
+chmod 600 "$JDIR_LD4A/meta.lock"
+
+mv "$JDIR_LD4A" "$TMP_ROOT/ld4a-real-journal"
+ln -s "$TMP_ROOT/ld4a-real-journal" "$JDIR_LD4A"
+run_cmd ld4a-dir-set "$CAL" set --workspace "$WS_LD4A" \
+  --key gate --value strict --set-by console
+expect_status 5 "lock d4a: symlinked journal directory is refused"
+rm -f "$JDIR_LD4A"
+mv "$TMP_ROOT/ld4a-real-journal" "$JDIR_LD4A"
+
+if cmp -s "$STORE_LD4A" "$TMP_ROOT/ld4a-before.tsv"; then
+  pass "lock d4a: every refusal left the store byte-identical"
+else
+  fail "lock d4a: every refusal left the store byte-identical"
+fi
+run_cmd ld4a-repaired "$CAL" set --workspace "$WS_LD4A" \
+  --key gate --value strict --set-by console
+expect_status 0 "lock d4a: set succeeds once the lock path is repaired"
+
+# ---------------------------------------------------------------------------
+# 15. First write racing the journal's first write: neither one fails
+# ---------------------------------------------------------------------------
+CASE_STDOUT=""
+RACE_LOG="$TMP_ROOT/first-use-race.log"
+: >"$RACE_LOG"
+RACE_ROUNDS=10
+race_cal_bad=0
+race_journal_bad=0
+race_state_bad=0
+for round in $(seq 1 "$RACE_ROUNDS"); do
+  WS_RACE="$(workspace "race-$round")"
+  printf '== round %s ==\n' "$round" >>"$RACE_LOG"
+  env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=60 "$CAL" set --workspace "$WS_RACE" \
+    --key gate --value strict --set-by console >>"$RACE_LOG" 2>&1 &
+  race_cal_pid=$!
+  env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=60 "$JOURNAL" begin-run --workspace "$WS_RACE" \
+    >>"$RACE_LOG" 2>&1 &
+  race_journal_pid=$!
+  wait "$race_cal_pid" || race_cal_bad=$((race_cal_bad + 1))
+  wait "$race_journal_pid" || race_journal_bad=$((race_journal_bad + 1))
+  if ! stored_rows_are "$WS_RACE" "$RACE_LOG" gate=strict \
+    || ! "$JOURNAL" read-context --workspace "$WS_RACE" 2>>"$RACE_LOG" \
+      | grep -Fq '"state":"active"'; then
+    race_state_bad=$((race_state_bad + 1))
+  fi
+done
+CASE_STDERR="$RACE_LOG"
+if [[ $race_cal_bad -eq 0 ]]; then
+  pass "first-use race: loop-calibration set exits 0 in each of $RACE_ROUNDS rounds"
+else
+  fail "first-use race: loop-calibration set exits 0 in each of $RACE_ROUNDS rounds ($race_cal_bad bad)"
+fi
+if [[ $race_journal_bad -eq 0 ]]; then
+  pass "first-use race: loop-journal begin-run exits 0 in each of $RACE_ROUNDS rounds"
+else
+  fail "first-use race: loop-journal begin-run exits 0 in each of $RACE_ROUNDS rounds ($race_journal_bad bad)"
+fi
+if [[ $race_state_bad -eq 0 ]]; then
+  pass "first-use race: the row is stored and the run is active in each of $RACE_ROUNDS rounds"
+else
+  fail "first-use race: the row is stored and the run is active in each of $RACE_ROUNDS rounds ($race_state_bad wrong)"
+fi
+CASE_STDERR=""
 
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' "$FAILED_CHECKS" "$CHECKS" >&2

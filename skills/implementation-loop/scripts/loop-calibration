@@ -11,6 +11,15 @@
 # Store: $HOME/.config/olddonkey-loop/calibration/<sha256(canonical workspace)>.tsv
 # The store is the sole machine-read authority. A rejected or D4a-broken
 # store is no standing authorization.
+#
+# Writes are serialized on the journal's metadata lock
+# ($HOME/.config/olddonkey-loop/journal/<workspace-key>/meta.lock): set and
+# unset hold it across read, validate, and atomic replace, with the same
+# bounded wait as loop-journal. A lock that stays busy is exit 3 and writes
+# nothing. show never takes the lock.
+#
+# Test-only override (not for production):
+#   LOOP_JOURNAL_LOCK_TIMEOUT_SEC default 5
 
 set -euo pipefail
 umask 077
@@ -18,16 +27,20 @@ exec python3 - "$@" <<'PY'
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
+import math
 import os
 import secrets
 import stat
 import sys
+import time
 from datetime import datetime, timezone
 
 EXIT_OK = 0
 EXIT_USAGE = 2
+EXIT_LOCK_BUSY = 3
 EXIT_D4A = 5
 EXIT_STORE = 6
 
@@ -126,6 +139,30 @@ store is refused and left untouched — repair or remove it deliberately.
 
 unset removes the row.
 
+Locking:
+  set and unset hold the workspace metadata lock — the journal's
+  $HOME/.config/olddonkey-loop/journal/<workspace-key>/meta.lock —
+  across read, validate, and atomic replace, so concurrent writers
+  never lose each other's rows. The wait is bounded (default 5 s, the
+  same as loop-journal). If the lock is still held when the wait ends
+  the command exits 3 with "lock busy" and the store is unchanged;
+  retry it. show takes no lock: the replace is an atomic rename, so
+  it never reads a partly written file.
+
+  A workspace with no journal store yet: the first set (or the first
+  unset of an existing store) creates the leading part of the
+  journal's own bootstrap — the <workspace-key>/ directory, runs/, and
+  an empty meta.lock, all D4a — and locks that. The journal reads it
+  as a store with no runs and completes it on its first write. unset
+  on a workspace with no calibration store takes no lock and creates
+  nothing. A D4a violation on the lock path is exit 5; nothing is
+  written without the lock.
+
+Test-only environment:
+  LOOP_JOURNAL_LOCK_TIMEOUT_SEC  metadata lock wait in seconds
+                                 (default 5; finite, >= 0; 0 is a
+                                 single attempt)
+
 Safe defaults:
   backend=codex stop=worktree cadence=confirm dispatch-mode=implement
   gate=baseline on-red=stop depth=standard fix-lane=codex
@@ -137,6 +174,8 @@ fsync, rename, directory fsync).
 Exit codes:
   0  ok (show: present, absent, or content-rejected)
   2  usage (including a permission grant with --set-by import-confirmed)
+  3  lock busy (set/unset: the metadata lock stayed held for the whole
+     wait; the store is unchanged)
   5  D4a
   6  store rejected / operational (set/unset against a rejected store;
      HOME unreadable)
@@ -341,10 +380,9 @@ def atomic_write(path: str, content: str) -> None:
     validate_regular(path)
 
 
-def bootstrap_store(home: str, path: str) -> None:
+def ensure_loop_root(home: str) -> str:
     config = os.path.join(home, ".config")
     loop_root = managed_loop_root(home)
-    cal_dir = calibration_dir(home)
     try:
         os.mkdir(config, 0o700)
     except FileExistsError:
@@ -352,8 +390,114 @@ def bootstrap_store(home: str, path: str) -> None:
     if not os.path.isdir(config):
         raise CalibrationError(f"not a directory: {config}", EXIT_D4A)
     ensure_directory(loop_root)
-    ensure_directory(cal_dir)
+    return loop_root
+
+
+def bootstrap_store(home: str, path: str) -> None:
+    loop_root = ensure_loop_root(home)
+    ensure_directory(calibration_dir(home))
     no_symlink_from(loop_root, path)
+
+
+def lock_timeout_sec() -> float:
+    raw = os.environ.get("LOOP_JOURNAL_LOCK_TIMEOUT_SEC", "5")
+    try:
+        value = float(raw)
+    except ValueError:
+        fail("LOOP_JOURNAL_LOCK_TIMEOUT_SEC must be a number", EXIT_USAGE)
+    if not math.isfinite(value) or value < 0:
+        fail("LOOP_JOURNAL_LOCK_TIMEOUT_SEC must be finite and >= 0", EXIT_USAGE)
+    return value
+
+
+def metadata_lock_paths(home: str, key: str) -> dict[str, str]:
+    journal = os.path.join(managed_loop_root(home), "journal")
+    root = os.path.join(journal, key)
+    return {
+        "journal": journal,
+        "root": root,
+        "runs_dir": os.path.join(root, "runs"),
+        "lock": os.path.join(root, "meta.lock"),
+    }
+
+
+def ensure_metadata_lock(home: str, paths: dict[str, str]) -> None:
+    # The leading steps of loop-journal's bootstrap_store, in its order, and
+    # nothing after the lock. Every step tolerates a concurrent creator. The
+    # journal's readers treat the result as a store with no runs (a root
+    # holding only meta.lock makes find-run exit 5), and its first write
+    # adds generation and runs.tsv.
+    loop_root = ensure_loop_root(home)
+    ensure_directory(paths["journal"])
+    no_symlink_from(loop_root, paths["root"])
+    ensure_directory(paths["root"])
+    no_symlink_from(paths["root"], paths["runs_dir"])
+    ensure_directory(paths["runs_dir"])
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(paths["lock"], flags, 0o600)
+    except FileExistsError:
+        pass
+    except OSError as error:
+        raise CalibrationError(
+            f"cannot open {paths['lock']}: {error}", EXIT_D4A
+        ) from error
+    else:
+        try:
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    validate_regular(paths["lock"])
+
+
+def acquire_metadata_lock(paths: dict[str, str], timeout: float) -> int:
+    no_symlink_from(paths["root"], paths["lock"])
+    validate_regular(paths["lock"])
+    descriptor = open_nofollow(paths["lock"], os.O_RDWR)
+    os.set_inheritable(descriptor, False)
+    deadline = time.monotonic() + timeout
+    delay = 0.01
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return descriptor
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                os.close(descriptor)
+                raise CalibrationError(
+                    "lock busy: another writer held the workspace metadata "
+                    f"lock for the whole {timeout:g} s wait; the store was "
+                    "not changed, retry",
+                    EXIT_LOCK_BUSY,
+                ) from None
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 0.1)
+
+
+class MetadataLock:
+    def __init__(self, home: str, key: str) -> None:
+        self.home = home
+        self.paths = metadata_lock_paths(home, key)
+        self.timeout = lock_timeout_sec()
+        self.fd = -1
+
+    def __enter__(self) -> "MetadataLock":
+        ensure_metadata_lock(self.home, self.paths)
+        self.fd = acquire_metadata_lock(self.paths, self.timeout)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self.fd >= 0:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(self.fd)
+            self.fd = -1
 
 
 def read_file_bytes(path: str) -> bytes:
@@ -632,26 +776,24 @@ def cmd_set(args: argparse.Namespace) -> int:
     key = workspace_key_for(canonical)
     path = store_path(home, key)
     try:
-        status, reason, rows = load_existing_store(path, canonical, key, home)
-    except CalibrationError as error:
-        fail(str(error), error.code)
-    if status == "rejected":
-        fail(
-            f"store rejected ({reason}); repair or remove the store file",
-            EXIT_STORE,
-        )
-    rows = dict(rows)
-    rows[args.key] = {
-        "key": args.key,
-        "value": args.value,
-        "scope": derived_scope(args.key, args.value),
-        "set_by": args.set_by,
-        "set_at": utc_iso(),
-        "provenance": provenance,
-    }
-    try:
-        bootstrap_store(home, path)
-        atomic_write(path, render_store(canonical, key, rows))
+        with MetadataLock(home, key):
+            status, reason, rows = load_existing_store(path, canonical, key, home)
+            if status == "rejected":
+                fail(
+                    f"store rejected ({reason}); repair or remove the store file",
+                    EXIT_STORE,
+                )
+            rows = dict(rows)
+            rows[args.key] = {
+                "key": args.key,
+                "value": args.value,
+                "scope": derived_scope(args.key, args.value),
+                "set_by": args.set_by,
+                "set_at": utc_iso(),
+                "provenance": provenance,
+            }
+            bootstrap_store(home, path)
+            atomic_write(path, render_store(canonical, key, rows))
     except CalibrationError as error:
         fail(str(error), error.code)
     return EXIT_OK
@@ -664,22 +806,23 @@ def cmd_unset(args: argparse.Namespace) -> int:
     home = home_dir()
     key = workspace_key_for(canonical)
     path = store_path(home, key)
-    try:
-        status, reason, rows = load_existing_store(path, canonical, key, home)
-    except CalibrationError as error:
-        fail(str(error), error.code)
-    if status == "rejected":
-        fail(
-            f"store rejected ({reason}); repair or remove the store file",
-            EXIT_STORE,
-        )
-    if status == "absent" or args.key not in rows:
+    if not os.path.lexists(path):
+        # No store: nothing to replace, so no lock and no directories.
         return EXIT_OK
-    rows = dict(rows)
-    del rows[args.key]
     try:
-        bootstrap_store(home, path)
-        atomic_write(path, render_store(canonical, key, rows))
+        with MetadataLock(home, key):
+            status, reason, rows = load_existing_store(path, canonical, key, home)
+            if status == "rejected":
+                fail(
+                    f"store rejected ({reason}); repair or remove the store file",
+                    EXIT_STORE,
+                )
+            if status == "absent" or args.key not in rows:
+                return EXIT_OK
+            rows = dict(rows)
+            del rows[args.key]
+            bootstrap_store(home, path)
+            atomic_write(path, render_store(canonical, key, rows))
     except CalibrationError as error:
         fail(str(error), error.code)
     return EXIT_OK
