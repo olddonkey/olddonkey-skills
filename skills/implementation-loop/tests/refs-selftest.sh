@@ -119,7 +119,7 @@ ANCHOR_REF = "refs/olddonkey-loop/anchor"
 
 sys.path.insert(0, LIB)
 sys.dont_write_bytecode = True
-from loopauth import eligibility, reduce, refs, vocabulary  # noqa: E402
+from loopauth import eligibility, recover, reduce, refs, vocabulary  # noqa: E402
 
 
 def emit(description, ok, detail=""):
@@ -264,27 +264,6 @@ def live_evidence():
     return pairs, fields, containers
 
 
-def live_classifications():
-    tree = ast.parse(open(os.path.join(LIB, "loopauth", "recover.py"), encoding="utf-8").read())
-    def outputs(value):
-        if isinstance(value, ast.Constant) and isinstance(value.value, str):
-            return {value.value}
-        if isinstance(value, ast.IfExp):
-            return outputs(value.body) | outputs(value.orelse)
-        raise AssertionError("unrecognized assigned classifier state expression")
-    values = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Plan":
-            value = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "state"), None)
-            if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                values.add(value.value)
-            elif not (isinstance(value, ast.Name) and value.id in ("state", "state_q")):
-                raise AssertionError("unrecognized classifier state expression")
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in ("state", "state_q") for t in node.targets):
-            values.update(outputs(node.value))
-    return values
-
-
 def main_static():
     # --- the frozen oracle
     emit("map: REFERENCE_MAP equals the frozen oracle (every kind: what it names, the 0a.1 fields that carry it, "
@@ -304,8 +283,31 @@ def main_static():
     emit("map: claimless plus handled events equals the live RECORDS vocabulary",
          set(refs.CLAIMLESS_EVENTS) | {"attempt.begin", "node.transition", "review.recorded", "reconciliation.result"}
          == set(vocabulary.RECORDS), sorted(vocabulary.RECORDS))
-    emit("map: classifications equal all live Plan/state/state_q literals",
-         live_classifications() == set(refs.CLASSIFICATIONS), sorted(live_classifications()))
+    emit("map: classifications equal the classifier-owned recover.STATES",
+         set(recover.STATES) == set(refs.CLASSIFICATIONS), recover.STATES)
+    for state in recover.STATES:
+        emit(f"plan vocabulary: the listed state {state} is accepted", recover.Plan(state).state == state)
+
+    def attribute_state():
+        plan = recover.Plan("committed")
+        try:
+            plan.state = "store-migrating"
+        finally:
+            assert plan.state == "committed", "a refused assignment changed the plan"
+
+    def helper_state():
+        def _mk(state, **kw):
+            return recover.Plan(state, **kw)
+        return _mk("store-migrating")
+
+    def annotated_state():
+        state: str = "store-migrating"
+        return recover.Plan(state)
+
+    for label, call in (("plan.state assignment", attribute_state), ("helper argument", helper_state),
+                        ("annotated assignment", annotated_state)):
+        ok, code = refused(call, "unclassified-store")
+        emit(f"plan vocabulary negative control: {label} cannot introduce store-migrating", ok, code)
     # --- exactly once, against the live 0a.1 vocabulary
     for name in ("REFERENCE_MAP", "FIELD_MAP"):
         keys = literal_keys(name)
@@ -945,6 +947,40 @@ def child_observation():
         tools.cleanup()
 
 
+def child_remote_observation():
+    # The fixture has a complete rotation frame and its intent, but the old
+    # remote tip. Stop recovery immediately after push, before intent removal:
+    # ls-remote returns the old tip and fetch sees the new one, with no local
+    # snapshot change. The second attempt must read that remote successfully.
+    home, url = ARGS
+    os.environ["HOME"] = home
+    os.environ["LOOP_AUTHORITY_TEST"] = "1"
+    from loopauth import anchor, store, tools
+    original_remote, original_classify = anchor.ls_remote, recover.classify
+    pushed, attempts = [], []
+
+    def interleave(*args, **kwargs):
+        tip = original_remote(*args, **kwargs)
+        if not pushed:
+            pushed.append(run_child(home, url, "recover", "after-push"))
+        return tip
+
+    def classify():
+        plan = original_classify()
+        attempts.append({"state": plan.state, "remote_read": plan.remote_read})
+        return plan
+
+    anchor.ls_remote, recover.classify = interleave, classify
+    try:
+        tools.establish_scratch()
+        before = store.snapshot_digest()
+        result = refs.observe_store()
+        print(json.dumps({"store": result, "pushed": pushed, "attempts": attempts,
+                          "local_unchanged": before == store.snapshot_digest()}))
+    finally:
+        tools.cleanup()
+
+
 def run_child(home, url, command, point="-", *extra):
     result = subprocess.run([sys.executable, os.path.realpath(__file__), "child", LIB, TMP, home, url, command, point,
                              *extra], capture_output=True, timeout=600)
@@ -1175,6 +1211,38 @@ def main_command():
     emit("refs [schema-1 run]: the store is still reported (current) and nothing changed",
          report.get("store", {}).get("state") == "current"
          and before == [tree(journal_path(home)), tree(auth_path(home)), tree(remote)])
+    # --- a persistent local permission fault must surface like status
+    with open(auth_path(home, "active"), encoding="utf-8") as handle:
+        active = json.load(handle)
+    key_dir = auth_path(home, "stores", active["store_id"], "keys")
+    key_mode = stat.S_IMODE(os.stat(key_dir).st_mode)
+    before = [tree(journal_path(home)), tree(auth_path(home)), tree(remote)]
+    os.chmod(key_dir, 0o600)
+    try:
+        denied_refs = authority(home, "refs", "--workspace", ws_a, "--run", run_a)
+        denied_status = authority(home, "status")
+        emit("observation: stable keys mode 0600 surfaces the same environment error as status",
+             denied_refs["rc"] == denied_status["rc"] == 9
+             and "error: environment:" in denied_refs["stderr"]
+             and "Permission denied" in denied_refs["stderr"]
+             and "Permission denied" in denied_status["stderr"]
+             and denied_refs["stdout"] == b"" and "Traceback" not in denied_refs["stderr"],
+             (denied_refs, denied_status))
+    finally:
+        os.chmod(key_dir, key_mode)
+    emit("observation: the permission failure changes no journal, authority, or remote bytes",
+         before == [tree(journal_path(home)), tree(auth_path(home)), tree(remote)])
+    replay_home, _replay_remote, replay_url = made["replay"]
+    probe = subprocess.run([sys.executable, os.path.realpath(__file__), "remote-observation", LIB, TMP,
+                            replay_home, replay_url], capture_output=True, timeout=120)
+    observation = json.loads(probe.stdout) if probe.returncode == 0 else {}
+    emit("observation: a real push between ls-remote and fetch with identical local digests is retried to pending",
+         probe.returncode == 0 and observation.get("local_unchanged") is True
+         and observation.get("store", {}).get("reason") == "pending"
+         and observation.get("pushed", [[0]])[0][0] == 137
+         and observation.get("attempts") == [{"state": "pending", "remote_read": False},
+                                            {"state": "needs-recovery", "remote_read": True}],
+         (probe.returncode, observation, probe.stderr[-300:]))
     # --- a forced real interleaving plus ordinary concurrent ceremonies
     probe = subprocess.run([sys.executable, os.path.realpath(__file__), "observation", LIB, TMP, home, _url],
                            capture_output=True, timeout=120)
@@ -1273,7 +1341,8 @@ def run(function):
 
 
 {"static": lambda: run(main_static), "claims": lambda: run(main_claims), "command": lambda: run(main_command),
- "child": child_ceremony, "observation": child_observation}[MODE]()
+ "child": child_ceremony, "observation": child_observation,
+ "remote-observation": child_remote_observation}[MODE]()
 PY
 
 for mode in static claims command; do

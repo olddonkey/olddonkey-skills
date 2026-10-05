@@ -587,7 +587,7 @@ READ_ONLY_IMPORTS = {
 # The authority store's modules, and the one name of them a read-only module
 # may use: 0a.2's read-only classification (what `loop-authority status` runs).
 STORE_MODULES = {"store", "tools", "ceremony", "registry", "anchor", "keys", "records", "frame", "recover"}
-READ_ONLY_STORE_NAMES = {"recover": {"classify", "classify_stable"}}
+READ_ONLY_STORE_NAMES = {"recover": {"classify_stable"}}
 # The os names a read-only module may use: reads only (os.open's flags are
 # the general scan's READ_FLAGS rule).
 READ_ONLY_OS = {"path", "environ", "getuid", "lstat", "fstat", "stat_result", "open", "read", "close", "sep",
@@ -890,6 +890,8 @@ READ_ONLY_PLANTS = {
                    "    return store.write_quarantine(token, store_id=store_id, data=b\"x\")\n"),
     "refs.py runs recovery (recover.recover)": (
         "refs.py", "def _bypass_recover():\n    return recover.recover()\n"),
+    "refs.py bypasses stable observation (recover.classify)": (
+        "refs.py", "def _bypass_classify():\n    return recover.classify()\n"),
     "refs.py takes the authority reader lock": (
         "refs.py", "def _bypass_lock():\n    with store.ReaderLock():\n        return recover.classify()\n"),
     "journal_read.py runs the anchor push": (
@@ -1044,12 +1046,13 @@ def main_static():
     # --- 0a.3: refs.py, eligibility.py, and journal_read.py are read-only
     direct, paths, reached = read_only_scan(LIB)
     emit("reachability (0a.3): refs.py, eligibility.py, and journal_read.py exist and pass the direct read-only "
-         "rules (import allowlists; of the store's code only recover.classify; os reads only; no lock; no module "
+         "rules (import allowlists; of the store's code only recover.classify_stable; os reads only; no lock; no module "
          "alias; no dynamic attribute access)", not direct, direct[:6])
     emit("reachability (0a.3): no call path from refs.py, eligibility.py, or journal_read.py reaches a store sink, a "
          "sink helper, a token minter, a low-level write, the layout or writer lock, or a sink command (transitive "
          "AST call graph)", not paths, paths[:3])
-    traced = {"recover.classify", "recover.observe", "recover._read_remote", "anchor.ls_remote", "tools.run"}
+    traced = {"recover.classify_stable", "recover.classify", "recover.observe", "recover._read_remote",
+              "anchor.ls_remote", "tools.run"}
     emit("reachability (0a.3): the call graph is not vacuous -- it follows refs into 0a.2's read-only classification "
          "and the read commands it runs", traced <= reached, sorted(traced - reached))
     for label, (filename, code) in READ_ONLY_PLANTS.items():

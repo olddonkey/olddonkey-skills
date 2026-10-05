@@ -121,6 +121,8 @@ def main(argv: list[str]) -> int:
             fail("usage", "only revoke takes --epoch", EXIT_USAGE)
     try:
         if args.command == "refs":
+            if sys.stdout is None:
+                fail("output", "refs requires an open stdout", EXIT_ENV)
             if os.environ.get("LOOP_AUTHORITY_CRASH_AT") is not None and tools.test_mode():
                 fail("crash-point", "refs has no crash points", store.EXIT_REFUSED)
             # Refuse invalid journals/claims before creating scratch directories.

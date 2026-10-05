@@ -24,6 +24,11 @@ import os
 
 from . import anchor, canonical, frame, keys, records, registry, store, tools
 
+# The closed classification vocabulary. Plan validates every state assignment;
+# reference readers compare their mapping with this list, not source syntax.
+STATES = ("committed", "none", "pending", "needs-recovery", "genesis-pending",
+          "regenesis-pending", "quarantined", "regenesis-quarantined", "genesis-invalid",
+          "anchor-mismatch", "genesis-quarantined", "active-invalid", "regenesis-invalid")
 TERMINAL_STATES = ("genesis-invalid", "anchor-mismatch", "genesis-quarantined")
 INTENT_KEYS = ("seq", "offset", "length", "digest", "expected_parent", "anchor_json",
                "anchor_commit", "frame_length", "frame_b64")
@@ -508,7 +513,7 @@ def verify_pointer_for(view: View, active: dict, prev: dict | None, sig: str) ->
 class Plan:
     def __init__(self, state: str, *, row: str | None = None, table: str = "", detail: str = "",
                  view: View | None = None, **params: object) -> None:
-        self.state = state
+        self.state = state  # the setter checks STATES, including during construction
         self.row = row
         self.table = table
         self.detail = detail
@@ -523,6 +528,17 @@ class Plan:
         self.lineage_remote: str | None = None
         self.named: set[str] = set()
         self.steps: list | None = None
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @state.setter
+    def state(self, state: str) -> None:
+        if state not in STATES:
+            raise store.AuthorityError("unclassified-store", f"unknown plan state {state!r}",
+                                       store.EXIT_INVALID)
+        self._state = state
 
     def summary(self) -> dict:
         view = self.view
@@ -1475,18 +1491,44 @@ def recover(max_steps: int = 12) -> Plan:
 def classify_stable() -> Plan | None:
     """Observe without a lock, accepting only an unchanged local snapshot.
 
-    A ceremony may replace or remove files between reads. Bound the retries;
-    callers must report unavailable/changing rather than a transient verdict.
+    A ceremony may replace or remove files between reads. Retry exceptions
+    only when the snapshot changed or could not be compared; a stable fault
+    surfaces unchanged. Three attempts bound both local churn and a first
+    pending read whose remote may have moved between ls-remote and fetch.
     """
-    for _ in range(3):
+    compared = False
+    last_error: Exception | None = None
+    for attempt in range(3):
         try:
             before = store.snapshot_digest()
-            plan = classify()
-            after = store.snapshot_digest()
-        except OSError:
+        except Exception as error:
+            last_error = error
             continue
+        try:
+            plan = classify()
+        except Exception as error:
+            last_error = error
+            try:
+                after = store.snapshot_digest()
+            except Exception as digest_error:
+                last_error = digest_error
+                continue
+            compared = True
+            if before == after:
+                raise
+            continue
+        try:
+            after = store.snapshot_digest()
+        except Exception as error:
+            last_error = error
+            continue
+        compared = True
         if before == after:
+            if attempt == 0 and plan.state == "pending" and not plan.remote_read:
+                continue
             return plan
+    if not compared and last_error is not None:
+        raise last_error
     return None
 
 

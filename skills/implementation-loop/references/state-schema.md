@@ -1045,14 +1045,17 @@ left out and reported as `torn_tail_bytes`, a mid-file invalid line fails
 closed), reduces it with 0a.1's reducer (unchanged), classifies every claim
 of every record the reducer accepted (`refs.py`), lays the outcomes over the
 reducer's guards (`eligibility.py`, pure), and reads the store only through
-0a.2's read-only classification (`recover.classify`, what `status` runs, but
-without its reader lock). It prints one canonical JSON object -- `run`,
+0a.2's read-only classification (`recover.classify_stable`, wrapping the
+classifier that `status` runs, without its reader lock). It prints one canonical
+JSON object -- `run`,
 `workspace`, `workspace_key`, `vocabulary`, `journal` (`lines`,
 `torn_tail_bytes`, `degraded`, `unknown_schema`, the reducer's `rejected`),
 `store`, `claims`, `nodes`, `completion_eligible` -- and exits 0 whenever it
 prints it; 2 for a workspace that is not a directory, a malformed run id, or
-a run with no segment; 12 for a journal it cannot trust or a claim the map
-does not list. It admits no row and writes nothing to the journal store, the
+a run with no segment; 9 for an environment or output error (including closed
+stdout); 12 for a journal it cannot trust or a claim the map does not list.
+Stable classifier faults retain their coded errors, as with `status`.
+It admits no row and writes nothing to the journal store, the
 authority directory, or the remote (its only writes are 0a.2's process
 scratch under `$HOME/.cache/olddonkey-loop`, removed on exit); it takes
 neither the authority lock nor the journal's, so no writer waits on it; and
@@ -1072,7 +1075,8 @@ Two dimensions, never mixed:
   they verify (A2.1: units 7, 8, 9, 12).
 - **Store state.** `current` (committed: anchored, and not pending,
   quarantined, or in a bootstrap terminal state) or `unavailable` with its
-  reason: `absent`, `pending`, `remote-unreachable` (a pending state whose
+  reason: `absent`, `pending`, `changing` (no stable observation within the
+  attempt bound), `remote-unreachable` (a pending state whose
   remote could not be read), `quarantined` (also for
   `regenesis-quarantined`), `genesis-invalid`, `anchor-mismatch`,
   `genesis-quarantined`, and the classifier's two other fail-closed states
@@ -1120,14 +1124,23 @@ derived from the guards, so a node with no reference at all is ineligible
 too.
 
 The lock-free store observation compares a local-state digest before and after
-classification, retrying at most three times on a changed snapshot or `OSError`.
-If no stable read is obtained it reports `unavailable` with reason `changing`
-and `current_authorization: false`, rather than publishing a transient quarantine
-or a traceback. This is an observation, not synchronization: a later ceremony
-can still change the store after the report. It never acquires the writer lock.
+classification, making at most three attempts. Any classification exception is
+retried if the after-digest differs or cannot be taken; identical digests
+re-raise the exception. A first-attempt `pending` plan whose remote read failed
+is retried too, since the remote may have moved between `ls-remote` and `fetch`.
+If no attempt produced two digests, the last error is re-raised. Otherwise, if
+no stable read is obtained it reports `unavailable` with reason `changing` and
+`current_authorization: false`. This is an observation, not synchronization:
+a later ceremony can still change the store after the report. It never acquires
+the writer lock.
 
 The refs command validates the journal and claims before establishing scratch
 space. Invalid input leaves no new cache directory. Valid observations may leave
-the parent `$HOME/.cache/olddonkey-loop/tmp` directory after their scratch entries
+the parents `$HOME/.cache/olddonkey-loop/tmp` and
+`$HOME/.cache/olddonkey-loop/anchor-scratch` after their scratch entries
 are cleaned; “read-only” refers to authority, journal and remote contents. The
 canonical report is written as UTF-8 bytes, independent of stdout's locale codec.
+
+The classifier owns the closed `recover.STATES` tuple. `Plan` checks it during
+construction and later state assignments; the refs selftest compares the keys
+of `refs.CLASSIFICATIONS` directly with that tuple.

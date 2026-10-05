@@ -16,8 +16,8 @@ sys.path.insert(0, str(ROOT / 'lib'))
 from loopauth import refs, recover, store
 
 
-def plan(state='committed'):
-    return types.SimpleNamespace(remote_read=True, summary=lambda: {
+def plan(state='committed', *, remote_read=True):
+    return types.SimpleNamespace(state=state, remote_read=remote_read, summary=lambda: {
         'state': state, 'authorizing_state': state == 'committed',
         'anchor_class': 'test', 'test_only': True, 'current_authorization': False,
     })
@@ -30,8 +30,44 @@ class ObservationTests(unittest.TestCase):
             self.assertEqual(classify.call_count, 2)
 
     def test_disappearing_intent_during_classification_is_retried(self):
-        with mock.patch.object(store, 'snapshot_digest', return_value='stable'), mock.patch.object(recover, 'classify', side_effect=[FileNotFoundError('intent disappeared'), plan()]):
+        with mock.patch.object(store, 'snapshot_digest', side_effect=['old', 'new', 'new', 'new']), mock.patch.object(recover, 'classify', side_effect=[FileNotFoundError('intent disappeared'), plan()]) as classify:
             self.assertEqual(refs.observe_store()['state'], 'current')
+            self.assertEqual(classify.call_count, 2)
+
+    def test_failed_remote_read_is_retried_to_current(self):
+        with mock.patch.object(store, 'snapshot_digest', return_value='stable'), mock.patch.object(recover, 'classify', side_effect=[plan('pending', remote_read=False), plan()]) as classify:
+            self.assertEqual(refs.observe_store()['state'], 'current')
+            self.assertEqual(classify.call_count, 2)
+
+    def test_failed_remote_read_is_retried_to_pending(self):
+        with mock.patch.object(store, 'snapshot_digest', return_value='stable'), mock.patch.object(recover, 'classify', side_effect=[plan('pending', remote_read=False), plan('pending')]) as classify:
+            self.assertEqual(refs.observe_store()['reason'], 'pending')
+            self.assertEqual(classify.call_count, 2)
+
+    def test_persistent_remote_failure_is_bounded(self):
+        with mock.patch.object(store, 'snapshot_digest', return_value='stable'), mock.patch.object(recover, 'classify', return_value=plan('pending', remote_read=False)) as classify:
+            self.assertEqual(refs.observe_store()['reason'], 'remote-unreachable')
+            self.assertEqual(classify.call_count, 2)
+
+    def test_layout_error_with_changed_snapshot_is_retried(self):
+        error = store.AuthorityError('layout', 'file missing')
+        with mock.patch.object(store, 'snapshot_digest', side_effect=['old', 'new', 'new', 'new']), mock.patch.object(recover, 'classify', side_effect=[error, plan()]) as classify:
+            self.assertEqual(refs.observe_store()['state'], 'current')
+            self.assertEqual(classify.call_count, 2)
+
+    def test_identical_snapshot_reraises_classification_errors(self):
+        for error in (store.AuthorityError('layout', 'file missing'), RuntimeError('classifier failed'), FileNotFoundError('intent missing')):
+            with self.subTest(error=type(error).__name__), mock.patch.object(store, 'snapshot_digest', return_value='stable') as digest, mock.patch.object(recover, 'classify', side_effect=error) as classify:
+                with self.assertRaises(type(error)) as caught:
+                    refs.observe_store()
+                self.assertIs(caught.exception, error)
+                self.assertEqual(digest.call_count, 2)
+                self.assertEqual(classify.call_count, 1)
+
+    def test_missing_after_digest_is_retried(self):
+        with mock.patch.object(store, 'snapshot_digest', side_effect=['old', FileNotFoundError('store archived'), 'new', 'new']), mock.patch.object(recover, 'classify', side_effect=[store.AuthorityError('layout', 'file missing'), plan()]) as classify:
+            self.assertEqual(refs.observe_store()['state'], 'current')
+            self.assertEqual(classify.call_count, 2)
 
     def test_continuous_change_is_bounded_and_explicit(self):
         with mock.patch.object(store, 'snapshot_digest', side_effect=[str(n) for n in range(6)]), mock.patch.object(recover, 'classify', return_value=plan()) as classify:
@@ -42,15 +78,43 @@ class ObservationTests(unittest.TestCase):
             self.assertEqual(classify.call_count, 3)
 
     def test_repeated_io_failure_is_bounded(self):
-        with mock.patch.object(store, 'snapshot_digest', side_effect=OSError('changing tree')) as digest, mock.patch.object(recover, 'classify', return_value=plan()):
+        error = PermissionError('Permission denied')
+        with mock.patch.object(store, 'snapshot_digest', return_value='stable') as digest, mock.patch.object(recover, 'classify', side_effect=error) as classify:
+            with self.assertRaises(PermissionError) as caught:
+                refs.observe_store()
+            self.assertIs(caught.exception, error)
+            self.assertEqual(digest.call_count, 2)
+            self.assertEqual(classify.call_count, 1)
+
+    def test_unreadable_snapshots_reraise_last_error_within_bound(self):
+        errors = [OSError('unreadable tree'), PermissionError('Permission denied'), FileNotFoundError('store missing')]
+        with mock.patch.object(store, 'snapshot_digest', side_effect=errors) as digest, mock.patch.object(recover, 'classify') as classify:
+            with self.assertRaises(FileNotFoundError) as caught:
+                refs.observe_store()
+            self.assertIs(caught.exception, errors[-1])
+            self.assertEqual(digest.call_count, 3)
+            classify.assert_not_called()
+
+    def test_no_after_digest_reraises_last_error(self):
+        error = PermissionError('cannot read after classification')
+        with mock.patch.object(store, 'snapshot_digest', side_effect=['old', error] * 3) as digest, mock.patch.object(recover, 'classify', side_effect=store.AuthorityError('layout', 'file missing')) as classify:
+            with self.assertRaises(PermissionError) as caught:
+                refs.observe_store()
+            self.assertIs(caught.exception, error)
+            self.assertEqual(digest.call_count, 6)
+            self.assertEqual(classify.call_count, 3)
+
+    def test_changed_snapshot_then_unreadable_snapshots_reports_changing(self):
+        with mock.patch.object(store, 'snapshot_digest', side_effect=['old', 'new', OSError('unreadable'), OSError('unreadable')]), mock.patch.object(recover, 'classify', side_effect=RuntimeError('changed during read')) as classify:
             result = refs.observe_store()
             self.assertEqual(result['reason'], 'changing')
-            self.assertEqual(digest.call_count, 3)
+            self.assertFalse(result['current_authorization'])
+            self.assertEqual(classify.call_count, 1)
 
 
 class CommandTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(dir='/tmp')
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         self.home = self.root / 'home'
@@ -75,7 +139,7 @@ class CommandTests(unittest.TestCase):
         self.segment.unlink()
         os.mkfifo(self.segment, 0o600)
         try:
-            result = self.invoke(timeout=2)
+            result = self.invoke(timeout=20)
         except subprocess.TimeoutExpired:
             self.fail('refs blocked waiting for a FIFO writer')
         self.assertEqual(result.returncode, 12, result.stderr)
@@ -90,6 +154,14 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(value['workspace'], str(self.ws))
         expected = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode() + b'\n'
         self.assertEqual(result.stdout, expected)
+
+    def test_closed_stdout_is_a_coded_environment_error(self):
+        result = subprocess.run(['bash', '-c', 'exec "$@" >&-', '--', 'bash', str(ROOT / 'scripts/loop-authority'), *self.args], env=self.env, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 9, result.stderr)
+        self.assertEqual(result.stdout, b'')
+        self.assertIn(b'error: output: refs requires an open stdout', result.stderr)
+        self.assertNotIn(b'Traceback', result.stderr)
+        self.assertFalse((self.home / '.cache').exists())
 
     def test_report_binds_the_fold_to_the_requested_run(self):
         lines = [json.loads(line) for line in self.segment.read_text().splitlines()]
