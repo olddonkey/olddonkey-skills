@@ -89,7 +89,7 @@ run):
    and grok 63. Contract-negative expects
    `contract-negative: PASS (42 checks; 21 broken adapters rejected)`.
 9. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
-   `scripts/loop-evidence` record card) — expect `selftest: PASS (152 checks)`.
+   `scripts/loop-evidence` record card) — expect `selftest: PASS (157 checks)`.
 10. `bash skills/implementation-loop/tests/coordinator-selftest.sh` — expect
     `selftest: PASS (735 checks)`. It uses only local temporary repositories
     and backend CLI stubs, and never calls a real agent. `COORD_SELFTEST_JOBS`
