@@ -127,7 +127,7 @@ run):
    Ed25519 keys from the host `ssh-keygen`, crash injection at every protocol
    cut, and the independent verifier; needs `ssh-keygen` with `-Y`, `git`,
    `ssh`, and `openssl`, and runs its cases in parallel) — expect
-   `selftest: PASS (1916 checks)`, including the real
+   `selftest: PASS (1920 checks)`, including the real
    crashes derived from every command's `CRASH_APPLICABLE` set. The
    "crash matrix coverage check" section tests missing, duplicate, and
    miscredited cuts independently of section order. For review-only work,
