@@ -3033,6 +3033,7 @@ expect_status 0 "fixture: open codex dispatch"
 KEY="$(workspace_key "$WS")"
 CAL_REL=".config/olddonkey-loop/calibration/${KEY}.tsv"
 CAL_FILE="$HOME/$CAL_REL"
+META_LOCK="$HOME/.config/olddonkey-loop/journal/$KEY/meta.lock"
 CODEX_DIR="$HOME/.config/olddonkey-loop/codex/$KEY/$DISPATCH_ID"
 mkdir -p "$CODEX_DIR"
 python3 - "$CODEX_DIR/transcript.log" "$HOSTILE" <<'PY'
@@ -3101,7 +3102,10 @@ CASE_STDOUT="$TMP_ROOT/console.stdout"
 CASE_STDERR="$TMP_ROOT/console.stderr"
 : >"$CASE_STDOUT"
 : >"$CASE_STDERR"
-"$CONSOLE" --workspace "$WS" >"$CASE_STDOUT" 2>"$CASE_STDERR" &
+# The short metadata-lock wait reaches loop-calibration through the console
+# and keeps the lock-busy dial case quick; nothing else contends for it.
+env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=0.5 \
+  "$CONSOLE" --workspace "$WS" >"$CASE_STDOUT" 2>"$CASE_STDERR" &
 CONSOLE_PID=$!
 if wait_for_url "$CASE_STDOUT"; then
   pass "startup: printed a loopback URL"
@@ -3136,8 +3140,9 @@ if [[ -n "$PORT" && -n "$TOKEN" ]]; then
   HTTP_TAP="$TMP_ROOT/http.tap"
   if python3 - "$PORT" "$TOKEN" "$RUN_ID" "$DISPATCH_ID" "$HOSTILE" "$WS_REAL" \
     "$HOSTILE_ID" "$UNKNOWN_ID" "$HL_ID" "$SL_ID" "$GROK_ID" "$TRANSCRIPT_REAL" \
-    "$CAL_FILE" \
+    "$CAL_FILE" "$META_LOCK" \
     >"$HTTP_TAP" 2>"$TMP_ROOT/http.err" <<'PY'
+import fcntl
 import http.client
 import json
 import os
@@ -3157,6 +3162,7 @@ symlink_id = sys.argv[10]
 grok_id = sys.argv[11]
 transcript_real = sys.argv[12]
 cal_path = sys.argv[13]
+meta_lock_path = sys.argv[14]
 host_ok = "127.0.0.1:%d" % port
 origin_ok = "http://127.0.0.1:%d" % port
 csp = (
@@ -3981,6 +3987,62 @@ def dials_post_invalid():
         raise RuntimeError("invalid post mutated the store")
 
 
+def _post_dial(path, body):
+    return capture(
+        "POST",
+        path,
+        body=json.dumps(body),
+        headers=auth_headers(
+            extra={"Origin": origin_ok, "Content-Type": "application/json"}
+        ),
+    )
+
+
+def dials_lock_busy():
+    if not cookie or not csrf:
+        raise RuntimeError("no session")
+    before = store_bytes()
+    if b"backend\tgrok\t" not in before:
+        raise RuntimeError("expected a stored backend row, got %r" % before)
+    descriptor = os.open(meta_lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for path, body in (
+            ("/api/dials", {"key": "gate", "value": "strict"}),
+            ("/api/dials/reset", {"key": "backend"}),
+        ):
+            status, raw, headers = _post_dial(path, body)
+            if status != 503:
+                raise RuntimeError("%s under a held lock: status %s body %r" % (path, status, raw))
+            require_security(headers, "lock-busy " + path)
+            err = json.loads(raw.decode("utf-8")).get("error") or ""
+            if "lock busy" not in err:
+                raise RuntimeError("%s 503 message %r" % (path, err))
+            if store_bytes() != before:
+                raise RuntimeError("%s under a held lock mutated the store" % path)
+        status, raw, headers = capture("GET", "/api/dials", headers=auth_headers())
+        if status != 200:
+            raise RuntimeError("GET under a held lock: status %s body %r" % (status, raw))
+        row = (json.loads(raw.decode("utf-8")).get("dials") or {}).get("backend") or {}
+        if row.get("value") != "grok" or row.get("source") != "store":
+            raise RuntimeError("GET under a held lock: backend %r" % row)
+    finally:
+        os.close(descriptor)
+
+
+def dials_lock_released():
+    if not cookie or not csrf:
+        raise RuntimeError("no session")
+    status, raw, headers = _post_dial("/api/dials", {"key": "gate", "value": "strict"})
+    if status != 200:
+        raise RuntimeError("post after release: status %s body %r" % (status, raw))
+    dials = json.loads(raw.decode("utf-8")).get("dials") or {}
+    for key, value in (("gate", "strict"), ("backend", "grok")):
+        row = dials.get(key) or {}
+        if row.get("value") != value or row.get("source") != "store":
+            raise RuntimeError("after release %s is %r" % (key, row))
+
+
 def dials_reset():
     if not cookie or not csrf:
         raise RuntimeError("no session")
@@ -4084,6 +4146,8 @@ check("dials: POST /api/dials without CSRF is 403", dials_post_missing_csrf)
 check("dials: POST /api/dials with foreign Origin is 403", dials_post_foreign_origin)
 check("dials: POST /api/dials writes set_by=console on disk", dials_post_ok)
 check("dials: POST /api/dials invalid key/value is 400 and unchanged", dials_post_invalid)
+check("dials: a held meta.lock makes POST /api/dials and /api/dials/reset 503 and unchanged; GET still 200", dials_lock_busy)
+check("dials: the refused POST /api/dials succeeds once meta.lock is released", dials_lock_released)
 check("dials: POST /api/dials/reset removes the row", dials_reset)
 check("dials: rejected store GET is rejected; POST is 409 and unchanged", dials_rejected)
 PY

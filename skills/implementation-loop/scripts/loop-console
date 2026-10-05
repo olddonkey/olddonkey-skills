@@ -53,6 +53,9 @@ EXIT_STORE = 6
 
 OWNER = os.getuid()
 TAIL_BYTES = 64 * 1024
+# Longer than loop-calibration's metadata-lock wait (5 s), so a busy lock
+# comes back as its exit 3 instead of a killed helper.
+CALIBRATION_WRITE_TIMEOUT_SEC = 15
 CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; "
     "connect-src 'self'; frame-ancestors 'none'; form-action 'none'; "
@@ -108,7 +111,10 @@ not apply the Origin or Sec-Fetch-Site restriction.
 POST /api/dials and /api/dials/reset are mutations: they require the
 same session+CSRF checks plus an exact Origin match (already required
 for every POST). The console writes no calibration bytes itself; it
-shells out to loop-calibration with --set-by console.
+shells out to loop-calibration with --set-by console. loop-calibration
+serializes each write on the workspace metadata lock (meta.lock); if
+that lock stays busy for its whole bounded wait the write is refused
+with 503 and the store is unchanged.
 
 State directory (D4a):
   $HOME/.config/olddonkey-loop/console/<workspace-key>/
@@ -622,14 +628,14 @@ def helper_stderr(completed: subprocess.CompletedProcess[bytes]) -> str:
 
 
 def run_loop_calibration(
-    calibration: str, argv: list[str]
+    calibration: str, argv: list[str], timeout: float = 5
 ) -> tuple[subprocess.CompletedProcess[bytes] | None, int, str | None]:
     try:
         completed = subprocess.run(
             [calibration, *argv],
             check=False,
             capture_output=True,
-            timeout=5,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return None, 504, "loop-calibration timed out"
@@ -645,6 +651,8 @@ def parse_calibration_document(
         message = helper_stderr(completed) or "loop-calibration failed"
         if completed.returncode == 2:
             return None, 400, message
+        if completed.returncode == 3:
+            return None, 503, message
         if completed.returncode == 6:
             if "repair or remove" not in message:
                 message = (
@@ -1116,7 +1124,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
                 return
             argv.extend(["--provenance", provenance])
         completed, status, run_error = run_loop_calibration(
-            self.server.state.calibration, argv
+            self.server.state.calibration, argv, CALIBRATION_WRITE_TIMEOUT_SEC
         )
         if completed is None:
             self._json_error(status, run_error or "loop-calibration failed")
@@ -1156,7 +1164,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             "console",
         ]
         completed, status, run_error = run_loop_calibration(
-            self.server.state.calibration, argv
+            self.server.state.calibration, argv, CALIBRATION_WRITE_TIMEOUT_SEC
         )
         if completed is None:
             self._json_error(status, run_error or "loop-calibration failed")
