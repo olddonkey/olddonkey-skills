@@ -21,7 +21,7 @@ import sys
 
 BINARY_DIRS = ("/usr/bin", "/opt/homebrew/bin", "/usr/local/bin")
 ANCHOR_REF = "refs/olddonkey-loop/anchor"
-VERIFY_REF = "refs/verify/anchor"
+VERIFY_REF = "refs/readback/anchor"
 POINTER_NS = "olddonkey-loop.anchor.pointer.v1"
 IDENTITY = "olddonkey-loop <anchor@olddonkey-loop.invalid>"
 TYPES = (
@@ -41,7 +41,7 @@ HEADER = re.compile(rb"^OLF1 ([1-9][0-9]{0,15}) ([a-z][a-z0-9.-]{0,63}) (0|[1-9]
                     rb"(sha256:[0-9a-f]{64})$")
 MAX_INT = 2**53 - 1
 FOREVER = 0xFFFFFFFFFFFFFFFF
-EXIT = {"committed": 0, "none": 0, "pending": 5, "quarantined": 6, "terminal": 7, "env": 9,
+EXIT = {"committed": 0, "pending": 5, "quarantined": 6, "terminal": 7, "env": 9,
         "invalid": 12}
 TERMINAL = ("genesis-invalid", "anchor-mismatch", "genesis-quarantined")
 # The activation boundary (A2.1, A2.6): registry versions in order, and the
@@ -307,7 +307,7 @@ def cert_rules(cert: dict, record_type: str, epoch: int, root_pub: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# The runner: allowlisted environment, three git forms, ssh-keygen
+# The runner: allowlisted environment, four git forms, ssh-keygen
 # ---------------------------------------------------------------------------
 
 class Runner:
@@ -417,19 +417,26 @@ class Runner:
             assert self.remote is not None
             return prefix + self.transport() + ["-C", self.repo, "fetch", "--no-tags",
                                                 "--no-write-fetch-head", self.remote["url"],
-                                                f"+{ANCHOR_REF}:{VERIFY_REF}"]
+                                                "+refs/olddonkey-loop/*:refs/readback/*"]
+        if form == "ls-remote":
+            assert self.remote is not None
+            return prefix + self.transport() + ["-C", self.repo, "ls-remote",
+                                                self.remote["url"], ANCHOR_REF]
         if form == "cat-file":
             if arg not in ("-t", "-p") or not OID.fullmatch(oid):
                 raise EnvError("cat-file form refused")
             return prefix + ["-C", self.repo, "cat-file", arg, oid]
-        raise EnvError(f"git form outside the three allowed: {form}")
+        raise EnvError(f"git form outside the four allowed: {form}")
 
-    def run(self, argv: list[str], *, git: bool, stdin: bytes = b"") -> subprocess.CompletedProcess:
+    def run(self, argv: list[str], *, git: bool, stdin: bytes = b"", form: str = "") -> subprocess.CompletedProcess:
         try:
             return subprocess.run(argv, input=stdin, capture_output=True, env=self.env(git),
-                                  cwd=self.temp, timeout=120, check=False, close_fds=True)
+                                  cwd=self.temp, timeout=120 if form in ("fetch", "ls-remote") else 60,
+                                  check=False, close_fds=True)
         except subprocess.TimeoutExpired as error:
-            raise Unreachable("remote command timed out") from error
+            if form in ("fetch", "ls-remote"):
+                raise Unreachable(f"git {form} timed out") from error
+            raise EnvError("local command timed out") from error
 
     def init_repo(self) -> None:
         self.repo = os.path.join(self.temp, "anchor.git")
@@ -447,13 +454,27 @@ class Runner:
     def fetch(self) -> str | None:
         """The fetched anchor tip, None when the ref is absent; Unreachable
         when the remote cannot be read."""
-        result = self.run(self.git_argv("fetch"), git=True)
+        observed = self.run(self.git_argv("ls-remote"), git=True, form="ls-remote")
+        if observed.returncode != 0:
+            raise Unreachable(observed.stderr.decode("utf-8", "replace").strip()[:300])
+        matches = []
+        for line in observed.stdout.decode("ascii", "replace").splitlines():
+            if not line:
+                continue
+            oid, tab, ref = line.partition("\t")
+            if not tab or not ref.startswith("refs/") or not OID.fullmatch(oid):
+                raise Unreachable("ls-remote returned a malformed ref line")
+            if ref == ANCHOR_REF:
+                matches.append(oid)
+        if len(matches) > 1:
+            raise Unreachable("ls-remote returned more than one exact anchor ref")
+        if not matches:
+            return None
+        result = self.run(self.git_argv("fetch"), git=True, form="fetch")
         if result.returncode != 0:
             text = result.stderr.decode("utf-8", "replace")
-            if "couldn't find remote ref" in text:
-                return None
             raise Unreachable(text.strip()[:300])
-        path = os.path.join(self.repo, "refs", "verify", "anchor")
+        path = os.path.join(self.repo, *VERIFY_REF.split("/"))
         try:
             with open(path, "rb") as handle:
                 oid = handle.read(128).decode("ascii", "replace").strip()
@@ -467,7 +488,8 @@ class Runner:
                             oid = value
             except OSError:
                 pass
-        need(bool(OID.fullmatch(oid)), "anchor-chain", "fetched ref is malformed")
+        if not OID.fullmatch(oid):
+            raise Unreachable("fetched ref is missing or malformed")
         return oid
 
     def cat(self, mode: str, oid: str) -> bytes:
@@ -1524,7 +1546,7 @@ def main(argv: list[str]) -> int:
             return 2
         RUN.temp = "<temp>"
         RUN.repo = "<temp>/anchor.git"
-        print(json.dumps({"fetch": RUN.git_argv("fetch"), "init": RUN.git_argv("init"),
+        print(json.dumps({"ls-remote": RUN.git_argv("ls-remote"), "fetch": RUN.git_argv("fetch"), "init": RUN.git_argv("init"),
                           "cat-file": RUN.git_argv("cat-file", "-p", "0" * 40),
                           "env": RUN.env(True)}, sort_keys=True))
         return 0

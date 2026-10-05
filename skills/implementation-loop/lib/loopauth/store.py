@@ -423,6 +423,12 @@ PRIMITIVE_POINTS = {"fs-create-after-temp-fsync", "fs-create-after-rename",
                     "fs-replace-after-temp-fsync", "fs-replace-after-rename"}
 for _command in CRASH_APPLICABLE:
     CRASH_APPLICABLE[_command] |= PRIMITIVE_POINTS
+INTENT_POINTS = {"fs-create-intent-after-temp-fsync", "fs-create-intent-after-rename"}
+MARKER_POINTS = {"fs-create-marker-after-temp-fsync", "fs-create-marker-after-rename"}
+for _command in ("genesis", "rotate", "revoke", "regenesis"):
+    CRASH_APPLICABLE[_command] |= INTENT_POINTS
+for _command in ("revoke", "recover"):
+    CRASH_APPLICABLE[_command] |= MARKER_POINTS
 for _command in ("regenesis", "recover"):
     CRASH_APPLICABLE[_command] |= {"archive-after-rename", "archive-after-readonly"}
 KEY_STEP_COMMANDS = ("genesis", "rotate")
@@ -1102,11 +1108,18 @@ def _fs_create(token: Token, target: str, data: bytes) -> None:
         raise
     os.close(fd)
     crash("fs-create-after-temp-fsync")
+    leaf = os.path.basename(target)
+    kind = "intent" if leaf in ("intent", "genesis.intent", "regenesis.intent") else (
+        "marker" if leaf == "quarantine" else None)
+    if kind is not None:
+        crash(f"fs-create-{kind}-after-temp-fsync")
     if os.path.lexists(target):
         os.unlink(temporary)
         refuse("exists", f"refusing to replace {target}")
     os.rename(temporary, target)
     crash("fs-create-after-rename")
+    if kind is not None:
+        crash(f"fs-create-{kind}-after-rename")
     _fsync_dir(directory)
 
 
@@ -1718,6 +1731,7 @@ def push_anchor(token: object, *, scratch: str, commit: str, ref: str) -> None:
         refuse("pending", f"remote unreachable before push: {error}", EXIT_PENDING)
     if tip != expected_parent:
         refuse("non-fast-forward", "the remote anchor is not the expected parent; refusing to push")
+    anchor.prepare_push(scratch, commit)
     try:
         result = _run_sink(token, "git.push-anchor", scratch=scratch, remote=remote.url,  # type: ignore[union-attr]
                            commit=commit)

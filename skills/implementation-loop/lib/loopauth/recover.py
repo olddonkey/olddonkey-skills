@@ -1372,11 +1372,9 @@ def _replay(plan: Plan, scratch_factory) -> None:
     try:
         commit = anchor.build_objects(scratch, anchor_json, intent["expected_parent"])
     except anchor.AnchorError as error:
-        if error.code == "anchor-parent":
+        if error.code == "anchor-parent-pending":
             raise store.AuthorityError("pending", error.message, store.EXIT_PENDING) from error
         raise
-    except anchor.Unreachable as error:
-        raise store.AuthorityError("pending", str(error), store.EXIT_PENDING) from error
     if commit != intent["anchor_commit"]:
         raise store.AuthorityError("replay", "the rebuilt commit differs from the stored one")
     active, prev, _sig = records.parse_anchor_json(anchor_json)

@@ -117,9 +117,9 @@ def build_objects(scratch: str, anchor_json: bytes, parent: str | None) -> str:
         try:
             fetched = fetch(scratch, remote.url)  # type: ignore[union-attr]
         except Unreachable as error:
-            _fail("anchor-parent", f"cannot fetch the parent commit: {error}")
+            _fail("anchor-parent-pending", f"cannot fetch the parent commit: {error}")
         if fetched != parent:
-            _fail("anchor-parent", "the remote tip is not the expected parent")
+            _fail("anchor-parent-pending", "the remote tip is not the expected parent")
     blob = _oid_output(_git("git.hash-object", scratch=scratch, stdin=anchor_json),
                        "git hash-object")
     if blob != expected_blob(anchor_json):
@@ -138,6 +138,17 @@ def build_objects(scratch: str, anchor_json: bytes, parent: str | None) -> str:
         _fail("anchor-objects", "git commit-tree disagrees with the deterministic commit")
     check_objects(scratch, commit, anchor_json, parent)
     return commit
+
+
+def prepare_push(scratch: str, commit: str) -> None:
+    """Stage exactly one ref for the fixed pattern push in this scratch repo."""
+    result = _git("git.update-anchor", scratch=scratch, commit=commit)
+    if result.returncode != 0:
+        _fail("anchor-scratch", "cannot stage the scratch anchor ref")
+    refs = _git("git.anchor-refs", scratch=scratch)
+    expected = f"{commit} {tools.ANCHOR_REF}\n".encode("ascii")
+    if refs.returncode != 0 or refs.stdout != expected:
+        _fail("anchor-scratch", "scratch anchor namespace must contain only the bound anchor ref")
 
 
 def _cat(scratch: str, mode: str, oid: str) -> bytes:

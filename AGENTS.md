@@ -117,16 +117,26 @@ run):
    plus schema-2 records written through `loop-journal append --schema 2`) —
    expect `selftest: PASS (803 checks)`.
 12. `python3 skills/implementation-loop/tests/authority-review-selftest.py`
-   runs 13 offline review regression tests, including full-fsync routing.
+   runs 20 offline review regression tests, including real Git writer/verifier
+   agreement and full-fsync routing.
    `bash skills/implementation-loop/tests/authority-selftest.sh` (the 0a.2
    authority store: the real `scripts/loop-authority` under a scratch `HOME`,
    ceremonies driven through a Python pty, a `file://` bare remote, real
    Ed25519 keys from the host `ssh-keygen`, crash injection at every protocol
    cut, and the independent verifier; needs `ssh-keygen` with `-Y`, `git`,
    `ssh`, and `openssl`, and runs its cases in parallel) — expect
-   `selftest: PASS (1678 checks)`, including the real crashes derived from
-   every command's `CRASH_APPLICABLE` set; the original first 11 checks are a
-   self-test of the crash matrix's coverage check. Then the crash matrix,
+   `selftest: PASS (1916 checks)`, including the real
+   crashes derived from every command's `CRASH_APPLICABLE` set. The
+   "crash matrix coverage check" section tests missing, duplicate, and
+   miscredited cuts independently of section order. For review-only work,
+   `bash skills/implementation-loop/tests/authority-selftest.sh --review-only`
+   runs the changed review, frozen inventory/transport, named revocation and
+   re-genesis scenarios, and coverage negative controls; it does not run the
+   frame-byte matrix. `--review-only inventory` runs just the frozen inventory,
+   transport, and coverage controls — expect `selftest: PASS (83 checks)`.
+   The pty cases require a readable macOS
+   `sysctl kern.bootsessionuuid` (sandbox denial is an environment failure,
+   not a skipped or passed case). Then the crash matrix,
    `bash skills/implementation-loop/tests/authority-selftest.sh --crash-matrix`
    (the real writer crashed at every frame-byte cut of genesis frame 1 and of
    an epoch-rotation frame, each followed by the verifier and recovery, then

@@ -14,6 +14,11 @@
 # HTTPS fixtures are 127.0.0.1 only. The HTTPS fixture mints a throwaway
 # self-signed certificate with openssl.
 #
+# --review-only runs the changed review, named scenario cuts, frozen
+# inventory/transport, and coverage controls. Its optional "inventory"
+# argument runs only the inventory/transport and coverage controls. The
+# default suite still includes every existing section and case.
+#
 # --crash-matrix runs every frame-byte cut of genesis frame 1 and of an
 # epoch-rotation frame. The cut list is enumerated from the two frames'
 # planned sizes N (probed, or given by --sizes G,R so that separate runs
@@ -47,13 +52,17 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 LIB="$SCRIPT_DIR/../lib"
 SCRIPTS="$SCRIPT_DIR/../scripts"
 usage() {
-  printf 'usage: authority-selftest.sh [--crash-matrix [--shard K/N] [--sizes G,R] [--cut-ids-out FILE] [--plan | --check-shards DIR]]\n' >&2
+  printf 'usage: authority-selftest.sh [--review-only [inventory] | --crash-matrix [--shard K/N] [--sizes G,R] [--cut-ids-out FILE] [--plan | --check-shards DIR]]\n' >&2
   exit 2
 }
 MODE_ARG="${1:-}"
 MATRIX_ARGS=()
 case "$MODE_ARG" in
   "") [[ $# -le 1 ]] || usage ;;
+  --review-only)
+    [[ $# -eq 1 || ( $# -eq 2 && "$2" == inventory ) ]] || usage
+    if [[ $# -eq 2 ]]; then MATRIX_ARGS+=(inventory); fi
+    ;;
   --crash-matrix)
     shift
     shard="" sizes="" plan="" check=""
@@ -562,10 +571,10 @@ class Case:
     def status(self, env=None):
         return self.writer("status", env=env)
 
-    def agree(self, checks, label, expect_state=None, expect_row="any"):
+    def agree(self, checks, label, expect_state=None, expect_row="any", env=None):
         """The writer's verify and the independent verifier classify alike."""
-        writer = self.writer("verify")
-        independent = self.verifier()
+        writer = self.writer("verify", env=env)
+        independent = self.verifier(env=env)
         same = (writer.json.get("state") == independent.json.get("state")
                 and writer.json.get("authorizing_state") == independent.json.get("authorizing_state")
                 and writer.json.get("current_authorization") == independent.json.get("current_authorization"))
@@ -973,9 +982,9 @@ def g_transport(argv):
             "git.ls-remote": prefix + frozen_transport[kind] + ["-C", scratch, "ls-remote", url, ANCHOR_REF],
             "git.fetch-anchor": prefix + frozen_transport[kind] + [
                 "-C", scratch, "fetch", "--no-tags", "--no-write-fetch-head", url,
-                "+refs/olddonkey-loop/anchor:refs/readback/anchor"],
+                "+refs/olddonkey-loop/*:refs/readback/*"],
             "git.push-anchor": prefix + frozen_transport[kind] + [
-                "-C", scratch, "push", url, "0" * 40 + ":refs/olddonkey-loop/anchor"],
+                "-C", scratch, "push", url, "refs/olddonkey-loop/*:refs/olddonkey-loop/*"],
         }
         for command, argv_wanted in wanted.items():
             params = {"scratch": scratch, "remote": url}
@@ -1000,9 +1009,11 @@ def g_transport(argv):
         emit(f"transport: the verifier's fetch argv for a {kind} remote is the frozen one",
              plan.get("fetch") == prefix + frozen_transport[kind] + [
                  "-C", "<temp>/anchor.git", "fetch", "--no-tags", "--no-write-fetch-head", url,
-                 "+refs/olddonkey-loop/anchor:refs/verify/anchor"], plan.get("fetch"))
-        emit(f"transport: the verifier's init and cat-file argv are the frozen ones ({kind})",
-             plan.get("init") == prefix + ["-C", "<temp>/anchor.git", "init", "--bare", "--template=",
+                 "+refs/olddonkey-loop/*:refs/readback/*"], plan.get("fetch"))
+        emit(f"transport: the verifier's ls-remote, init and cat-file argv are the frozen ones ({kind})",
+             plan.get("ls-remote") == prefix + frozen_transport[kind] + [
+                 "-C", "<temp>/anchor.git", "ls-remote", url, ANCHOR_REF]
+             and plan.get("init") == prefix + ["-C", "<temp>/anchor.git", "init", "--bare", "--template=",
                                            "--object-format=sha1", "."]
              and plan.get("cat-file") == prefix + ["-C", "<temp>/anchor.git", "cat-file", "-p", "0" * 40],
              plan)
@@ -1100,14 +1111,17 @@ def g_seam(argv):
     store.configure_crash("recover")
     emit("seam: recovery-after-delimiter is in the closed list for recovery",
          store._CRASH["point"] == "recovery-after-delimiter")
-    emit("seam: recovery's crash points are exactly the closed list",
-         store.CRASH_APPLICABLE["recover"] == ({"after-push", "after-readback", "after-intent-remove",
-                                                "recovery-after-delimiter", "archive-after-rename", "archive-after-readonly"} | store.PRIMITIVE_POINTS), store.CRASH_APPLICABLE["recover"])
-    exercised = review_named_points()
-    emit("seam: all five commands derive their real-crash cases from CRASH_APPLICABLE",
-         set(exercised) == set(store.CRASH_APPLICABLE) and
-         all(set(exercised[command]) == points for command, points in store.CRASH_APPLICABLE.items()),
-         exercised)
+    emit("seam: recovery's crash points are exactly the independently frozen list",
+         store.CRASH_APPLICABLE["recover"] == FROZEN_CRASH_POINTS["recover"], store.CRASH_APPLICABLE["recover"])
+    emit("seam: all five commands equal the independently frozen crash inventory",
+         store.CRASH_APPLICABLE == FROZEN_CRASH_POINTS, store.CRASH_APPLICABLE)
+    emit("seam: every named revocation cut has its active-epoch scenario",
+         set(REVOCATION_POINTS) == FROZEN_CRASH_POINTS["revoke"])
+    emit("seam: every applicable verify-only revocation cut has its scenario",
+         set(VERIFY_ONLY_REVOCATION_POINTS) == FROZEN_CRASH_POINTS["revoke"] -
+         {"fs-create-marker-after-temp-fsync", "fs-create-marker-after-rename"})
+    emit("seam: every named re-genesis cut has normal and bad-signature scenarios",
+         set(REGENESIS_CUTS) - {"frame-byte-first", "frame-byte-last"} == FROZEN_CRASH_POINTS["regenesis"])
     os.environ["LOOP_AUTHORITY_CRASH_AT"] = "frame-byte-500"
     store.configure_crash("revoke")
     ok, code = refused(lambda: store.check_frame_byte(500), "crash-point")
@@ -1921,13 +1935,26 @@ def j_active_revocation(point):
         stored = intent["anchor_commit"] if intent else None
         status = case.status()
         independent = case.verifier()
-        checks(f"active revocation, crash {point}: no current authorization at the cut",
-               status.json.get("authorizing_state") is False and status.json.get("current_authorization") is False
-               and independent.json.get("authorizing_state") is False, (status, independent))
+        # Independent of production constants: these cuts precede the intent rename.
+        pre_intent_points = {"fs-create-after-temp-fsync", "fs-create-intent-after-temp-fsync"}
+        if point in pre_intent_points:
+            checks(f"active revocation, crash {point}: the cut precedes the intent; the store is unchanged and still authorizing",
+                   all(observed.json.get("state") == "committed"
+                       and observed.json.get("authorizing_state") is True
+                       and observed.json.get("current_authorization") is False
+                       and observed.json.get("epochs") == {"1": "active"}
+                       for observed in (status, independent))
+                   and intent is None and not os.path.lexists(os.path.join(case.store_dir(), "intent")),
+                   (status, independent))
+        else:
+            checks(f"active revocation, crash {point}: no current authorization at the cut",
+                   status.json.get("authorizing_state") is False and status.json.get("current_authorization") is False
+                   and independent.json.get("authorizing_state") is False, (status, independent))
         case.agree(checks, f"active revocation, crash {point}")
         result = case.writer("recover")
         durable = point in ("after-frame-fsync", "after-push", "after-readback", "after-intent-remove",
-                            "frame-byte-last")
+                            "frame-byte-last", "fs-replace-after-temp-fsync", "fs-replace-after-rename",
+                            "fs-create-marker-after-temp-fsync", "fs-create-marker-after-rename")
         if durable:
             checks(f"active revocation, crash {point}: recovery ends quarantined with the revocation anchored",
                    result.json.get("state") == "quarantined"
@@ -1952,7 +1979,8 @@ def j_verify_only_revocation(point):
         crashed(case, point, "revoke", "--epoch", "1")
         case.agree(checks, f"verify-only revocation, crash {point}")
         result = case.writer("recover")
-        durable = point != "after-intent-fsync"
+        durable = point in ("after-frame-fsync", "after-push", "after-readback", "after-intent-remove",
+                            "fs-replace-after-temp-fsync", "fs-replace-after-rename")
         checks(f"verify-only revocation, crash {point}: recovery ends committed with no quarantine marker"
                + (", epoch 1 revoked" if durable else ", the revocation never durable"),
                result.json.get("state") == "committed" and result.json.get("seq") == (3 if durable else 2)
@@ -1966,13 +1994,45 @@ def j_verify_only_revocation(point):
 # --- linked re-genesis --------------------------------------------------------
 
 # Every named crash point of the revoke command (store.CRASH_APPLICABLE)
+# Independent inventory: never derived from the production point sets.
+# Legacy first-call primitive cuts remain alongside the target-qualified cuts.
+FROZEN_PRIMITIVE_POINTS = {"fs-create-after-temp-fsync", "fs-create-after-rename",
+                           "fs-replace-after-temp-fsync", "fs-replace-after-rename"}
+FROZEN_INTENT_POINTS = {"fs-create-intent-after-temp-fsync", "fs-create-intent-after-rename"}
+FROZEN_MARKER_POINTS = {"fs-create-marker-after-temp-fsync", "fs-create-marker-after-rename"}
+FROZEN_FRAME_POINTS = {"after-intent-fsync", "after-frame-fsync", "after-push",
+                       "after-readback", "after-intent-remove"}
+FROZEN_CRASH_POINTS = {
+    "genesis": FROZEN_FRAME_POINTS | FROZEN_PRIMITIVE_POINTS | FROZEN_INTENT_POINTS |
+        {"after-store-dir", "genesis-step-1", "genesis-step-2", "genesis-step-3", "genesis-step-4",
+         "genesis-step-5", "genesis-step-6a", "genesis-step-6b"},
+    "rotate": FROZEN_FRAME_POINTS | FROZEN_PRIMITIVE_POINTS | FROZEN_INTENT_POINTS | {"after-store-dir"},
+    "revoke": FROZEN_FRAME_POINTS | FROZEN_PRIMITIVE_POINTS | FROZEN_INTENT_POINTS | FROZEN_MARKER_POINTS,
+    "regenesis": FROZEN_PRIMITIVE_POINTS | FROZEN_INTENT_POINTS |
+        {"regenesis-step-1", "regenesis-step-2", "regenesis-step-3", "regenesis-step-4", "regenesis-step-5",
+         "after-frame-fsync", "after-push", "after-readback", "archive-after-rename", "archive-after-readonly"},
+    "recover": FROZEN_PRIMITIVE_POINTS | FROZEN_MARKER_POINTS |
+        {"after-push", "after-readback", "after-intent-remove", "recovery-after-delimiter",
+         "archive-after-rename", "archive-after-readonly"},
+}
 REVOCATION_POINTS = ("after-intent-fsync", "after-frame-fsync", "after-push", "after-readback",
-                     "after-intent-remove")
+                     "after-intent-remove", "fs-create-after-temp-fsync", "fs-create-after-rename",
+                     "fs-replace-after-temp-fsync", "fs-replace-after-rename",
+                     "fs-create-intent-after-temp-fsync", "fs-create-intent-after-rename",
+                     "fs-create-marker-after-temp-fsync", "fs-create-marker-after-rename")
+VERIFY_ONLY_REVOCATION_POINTS = ("after-intent-fsync", "after-frame-fsync", "after-push", "after-readback",
+                               "after-intent-remove", "fs-create-after-temp-fsync", "fs-create-after-rename",
+                               "fs-replace-after-temp-fsync", "fs-replace-after-rename",
+                               "fs-create-intent-after-temp-fsync", "fs-create-intent-after-rename")
 REGENESIS_CUTS = ("regenesis-step-1", "frame-byte-first", "frame-byte-last", "after-frame-fsync",
                   "regenesis-step-2", "after-push", "after-readback", "regenesis-step-3", "regenesis-step-4",
-                  "regenesis-step-5")
+                  "regenesis-step-5", "fs-create-after-temp-fsync", "fs-create-after-rename",
+                  "fs-replace-after-temp-fsync", "fs-replace-after-rename",
+                  "archive-after-rename", "archive-after-readonly",
+                  "fs-create-intent-after-temp-fsync", "fs-create-intent-after-rename")
 REGENESIS_BEFORE_PUSH = ("regenesis-step-1", "frame-byte-first", "frame-byte-last", "after-frame-fsync",
-                         "regenesis-step-2")
+                         "regenesis-step-2", "fs-create-after-temp-fsync", "fs-create-after-rename",
+                         "fs-create-intent-after-temp-fsync", "fs-create-intent-after-rename")
 
 
 def quarantined_case(label):
@@ -2014,14 +2074,23 @@ def j_regenesis(point):
         if os.path.exists(path):
             content = parse_frames(frame_of_intent(json.loads(case.read(path))))[0][0]["content"]
             body = json.loads(content)["payload"]["body"]
+        elif point in REGENESIS_BEFORE_PUSH:
+            new_dirs = set(os.listdir(case.auth("stores"))) - {old["store_id"]}
+            logs = [os.path.join(case.auth("stores", sid), "log", "segment-000001.olf") for sid in new_dirs]
+            checks(f"re-genesis, crash {point}: no introducer is published before the intent",
+                   len(logs) == 1 and (not os.path.exists(logs[0]) or not case.read(logs[0])))
+            body = None
         else:
             body = Lineage(case).payloads[0]["body"]
-        checks(f"re-genesis, crash {point}: the introducer carries registry_version tg-v1.0a and "
-               "admitted_protocols []", body.get("registry_version") == "tg-v1.0a"
-               and body.get("admitted_protocols") == [], {k: body.get(k) for k in ("registry_version",
-                                                                                  "admitted_protocols")})
+        if body is not None:
+            checks(f"re-genesis, crash {point}: the introducer carries registry_version tg-v1.0a and "
+                   "admitted_protocols []", body.get("registry_version") == "tg-v1.0a"
+                   and body.get("admitted_protocols") == [], {k: body.get(k) for k in ("registry_version",
+                                                                                      "admitted_protocols")})
         case.agree(checks, f"re-genesis, crash {point}")
-        new_id = json.loads(case.read(path))["new_store_id"] if os.path.exists(path) else None
+        unpublished = sorted(set(os.listdir(case.auth("stores"))) - {old["store_id"]})
+        new_id = json.loads(case.read(path))["new_store_id"] if os.path.exists(path) else (
+            unpublished[0] if point in REGENESIS_BEFORE_PUSH else None)
         kept = case.snapshot(case.auth("stores", new_id)) if new_id else None
         result = case.writer("recover")
         active = case.active()
@@ -2173,7 +2242,7 @@ def s_epochs_regenesis():
     jobs = [("anchor objects", j_anchor_objects), ("epochs", j_epochs)]
     jobs += [(f"active revocation {p}", j_active_revocation(p)) for p in
              REVOCATION_POINTS + ("frame-byte-first", "frame-byte-mid", "frame-byte-last")]
-    jobs += [(f"verify-only revocation {p}", j_verify_only_revocation(p)) for p in REVOCATION_POINTS]
+    jobs += [(f"verify-only revocation {p}", j_verify_only_revocation(p)) for p in VERIFY_ONLY_REVOCATION_POINTS]
     jobs += [(f"re-genesis {p}", j_regenesis(p)) for p in REGENESIS_CUTS]
     jobs += [(f"re-genesis bad signature {p}", j_regenesis_bad_sig(p)) for p in REGENESIS_CUTS]
     jobs += [("re-genesis links", j_regenesis_links), ("re-genesis test flag", j_regenesis_test_flag),
@@ -4226,6 +4295,15 @@ def j_review_crash(command, point):
                     case.write(case.log_path(), case.read(case.log_path())[:-1])
             result = case.writer("recover", env={"LOOP_AUTHORITY_CRASH_AT": point})
         checks(label + ": cut is reached", result.rc == 137, result)
+        if point.startswith("fs-create-intent-"):
+            target = case.auth("genesis.intent") if command == "genesis" else (
+                case.auth("regenesis.intent") if command == "regenesis" else os.path.join(case.store_dir(), "intent"))
+            checks(label + ": the cut selects the intent publication",
+                   os.path.exists(target) == point.endswith("after-rename"), target)
+        elif point.startswith("fs-create-marker-"):
+            target = os.path.join(case.store_dir(), "quarantine")
+            checks(label + ": the cut selects the quarantine marker publication",
+                   os.path.exists(target) == point.endswith("after-rename"), target)
         checks(label + ": published files have one link", all(
             os.stat(os.path.join(directory, name)).st_nlink == 1
             for directory, _, files in os.walk(case.auth()) for name in files))
@@ -4245,6 +4323,108 @@ def j_review_stray_refs(checks):
     result = case.writer("recover")
     checks("stray branch: recover succeeds without quarantine marker", result.rc == 0 and
            not os.path.exists(os.path.join(case.store_dir(), "quarantine")), result)
+
+
+def j_review_rotate_revoke_stray(checks):
+    case = committed_case("review-stray-ceremonies")
+    stray = "refs/heads/" + ANCHOR_REF
+    original = case.tip()
+    git("--git-dir", case.remote, "update-ref", stray, original)
+    for args in (("rotate",), ("revoke", "--epoch", "1")):
+        result = case.ceremony(*args)
+        checks(f"stray branch: {args[0]} ceremony succeeds", result.rc == 0, result)
+        writer, independent = case.agree(checks, f"stray branch after {args[0]}", "committed")
+        checks(f"stray branch: {args[0]} verifies at exit 0", writer.rc == independent.rc == 0)
+        checks(f"stray branch: {args[0]} updates only the exact anchor",
+               case.tip() != original and git("--git-dir", case.remote, "rev-parse", stray).stdout.strip().decode() == original)
+
+
+def j_review_stray_only_genesis(checks):
+    seed = committed_case("review-stray-only-seed")
+    git("--git-dir", seed.remote, "update-ref", "refs/heads/" + ANCHOR_REF, seed.tip())
+    seed.set_tip(None)
+    case = Case("review-stray-only-genesis", share=seed)
+    crashed(case, "after-frame-fsync", "genesis", "--remote", case.url)
+    writer, independent = case.agree(checks, "stray-only remote before genesis push", "genesis-pending")
+    checks("stray-only genesis: both verifiers exit pending", writer.rc == independent.rc == 5)
+    result = case.writer("recover")
+    checks("stray-only genesis: recovery publishes the exact anchor", result.rc == 0 and case.tip() is not None, result)
+    case.agree(checks, "stray-only genesis recovered", "committed")
+    fresh = Case("review-stray-only-direct-genesis", share=seed)
+    case.set_tip(None)
+    result = fresh.genesis()
+    checks("stray-only genesis: ceremony succeeds directly", result.rc == 0, result)
+    fresh.agree(checks, "stray-only direct genesis", "committed")
+
+
+def j_review_absent_anchor_stray(checks):
+    case = committed_case("review-absent-anchor-stray")
+    git("--git-dir", case.remote, "update-ref", "refs/heads/" + ANCHOR_REF, case.tip())
+    case.set_tip(None)
+    writer, independent = case.agree(checks, "absent exact anchor with same-commit stray", "quarantined")
+    checks("absent anchor with stray: both verifiers exit quarantine", writer.rc == independent.rc == 6)
+    checks("absent anchor with stray: both classify the absent-anchor rule",
+           writer.json.get("rule") == "anchor-absent" and independent.json.get("table") == "A2.3 absent ref once active exists",
+           (writer, independent))
+
+
+def j_review_fetch_without_ref(checks):
+    case = committed_case("review-fetch-no-ref")
+    bins = os.path.join(case.dir, "bins")
+    os.mkdir(bins)
+    for malformed in (False, True):
+        wrapper = os.path.join(bins, "git")
+        with open(wrapper, "w") as handle:
+            handle.write("#!" + sys.executable + "\nimport os, sys\na = sys.argv[1:]\n")
+            handle.write("if 'fetch' in a:\n")
+            if malformed:
+                handle.write("    root = a[a.index('-C') + 1]\n    path = os.path.join(root, 'refs/readback/anchor')\n    os.makedirs(os.path.dirname(path), exist_ok=True)\n    open(path, 'w').write('malformed\\n')\n")
+            handle.write("    sys.exit(0)\nos.execv(" + repr(GIT) + ", [" + repr(GIT) + "] + a)\n")
+        os.chmod(wrapper, 0o700)
+        writer, independent = case.agree(checks, "successful fetch with " + ("malformed" if malformed else "missing") + " readback ref",
+                                         "pending", env={"LOOP_AUTHORITY_TEST_BIN_DIR": bins})
+        checks("successful fetch without valid ref: both exit pending", writer.rc == independent.rc == 5)
+
+
+def j_review_local_timeouts(checks):
+    case = committed_case("review-local-timeouts")
+    # Shorten only the scratch copies' deadlines; real CLI classification and
+    # a genuinely hanging executable are exercised without a 60-second wait.
+    package = os.path.join(case.dir, "package")
+    shutil.copytree(LIB, os.path.join(package, "lib"))
+    shutil.copytree(SCRIPTS, os.path.join(package, "scripts"))
+    tool_path = os.path.join(package, "lib/loopauth/tools.py")
+    text = read_text(tool_path).replace("LOCAL_TIMEOUT = 60", "LOCAL_TIMEOUT = 0.5")
+    with open(tool_path, "w") as handle:
+        handle.write(text)
+    verify_path = os.path.join(package, "scripts/loop-authority-verify.py")
+    text = read_text(verify_path).replace('else 60,', 'else 0.5,')
+    with open(verify_path, "w") as handle:
+        handle.write(text)
+    bins = os.path.join(case.dir, "bins")
+    os.mkdir(bins)
+    for form, binary in (("init", "git"), ("cat-file", "git"), ("verify", "ssh-keygen")):
+        for leaf in os.listdir(bins):
+            os.unlink(os.path.join(bins, leaf))
+        wrapper = os.path.join(bins, binary)
+        actual = GIT if binary == "git" else SSH_KEYGEN
+        with open(wrapper, "w") as handle:
+            handle.write("#!" + sys.executable + "\nimport os, sys, time\na = sys.argv[1:]\n")
+            handle.write("if " + repr(form) + " in a: time.sleep(2)\n")
+            handle.write("os.execv(" + repr(actual) + ", [" + repr(actual) + "] + a)\n")
+        os.chmod(wrapper, 0o700)
+        env = {"LOOP_AUTHORITY_TEST_BIN_DIR": bins}
+        writer = case.run([BASH, os.path.join(package, "scripts/loop-authority"), "verify"], env=env)
+        independent = case.run([BASH, os.path.join(package, "scripts/loop-authority-verify")], env=env)
+        checks(f"local {binary} {form} timeout: writer and verifier exit environment",
+               writer.rc == independent.rc == 9 and "timed out" in writer.err and "timed out" in independent.err,
+               (writer, independent))
+        case.agree(checks, f"local {form} timeout leaves the store committed", "committed")
+
+
+def read_text(path):
+    with open(path) as handle:
+        return handle.read()
 
 
 def j_review_unlinkable(checks):
@@ -4281,8 +4461,30 @@ def j_review_surrogates(checks):
 def s_review_regressions():
     jobs = [(f"review crash {command}/{point}", j_review_crash(command, point))
             for command, points in review_named_points().items() for point in points]
-    jobs += [("review stray ref", j_review_stray_refs), ("review unlinkable", j_review_unlinkable),
+    jobs += [("review stray ref", j_review_stray_refs),
+             ("review rotate and revoke with stray", j_review_rotate_revoke_stray),
+             ("review stray-only genesis", j_review_stray_only_genesis),
+             ("review absent anchor with stray", j_review_absent_anchor_stray),
+             ("review fetch without ref", j_review_fetch_without_ref),
+             ("review local timeouts", j_review_local_timeouts), ("review unlinkable", j_review_unlinkable),
              ("review no authority", j_review_none), ("review surrogate", j_review_surrogates)]
+    parallel(jobs)
+
+
+def s_review_point_inventory():
+    for item in inproc("seam"):
+        emit(*item)
+    home = os.path.join(TMP, "review-transport-home")
+    os.makedirs(home, exist_ok=True)
+    for item in inproc("transport", home):
+        emit(*item)
+
+
+def s_review_scenarios():
+    jobs = [(f"active revocation {p}", j_active_revocation(p)) for p in REVOCATION_POINTS]
+    jobs += [(f"verify-only revocation {p}", j_verify_only_revocation(p)) for p in VERIFY_ONLY_REVOCATION_POINTS]
+    jobs += [(f"re-genesis {p}", j_regenesis(p)) for p in REGENESIS_CUTS if not p.startswith("frame-byte-")]
+    jobs += [(f"re-genesis bad signature {p}", j_regenesis_bad_sig(p)) for p in REGENESIS_CUTS if not p.startswith("frame-byte-")]
     parallel(jobs)
 
 
@@ -4293,6 +4495,14 @@ def main():
     if len(sys.argv) > 5 and sys.argv[5] == "--crash-matrix":
         MATRIX.update(matrix_options(sys.argv[6:]))
         sections = (("crash matrix", s_crash_matrix),)
+    elif len(sys.argv) > 6 and sys.argv[5:7] == ["--review-only", "inventory"]:
+        sections = (("review point inventory and transport", s_review_point_inventory),
+                    ("crash matrix coverage check", s_matrix_coverage_selftest))
+    elif len(sys.argv) > 5 and sys.argv[5] == "--review-only":
+        sections = (("review regressions", s_review_regressions),
+                    ("review point inventory and transport", s_review_point_inventory),
+                    ("review scenario cuts", s_review_scenarios),
+                    ("crash matrix coverage check", s_matrix_coverage_selftest))
     else:
         sections = (("review regressions", s_review_regressions),
                     ("crash matrix coverage check", s_matrix_coverage_selftest),
@@ -4319,6 +4529,8 @@ PY
 
 if [[ "$MODE_ARG" == --crash-matrix ]]; then
   printf 'note: the crash matrix -- the real writer crashed at every frame-byte cut of genesis frame 1 and of an epoch-rotation frame (bytes 1 .. N - 2 as torn prefixes, then the final byte; all of them, or one shard'"'"'s deterministic partition), each followed by the verifier and recovery, then the offline classifier over every prefix of each real frame the crashes wrote\n'
+elif [[ "$MODE_ARG" == --review-only ]]; then
+  printf 'note: review regressions, frozen point/transport inventory, named scenario cuts, and coverage negative controls only; no frame-byte crash matrix\n'
 else
   printf 'note: genesis and rotation frames get every-byte real crashes in --crash-matrix (sharded CI jobs); here, revocation and re-genesis frames get every named crash point as a real crash, sampled real frame-byte cuts, and the full classifier sweep over every byte\n'
 fi

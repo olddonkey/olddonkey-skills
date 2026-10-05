@@ -4,7 +4,7 @@
 # Usage:
 #   loop-authority status                 classify, read-only (JSON on stdout)
 #   loop-authority verify                 classify, read-only; exit 0 only when
-#                                         committed and current
+#                                         committed; exit 12 with no store
 #   loop-authority recover                run recovery rows under the lock
 #   loop-authority ceremony genesis --remote <url>
 #   loop-authority ceremony rotate
@@ -22,7 +22,7 @@
 # Exit codes: 0 ok, 2 usage, 3 lock busy, 4 refused, 5 pending, 6 quarantined,
 # 7 terminal bootstrap state, 8 dormant row, 9 environment (binary, ssh-keygen,
 # library, scratch path), 10 approval.consume refused, 11 TTY or challenge,
-# 12 invalid, 137 test crash point.
+# 12 invalid (including verify with no store), 137 test crash point.
 #
 # Test-only (LOOP_AUTHORITY_TEST=1): file:// remotes (a permanently
 # non-authorizing test lineage), LOOP_AUTHORITY_CRASH_AT=<point>, and

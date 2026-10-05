@@ -198,10 +198,12 @@ the genesis record, never in a config file.
   | `git.hash-object` | `git -C <scratch> hash-object -w --stdin` | scratch |
   | `git.mktree` | `git -C <scratch> mktree` (stdin: the one tree line) | scratch |
   | `git.commit-tree` | `git -C <scratch> commit-tree <tree> [-p <parent>] -m <message>` (pinned identity and `@<seq> +0000` dates) | scratch |
-  | `git.fetch-anchor` | `git <transport options> -C <scratch> fetch --no-tags --no-write-fetch-head <remote> +refs/olddonkey-loop/anchor:refs/readback/anchor` | scratch (writes objects and one scratch ref) |
+  | `git.fetch-anchor` | `git <transport options> -C <scratch> fetch --no-tags --no-write-fetch-head <remote> +refs/olddonkey-loop/*:refs/readback/*` | scratch (writes objects and refs only under refs/readback/) |
   | `git.ls-remote` | `git <transport options> -C <scratch> ls-remote <remote> refs/olddonkey-loop/anchor` | read |
   | `git.cat-file` | `git -C <scratch> cat-file (-t\|-p) <oid>` | read |
-  | `git.push-anchor` | `git <transport options> -C <scratch> push <remote> <commit>:refs/olddonkey-loop/anchor` | **sink**: anchor push |
+  | `git.update-anchor` | `git -C <scratch> update-ref refs/olddonkey-loop/anchor <commit>` | scratch |
+  | `git.anchor-refs` | `git -C <scratch> for-each-ref --format=%(objectname) %(refname) refs/olddonkey-loop/` | read |
+  | `git.push-anchor` | `git <transport options> -C <scratch> push <remote> refs/olddonkey-loop/*:refs/olddonkey-loop/*` | **sink**: anchor push |
   | `ssh-keygen.generate` | `ssh-keygen -q -t ed25519 -N '' -C <comment> -f <temp path in the store's keys dir>` | **sink**: key file create |
   | `ssh-keygen.certify` | `ssh-keygen -q -s <root> -I <type>@e<epoch> -n <type> -V always:forever <subkey.pub>` | **sink**: key file create (uses the root) |
   | `ssh-keygen.sign` | `ssh-keygen -Y sign -f <subkey> -n olddonkey-loop.authority.<type>.v1` (payload on stdin, signature on stdout) | **sink**: seal |
@@ -269,8 +271,10 @@ tree = one entry `100644 anchor.json`; commit with parent `expected_parent`,
 author and committer `olddonkey-loop <anchor@olddonkey-loop.invalid>` and
 date = the raw git date `@<seq> +0000` (deterministic, timezone-independent), message
 `anchor <store_id> g<generation> s<seq>`. `git hash-object -w`, `git mktree`,
-and `git commit-tree` with `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` fixed; push
-`git push <remote> <commit>:refs/olddonkey-loop/anchor` (fast-forward only;
+and `git commit-tree` with `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` fixed. Stage
+the bound commit with `git.update-anchor` and require `git.anchor-refs` to show
+only that anchor ref under `refs/olddonkey-loop/` in scratch; push
+`git push <remote> refs/olddonkey-loop/*:refs/olddonkey-loop/*` (fast-forward only;
 a non-fast-forward is refused); readback `git fetch` of the ref into the
 scratch ref `refs/readback/anchor`, then verify by content (A1.2 step 4).
 
@@ -389,12 +393,14 @@ with the same rules: an environment built from its own allowlist (never
 inherited), `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
 `-c protocol.allow=never` plus the pinned transport, `-c http.sslVerify=true`,
 ssh as `-F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes`, and
-exactly three argv forms, each with `-c core.hooksPath=/dev/null -c
+exactly four argv forms, each with `-c core.hooksPath=/dev/null -c
 core.fsmonitor=false` (and the transport options where the remote is
 contacted) before the subcommand, and the same `[core]`-only config check
 after init: `git -C <temp> init --bare --template= --object-format=sha1 .`,
 `git -C <temp> fetch --no-tags --no-write-fetch-head <pinned remote>
-+refs/olddonkey-loop/anchor:refs/verify/anchor`, and `git -C <temp> cat-file
++refs/olddonkey-loop/*:refs/readback/*`,
+`git -C <temp> ls-remote <pinned remote> refs/olddonkey-loop/anchor` (only
+the exact advertised ref name is accepted), and `git -C <temp> cat-file
 (-t|-p) <oid>`, where the remote is only the genesis-pinned URL),
 `skills/implementation-loop/lib/loopauth/tools.py` (the subprocess wrapper),
 `skills/implementation-loop/tests/authority-selftest.sh`,

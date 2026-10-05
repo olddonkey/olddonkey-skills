@@ -16,19 +16,21 @@
 # on every component, never the inherited TMPDIR) that it deletes, and writes
 # its temporary allowed_signers there.
 #
-# git runs only in three argv forms, each with -c core.hooksPath=/dev/null
+# git runs only in four argv forms, each with -c core.hooksPath=/dev/null
 # -c core.fsmonitor=false (and the transport options where the remote is
 # contacted) before the subcommand:
 #   git -C <temp> init --bare --template= --object-format=sha1 .
 #   git -C <temp> fetch --no-tags --no-write-fetch-head <pinned remote>
-#       +refs/olddonkey-loop/anchor:refs/verify/anchor
+#       +refs/olddonkey-loop/*:refs/readback/*
+#   git -C <temp> ls-remote <pinned remote> refs/olddonkey-loop/anchor
+#       (parse only the exact ref name before fetching)
 #   git -C <temp> cat-file (-t|-p) <oid>
 # with an environment built from an allowlist (never inherited).
 #
 # Output: one JSON object (state, table, rule, current_authorization,
 # test_only, ...), in the writer's state vocabulary. Exit 0 committed,
 # 5 pending, 6 quarantined, 7 terminal bootstrap state, 9 environment,
-# 12 invalid.
+# 12 invalid (including no store).
 #
 # This wrapper writes nothing (no directory, no heredoc temporary file).
 

@@ -987,9 +987,22 @@ writer lock, after refusing an existing target. They never have the two-link
 publication window; inert key files retain their no-replace hard-link protocol
 inside unpublished key directories. All file and directory syncs use the same
 `_durable_fsync` helper: Darwin requests `F_FULLFSYNC`, other hosts use `fsync`.
+On macOS the authority directory must be on a filesystem that supports
+`F_FULLFSYNC` for its files and directories. An unsupported full sync is a hard
+environment failure (exit 9); there is no fallback to `fsync`, and a directory
+created before that failure may remain.
 This is ordering evidence from code and tests, not a simulated power-loss proof.
 Transport timeouts and malformed remote-ref replies stay pending; only verified
-content/chain contradictions quarantine. Remote ref selection is exact.
+content/chain contradictions quarantine. Local tool timeouts are environment
+failures (exit 9). Writer and verifier select only the exact advertised
+`refs/olddonkey-loop/anchor` name; both fetch with
+`+refs/olddonkey-loop/*:refs/readback/*`. The writer stages the bound commit
+as the sole ref under `refs/olddonkey-loop/` in its scratch repository, then
+pushes `refs/olddonkey-loop/*:refs/olddonkey-loop/*` without force. These pattern
+refspecs do not tail-match `refs/heads/refs/olddonkey-loop/anchor`. An advertised
+anchor whose successful fetch leaves a missing or malformed readback ref is
+pending (exit 5); an absent advertised anchor is classified by the existing
+absent-anchor recovery rows.
 
 ### Test seams (`LOOP_AUTHORITY_TEST=1` only)
 
@@ -999,7 +1012,11 @@ content/chain contradictions quarantine. Remote ref selection is exact.
 `genesis-step-6b`, `regenesis-step-<1..5>`, for genesis and rotation
 `after-store-dir` and `key-step-<1..53>`, and in recovery
 `recovery-after-delimiter`; primitive cuts `fs-create-after-temp-fsync`,
-`fs-create-after-rename`, `fs-replace-after-temp-fsync`,
+`fs-create-after-rename` (legacy first-create cuts retained),
+`fs-create-intent-after-temp-fsync`, `fs-create-intent-after-rename`
+(genesis, rotation, revocation, and re-genesis intents),
+`fs-create-marker-after-temp-fsync`, `fs-create-marker-after-rename`
+(revocation and recovery quarantine markers), `fs-replace-after-temp-fsync`,
 `fs-replace-after-rename`, `archive-after-rename`, and
 `archive-after-readonly`), whose only effect is `os._exit(137)`; and `LOOP_AUTHORITY_TEST_BIN_DIR` (wrapper fixtures searched
 before the binary allowlist; refused for every mutation of a production
@@ -1008,7 +1025,9 @@ ceremony -- so a lineage a test seam touched is test forever; read-only
 classification may use it and then reports `test_only`).
 
 The normal authority selftest derives real crash/recovery cases for every
-command from `CRASH_APPLICABLE`, checks single-link publication and a second
+command from `CRASH_APPLICABLE`, compares it with an independently written
+point inventory (including the scenario-specific revocation and re-genesis
+lists), checks single-link publication and a second
 recovery converging, and compares the independent verifier. The sharded CI
 matrix still exhausts frame-byte cuts. CI also runs the authority suite on
 macOS to exercise the Darwin start-token and durability paths.

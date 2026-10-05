@@ -96,7 +96,7 @@ COMMAND_TABLE: dict[str, dict] = {
         "binary": "git",
         "argv": ("<git-prefix>", "<transport>", "-C", "<scratch>", "fetch", "--no-tags",
                  "--no-write-fetch-head", "<remote>",
-                 "+refs/olddonkey-loop/anchor:refs/readback/anchor"),
+                 "+refs/olddonkey-loop/*:refs/readback/*"),
         "effect": "scratch",
     },
     "git.ls-remote": {
@@ -110,10 +110,22 @@ COMMAND_TABLE: dict[str, dict] = {
         "argv": ("<git-prefix>", "-C", "<scratch>", "cat-file", "<cat-mode>", "<oid>"),
         "effect": "read",
     },
+    "git.update-anchor": {
+        "binary": "git",
+        "argv": ("<git-prefix>", "-C", "<scratch>", "update-ref",
+                 "refs/olddonkey-loop/anchor", "<commit>"),
+        "effect": "scratch",
+    },
+    "git.anchor-refs": {
+        "binary": "git",
+        "argv": ("<git-prefix>", "-C", "<scratch>", "for-each-ref",
+                 "--format=%(objectname) %(refname)", "refs/olddonkey-loop/"),
+        "effect": "read",
+    },
     "git.push-anchor": {
         "binary": "git",
         "argv": ("<git-prefix>", "<transport>", "-C", "<scratch>", "push", "<remote>",
-                 "<commit>:refs/olddonkey-loop/anchor"),
+                 "refs/olddonkey-loop/*:refs/olddonkey-loop/*"),
         "effect": "sink",
     },
     "ssh-keygen.generate": {
@@ -165,6 +177,8 @@ COMMAND_PARAMS: dict[str, frozenset] = {
     "git.fetch-anchor": frozenset({"scratch", "remote"}),
     "git.ls-remote": frozenset({"scratch", "remote"}),
     "git.cat-file": frozenset({"scratch", "cat_mode", "oid"}),
+    "git.update-anchor": frozenset({"scratch", "commit"}),
+    "git.anchor-refs": frozenset({"scratch"}),
     "git.push-anchor": frozenset({"scratch", "remote", "commit"}),
     "ssh-keygen.generate": frozenset({"comment", "key_temp"}),
     "ssh-keygen.certify": frozenset({"root", "type", "epoch", "subkey_pub"}),

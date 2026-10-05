@@ -298,12 +298,16 @@ COMMANDS = {
                                 "-m", "<message>"), "scratch"),
     "git.fetch-anchor": ("git", ("<git-prefix>", "<transport>", "-C", "<scratch>", "fetch", "--no-tags",
                                  "--no-write-fetch-head", "<remote>",
-                                 "+refs/olddonkey-loop/anchor:refs/readback/anchor"), "scratch"),
+                                 "+refs/olddonkey-loop/*:refs/readback/*"), "scratch"),
     "git.ls-remote": ("git", ("<git-prefix>", "<transport>", "-C", "<scratch>", "ls-remote", "<remote>",
                               "refs/olddonkey-loop/anchor"), "read"),
     "git.cat-file": ("git", ("<git-prefix>", "-C", "<scratch>", "cat-file", "<cat-mode>", "<oid>"), "read"),
+    "git.update-anchor": ("git", ("<git-prefix>", "-C", "<scratch>", "update-ref",
+                                  "refs/olddonkey-loop/anchor", "<commit>"), "scratch"),
+    "git.anchor-refs": ("git", ("<git-prefix>", "-C", "<scratch>", "for-each-ref",
+                                "--format=%(objectname) %(refname)", "refs/olddonkey-loop/"), "read"),
     "git.push-anchor": ("git", ("<git-prefix>", "<transport>", "-C", "<scratch>", "push", "<remote>",
-                                "<commit>:refs/olddonkey-loop/anchor"), "sink"),
+                                "refs/olddonkey-loop/*:refs/olddonkey-loop/*"), "sink"),
     "ssh-keygen.generate": ("ssh-keygen", ("-q", "-t", "ed25519", "-N", "", "-C", "<comment>", "-f",
                                            "<key-temp>"), "sink"),
     "ssh-keygen.certify": ("ssh-keygen", ("-q", "-s", "<root>", "-I", "<type>@e<epoch>", "-n", "<type>", "-V",
@@ -995,7 +999,8 @@ def main_tokens():
         emit(f"tools: {label} cannot be built", ok, code)
     argv = tools.build_argv("git.push-anchor", {"scratch": scratch, "remote": url, "commit": tip})
     emit("tools: the only push that can be built carries the transport options and no --force",
-         "protocol.allow=never" in argv and "--force" not in argv and not any(a.startswith("+") for a in argv), argv)
+         "protocol.allow=never" in argv and "--force" not in argv and not any(a.startswith("+") for a in argv)
+         and argv[-1] == "refs/olddonkey-loop/*:refs/olddonkey-loop/*", argv)
     ok, code = refused(lambda: tools.run("ssh-keygen.fingerprint", pub=os.path.join(key_dir, "root.pub")), "refused")
     emit("tools: a parameter under the authority directory is refused without a token", ok, code)
     unchanged("tools refusals")
