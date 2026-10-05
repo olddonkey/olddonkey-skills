@@ -415,6 +415,13 @@ def bootstrap_store(paths: dict[str, str]) -> None:
     no_symlink_from(paths["root"], paths["runs_dir"])
     ensure_directory(paths["runs_dir"])
     ensure_lock_file(paths["lock"])
+
+
+def complete_store(paths: dict[str, str]) -> None:
+    # Caller holds meta.lock. generation and runs.tsv are created here and
+    # not in bootstrap_store, so that they are only ever written under the
+    # lock: an unlocked first writer could rename its initial "0" over a
+    # generation that another writer had already advanced.
     if not os.path.lexists(paths["generation"]):
         atomic_write(paths["generation"], "0\n")
     else:
@@ -1025,6 +1032,7 @@ def cmd_append(args: argparse.Namespace) -> int:
     try:
         bootstrap_store(paths)
         with Lock(paths):
+            complete_store(paths)
             record, reason = load_context(paths, canonical)
             if reason is not None:
                 run_id = record["run"] if record else None
@@ -1048,6 +1056,7 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
     try:
         bootstrap_store(paths)
         with Lock(paths):
+            complete_store(paths)
             rows = rebuild_runs_tsv(paths)
     except JournalError as error:
         fail(str(error), error.code)
@@ -1062,6 +1071,7 @@ def cmd_gc(args: argparse.Namespace) -> int:
     try:
         bootstrap_store(paths)
         with Lock(paths):
+            complete_store(paths)
             infos = []
             for run_id in list_run_ids(paths):
                 info = inspect_run(paths, run_id)
@@ -1147,6 +1157,7 @@ def cmd_begin_run(args: argparse.Namespace) -> int:
     try:
         bootstrap_store(paths)
         with Lock(paths):
+            complete_store(paths)
             record, reason = None, None
             if os.path.lexists(paths["context"]):
                 record, reason = read_context_file(paths["context"], store_file=True)
@@ -1207,6 +1218,7 @@ def cmd_end_run(args: argparse.Namespace) -> int:
     try:
         bootstrap_store(paths)
         with Lock(paths):
+            complete_store(paths)
             record = require_fresh_context(paths, canonical)
             events, seq = repair_and_prepare(paths, record["run"])
             _ = events
@@ -1277,6 +1289,7 @@ def cmd_recover(args: argparse.Namespace) -> int:
     try:
         bootstrap_store(paths)
         with Lock(paths):
+            complete_store(paths)
             record = require_fresh_context(paths, canonical)
             info = inspect_run(paths, record["run"])
             if not info["exists"]:

@@ -440,11 +440,11 @@ def metadata_lock_paths(home: str, key: str) -> dict[str, str]:
 
 
 def ensure_metadata_lock(home: str, paths: dict[str, str]) -> None:
-    # The leading steps of loop-journal's bootstrap_store, in its order, and
-    # nothing after the lock. Every step tolerates a concurrent creator. The
-    # journal's readers treat the result as a store with no runs (a root
-    # holding only meta.lock makes find-run exit 5), and its first write
-    # adds generation and runs.tsv.
+    # The same steps as loop-journal's bootstrap_store, in its order. Every
+    # step tolerates a concurrent creator. The journal's readers treat the
+    # result as a store with no runs (a root holding only meta.lock makes
+    # find-run exit 5), and its first write adds generation and runs.tsv
+    # under the lock.
     loop_root = ensure_loop_root(home)
     ensure_directory(paths["journal"])
     no_symlink_from(loop_root, paths["root"])
