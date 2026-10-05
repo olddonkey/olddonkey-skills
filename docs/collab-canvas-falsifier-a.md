@@ -4,7 +4,7 @@ Protocol: `plans/collab-canvas-v1.md` §8. Stage A1 asks whether the judge catch
 
 The models may have seen this repository's history, so every result here is an upper bound on judge quality.
 
-**Stage A1 in brief (2026-10-05): pass.** Five clean controls were reviewed (#56, #60, #71, #72, #73). The judge passed all five clean diffs and returned `iterate` with a finding that names the seeded defect on all five seeded diffs (required: at least three and at least four). Three other certified controls were removed because the judge's objection to the clean diff was true. Across all sixteen reviews there was no false objection and no missed seed. The stage needed two changes to its protocol and an extension of its candidate list, all decided by the engineer and recorded below; what it does not show is listed with the result. Some rulings were applied by precedent and are marked as pending the engineer's confirmation.
+**Stage A1 in brief (2026-10-05): pass.** Five clean controls were reviewed (#56, #60, #71, #72, #73). The judge passed all five clean diffs and returned `iterate` with a finding that names the seeded defect on all five seeded diffs (required: at least three and at least four). Three other certified controls were removed because the judge's objection to the clean diff was true. Across all sixteen reviews there was no false objection and no missed seed. The stage needed two changes to its protocol and an extension of its candidate list, all decided by the engineer and recorded below; what it does not show is listed with the result. Some rulings were first applied by precedent; the engineer confirmed all of them on 2026-10-05, after the last review.
 
 ## Stage A1
 
@@ -262,7 +262,7 @@ Seeds for the extension candidates, each verified by the driver in fresh clones 
 - #64: the seeded diff gets `iterate` and the first finding names the seed (a scheme-only regex in place of adding `:` to the escaped set). The clean diff also gets `iterate`, for one thing: the change rewrote the help sentence to say nothing journal-sourced is emitted as an autolink, the spec asked only for `:` to join the listed characters, and `@` stays unescaped. The driver checked the facts: the merged diff does add the word, main still carries it, and the seed designer had already rendered `user@example.com` from the merged tree through GitHub's Markdown API and got a `mailto:` link. The help text promises something the code does not do.
 - #70: the seeded diff gets `iterate` and the first finding names the seed (`read-run` calls the writers' tail repair); the second finding explains why no test notices. The clean diff also gets `iterate`, with three findings. Two are about scope: `loop-index` also puts `reviewer` on timeline items, and an existing whitelist assertion was widened to allow it; the request says only "projected by loop-index". The third is a fact: the change inserted five lines into `loop-journal` and left `state-schema.md`'s line citations into that file pointing five lines early (for example `:446-471` for a function that now starts at 451). The driver checked it at `e52829742`; the citations are still stale on main.
 
-**Rulings applied by precedent, pending the engineer's confirmation.** The driver asked the engineer to rule on these findings, to approve the next two specs, and to admit #73; the question was dismissed and the engineer's instruction was to continue. The driver therefore applied the engineer's ruling on #61 (a finding that is factually true about the merged change is a real defect) to the same class of finding here: #64 and #70 leave the five and are reported as defects the judge found. On the same footing as the five explicit approvals before them, the amended specs for #71 and #72 are used and both are treated as clean controls, and #73 is prepared as the last candidate in merge order that fits the prompt cap (#74 does not). Any of these can be reversed by the engineer; the verdicts themselves do not change.
+**Rulings applied by precedent, then confirmed by the engineer (2026-10-05, "confirmed, as recommended").** The driver asked the engineer to rule on these findings, to approve the next two specs, and to admit #73; the question was dismissed and the engineer's instruction was to continue. The driver therefore applied the engineer's ruling on #61 (a finding that is factually true about the merged change is a real defect) to the same class of finding here: #64 and #70 leave the five and are reported as defects the judge found. On the same footing as the five explicit approvals before them, the amended specs for #71 and #72 are used and both are treated as clean controls, and #73 is prepared as the last candidate in merge order that fits the prompt cap (#74 does not). The engineer confirmed each of them once the results were in.
 
 | PR | drafted spec | requirements | met | amended digest | edits |
 | --- | --- | --- | --- | --- | --- |
@@ -291,7 +291,7 @@ Seeds for the extension candidates, each verified by the driver in fresh clones 
 
 ## Stage A1 result
 
-**Pass**, on the plan's two criteria, with the rulings marked above as pending the engineer's confirmation.
+**Pass**, on the plan's two criteria. The engineer confirmed the rulings this result depends on (2026-10-05).
 
 The five clean controls, in the order they were taken: #56, #60, #71, #72, #73.
 
@@ -312,7 +312,7 @@ Three more candidates were certified, reviewed, and then removed because the jud
 | ...`iterate` on a finding the driver verified as true | 3 |
 | ...`iterate` with no true finding (a false objection) | 0 |
 
-If the engineer rules instead that the findings on #64 and #70 are not defects, those two stay in the five as false objections: the first five controls are then #56, #60, #64, #70, #71, specificity is 3 of 5, sensitivity 5 of 5, and the stage still passes.
+Had the engineer ruled instead that the findings on #64 and #70 are not defects, those two would stay in the five as false objections: the first five controls are then #56, #60, #64, #70, #71, specificity would be 3 of 5, sensitivity 5 of 5, and the stage would still pass.
 
 ### What the stage does and does not show
 
@@ -337,5 +337,5 @@ Defects in merged work that this stage surfaced, each handed off as its own task
 
 Under §8, a pass at A1 allows unit 3 (the coordinator's `run`, up to the engineer) to be dispatched, and stage A2 follows it. Two things from this stage bear on unit 3:
 
-1. A spec drafted under a length limit and told to specify behaviour, not code, was much closer to what a competent implementer then built. The spec prompt's limit is 30000 bytes today.
-2. The judge blocks on small true things, such as a stale count or a stale citation. In a run that costs an implementer round each time. Whether such findings should block or travel as notes is a product decision for the review prompt, not something this stage settles.
+1. A spec drafted under a length limit and told to specify behaviour, not code, was much closer to what a competent implementer then built. The spec prompt's limit is 30000 bytes today. **Decided (engineer, 2026-10-05):** the spec prompt always carries the behaviour-only instruction, and the limit drops to about 8000 bytes. Unit 3 makes the change.
+2. The judge blocks on small true things, such as a stale count or a stale citation. In a run that costs an implementer round each time. **Decided (engineer, 2026-10-05):** such findings keep blocking for now; the cost is looked at again after stage A2.
