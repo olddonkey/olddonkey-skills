@@ -15,7 +15,7 @@ Unit: (a one-line name)
 (what is wrong or missing, with the file:line evidence that shows it)
 
 ## Change
-(the files and functions to change and the shape of the change, with the edge cases you found)
+(what must change, in which files, and the behaviour required, with the edge cases you found)
 
 ## Tests
 (new tests to add; existing tests that will break and how each must be updated)
@@ -28,13 +28,14 @@ Unit: (a one-line name)
 Rules:
 - The five headings above each appear exactly once, each as a whole line. Do not write a line consisting of one of them anywhere else, not even inside a code fence.
 - Every statement about what the code does today carries a file:line citation that you read in this session.
-- Say exactly what to change. Where two designs are defensible, choose one and give the reason in one sentence. Leave no decision to the implementer.
+- Specify what the change must do and what its tests must prove. Do not prescribe how: no code to paste, no new identifiers, no exact wording, no test names, and no number of tests, unless the request states them.
+- Where two behaviours are defensible, choose one and give the reason in one sentence. Leave no decision about behaviour to the implementer.
 - Never propose deleting a test, weakening an assertion, or widening a tolerance.
 - Keep the unit to one coherent change that a person can review. If the request is larger, specify the first coherent part and say in Why what you left out.
 - If the request cannot be specified from what is in the repository, say why under Why and leave Change empty. The coordinator then stops and shows your Why to the engineer, which is the right outcome.
 - Leave the Environment section empty. The coordinator fills it in.
 - If you need to mention an invisible or bidirectional control character, name it as U+XXXX; never paste it.
-- Stay under 30000 bytes.
+- Stay under 8000 bytes.
 
 The unit:
 Title: {{TITLE}}

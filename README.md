@@ -123,7 +123,7 @@ Codex prerequisites: `engineering-mode` → `implementation-loop` → authentica
 
 **The agent-driven loop delegates to Codex, grok, or cursor-agent. A coordinator can also use the Claude Code backend module.**
 
-The new [loop coordinator](./skills/implementation-loop/references/coordinator.md) can draft a unit spec with a judge agent, record the engineer's approval, and review an existing working tree diff. In this unit it does not run an implementer, gate, commit, or publish.
+The [loop coordinator](./skills/implementation-loop/references/coordinator.md) can draft a unit spec with a judge agent, record the engineer's approval, run fresh implementation and review rounds, commit locally when permitted, and gate the reviewed snapshot. It stops for the engineer's decision; it does not publish.
 
 The implementer implements and runs focused tests. Claude reviews the real diff, runs the full gate, and ships only what it would sign its name to.
 

@@ -1059,6 +1059,76 @@ Review of the implementation changed these. `references/coordinator.md` is the o
 - On a signal or a time cap the coordinator stops the whole process tree of what it started, taken from the process table before the first signal, because the codex adapter starts its CLI in a session of its own. A codex dispatch stopped this way leaves the codex adapter's own state marked running, and that adapter documents no repair; fixing that is outside this plan.
 - Everything the coordinator starts gets `/dev/null` as stdin.
 
+### Unit 3, as built
+
+Four Codex rounds on one thread (2026-10-05 to 2026-10-06). Round 1 was
+checked by reading every hunk, a full host run, 46 mutants, a real-CLI run,
+and an independent reviewer whose scripted scenarios found the defects
+below; each later round was re-checked the same way, with the scenarios
+re-run against the final tree. Where the behaviour differs from the
+specification above, the specification was wrong:
+
+- **The gate's exit status must agree with its record.** The specification
+  said to decide from the record and never from the exit status. A test
+  suite can append a green `unit-final` record through the shipped journal
+  helper and kill `run-gate.sh`; with the old rule the unit reached
+  `awaiting-engineer` on a red suite. `run-gate.sh` exits with exactly the
+  value it records, so the observed exit must equal `gate_exit`, and a
+  process ended by a signal never matches.
+- **Closing writes move the cursor first.** Every path into the terminal
+  writes moves the journal cursor to the end of the segment, as `abandon`
+  does. Before that, a hook or a gate command that had written an event made
+  a parked unit quarantine the repository.
+- **The run segment keeps one writer.** A commit hook that writes to the
+  journal blocks as `journal-write` before the gate starts; a gate command
+  that writes a second event blocks as `gate-record`. Documented as a limit
+  rather than tolerated.
+- **Signals.** Held from before the first durable trace of a step until the
+  child's pid and group are recorded (a signal inside `Popen` had orphaned
+  the child in 10 of 40 trials, and `abandon` then succeeded); a second
+  signal neither restarts nor shortens a stop; a signal the coordinator
+  inherited as ignored stays ignored, so `nohup` works. With no readable
+  process table the created group is still stopped, a read-only dispatch
+  keeps its unit 2 result, and a step that can write to the checkout ends
+  `unknown-outcome`. `abandon` refuses a begun step whose process was never
+  recorded without `--dispatches-terminated`.
+- **One last look after the gate.** Branch, HEAD and tree id are checked
+  once more after a bound green gate; a child the gate left behind had
+  edited the tree after `run-gate.sh` measured it.
+- **Clean means clean.** Every clean-tree decision lists untracked files and
+  submodule changes explicitly; `status.showUntrackedFiles=no` had let an
+  untracked file into the commit and the review prompt.
+- **Bounded ignored-file listing.** At most 50 paths, then a count and the
+  name of `ignored-files.txt` in the unit directory; 4000 new ignored files
+  had parked a 132-byte diff as `too-large`. `check-diff`, which has no
+  manifest, still says only that ignored files were not compared.
+- **Caller's umask** for the commit and the gate (the implement dispatch is
+  started with it too; the codex and claude adapters set their own). Child
+  output shown to the engineer is the last 2000 bytes, JSON-escaped, with
+  the full file named. Specs and verdicts also reject U+2028/9, tag
+  characters and supplemental variation selectors, interlinear annotation,
+  invisible operators and private-use characters; ZWJ, ZWNJ, the direction
+  marks, the soft hyphen, U+FE0F, U+061C and U+180E stay allowed, as unit 2
+  decided.
+
+What was measured and deliberately left, now stated in `coordinator.md`: a
+process that detaches before the stop or is forked during it; the
+calibration store and journal protected from an implementer only by the
+adapter's sandbox; ignored files compared by size and mtime. Two more
+findings from this review were fixed on main while the unit was in
+review: the codex adapter's record left `running` after an interrupted
+dispatch (stop-signal handling and `--recover-stale`, PR #81), and the
+codex and claude adapters running the implementer's writes under umask
+077 (PR #85).
+
+The coordinator selftest pins 1745 checks where `ps` is readable and 1641
+where it is denied; the unreadable-table path is exercised everywhere with a
+test-local failing `ps`. The suite grew from 237 to about 300 cases and from
+roughly two and a half minutes to seven at four jobs; fixture reuse is the
+lever if that becomes a cost. A real `run` (codex implementer, claude judge,
+passthrough gate on this repository's evidence suite) reached
+`awaiting-engineer` on the first attempt in each of three rounds.
+
 ## 12. Review record
 
 Codex read-only review, `gpt-6-sol` at `max`, one thread

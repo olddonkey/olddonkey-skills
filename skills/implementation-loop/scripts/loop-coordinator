@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Foreground, per-workspace coordinator. Python 3.11 standard library only.
 set -euo pipefail
+CALLER_UMASK="$(umask)"
 umask 077
 SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
-exec python3 - "$SELF_DIR" "$@" <<'PY'
+exec python3 - "$SELF_DIR" "$CALLER_UMASK" "$@" <<'PY'
 from __future__ import annotations
 
 import argparse
@@ -26,7 +27,8 @@ import unicodedata
 from datetime import datetime, timezone
 
 SCRIPT = Path(sys.argv[1])
-ARGS = sys.argv[2:]
+CALLER_UMASK = int(sys.argv[2], 8)
+ARGS = sys.argv[3:]
 WS = Path.cwd().resolve()
 KEY = hashlib.sha256(str(WS).encode()).hexdigest()
 HOME_VALUE = os.environ.get('HOME')
@@ -42,8 +44,10 @@ HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 TERMINAL = {'checked', 'parked', 'blocked', 'abandoned', 'released'}
 UNREADABLE = object()
 HEADINGS = ['## Why', '## Change', '## Tests', '## Do not touch', '## Environment']
-DEFAULT_CAPS = {'rounds': 3, 'prompt_bytes': 120000, 'ignored_files': 5000, 'dispatch_seconds': 3600}
-REFS = ['coordinator-environment.md', 'coordinator-spec-prompt.md', 'coordinator-review-prompt.md']
+DEFAULT_CAPS = {'rounds': 3, 'prompt_bytes': 120000, 'ignored_files': 5000, 'dispatch_seconds': 3600,
+                'commit_seconds': 300, 'gate_seconds': 3600}
+REFS = ['coordinator-environment.md', 'coordinator-spec-prompt.md', 'coordinator-review-prompt.md',
+        'coordinator-iterate-prompt.md']
 
 class Stop(Exception):
     def __init__(self, code: int, message: str):
@@ -226,7 +230,7 @@ def call(argv: list[str | Path], unit: str | None = None, round_n: int | None = 
          timeout: float | None = None) -> subprocess.CompletedProcess:
     try:
         return subprocess.run([str(x) for x in argv], cwd=WS, env=child_env(unit, round_n),
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as error:
         return subprocess.CompletedProcess(argv, 127, b'', str(error).encode())
 
@@ -244,8 +248,19 @@ def error_text(result) -> str:
     return result.stderr.decode('utf-8', errors='replace').strip() or result.stdout.decode('utf-8', errors='replace').strip()
 
 
+def safe_detail(raw: bytes | str, path: Path | None = None) -> str:
+    if isinstance(raw, str):
+        raw = raw.encode('utf-8', 'replace')
+    detail = json.dumps(raw[-2000:].decode('utf-8', 'replace'), ensure_ascii=True)
+    return detail + (f' (full output: {json.dumps(str(path), ensure_ascii=True)})' if path else '')
+
+
 def git(*args) -> subprocess.CompletedProcess:
     return call(['git', *args])
+
+
+def clean_status() -> subprocess.CompletedProcess:
+    return git('status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none')
 
 
 def git_ok(*args) -> bytes:
@@ -313,7 +328,8 @@ def config() -> dict:
         fail(5, 'invalid caps')
     for key, value in DEFAULT_CAPS.items():
         caps.setdefault(key, value)
-    for key, low, high in [('rounds',1,10),('prompt_bytes',1000,120000),('ignored_files',0,100000),('dispatch_seconds',1,14400)]:
+    for key, low, high in [('rounds',1,10),('prompt_bytes',1000,120000),('ignored_files',0,100000),
+                           ('dispatch_seconds',1,14400),('commit_seconds',1,3600),('gate_seconds',1,14400)]:
         if type(caps[key]) is not int or not low <= caps[key] <= high:
             fail(5, f'invalid caps.{key}')
     gate = obj.get('gate')
@@ -681,6 +697,71 @@ def group_alive(pgid: int) -> bool:
     return True
 
 
+def process_table() -> dict[int, tuple[int, int, str]] | None:
+    result = call(['ps', '-axo', 'pid=,ppid=,pgid=,stat='])
+    if result.returncode:
+        return None
+    table = {}
+    for line in result.stdout.decode('utf-8', 'replace').splitlines():
+        fields = line.split(maxsplit=3)
+        if len(fields) == 4:
+            try:
+                table[int(fields[0])] = (int(fields[1]), int(fields[2]), fields[3])
+            except ValueError:
+                continue
+    return table
+
+
+def descendant_snapshot(pid: int) -> tuple[set[int], set[int]] | None:
+    table = process_table()
+    if table is None:
+        return None
+    found = {pid}
+    while True:
+        added = {child for child, (parent, _, _) in table.items() if parent in found}
+        if added <= found:
+            break
+        found |= added
+    groups = {table[child][1] for child in found if child in table}
+    groups.add(pid)
+    return found, groups
+
+
+def snapshot_alive(snapshot: tuple[set[int], set[int]]) -> bool:
+    table = process_table()
+    if table is None:
+        return True
+    pids, groups = snapshot
+    return any(not info[2].startswith('Z') and (pid in pids or info[1] in groups)
+               for pid, info in table.items())
+
+
+def terminate_tree(pid: int, proc: subprocess.Popen | None = None) -> str:
+    # Snapshot before sending anything: a dead adapter can orphan its CLI.
+    snapshot = descendant_snapshot(pid)
+    if snapshot is None:
+        # Still stop the group we created. A writer may have escaped it, so
+        # callers distinguish this result from a complete process-tree stop.
+        return 'unreadable' if terminate_group(pid, proc) else 'survivor'
+    _, groups = snapshot
+    for sig, seconds in ((signal.SIGTERM, 10), (signal.SIGKILL, 2)):
+        for pgid in groups:
+            try:
+                os.killpg(pgid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if proc is not None:
+                proc.poll()
+            if not snapshot_alive(snapshot):
+                return 'stopped'
+            time.sleep(0.1)
+    if proc is not None:
+        proc.poll()
+    return 'stopped' if not snapshot_alive(snapshot) else 'survivor'
+
+
 def terminate_group(pgid: int, proc: subprocess.Popen | None = None) -> bool:
     for sig, seconds in ((signal.SIGTERM, 10), (signal.SIGKILL, 2)):
         if proc is not None:
@@ -690,7 +771,8 @@ def terminate_group(pgid: int, proc: subprocess.Popen | None = None) -> bool:
         try:
             os.killpg(pgid, sig)
         except ProcessLookupError:
-            return True
+            if not group_alive(pgid):
+                return True
         except PermissionError:
             # A restricted host can deny group signals even for a child.
             # Stop the leader when permitted, then keep the outcome unknown
@@ -713,7 +795,94 @@ def terminate_group(pgid: int, proc: subprocess.Popen | None = None) -> bool:
     return not group_alive(pgid)
 
 
-def capture_dispatch(state: dict, agent: dict, label: str, prompt: str, cap: int, round_n=None, dispatch_seconds=3600):
+def supervised(state: dict, label: str, argv: list, stdout: Path, stderr: Path,
+               seconds: int, round_n: int | None = None, backend: str | None = None,
+               writes_checkout=False, gate_log: Path | None = None):
+    proc = None
+    previous_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    handled = tuple(sig for sig, previous in previous_handlers.items() if previous != signal.SIG_IGN)
+    stopping = False
+    pending_signal = None
+    def interrupted(signum, _frame):
+        nonlocal stopping, pending_signal
+        pending_signal = signum
+        if stopping:
+            return
+        stopping = True
+        if proc is None:
+            raise Stop(130, f'{label} interrupted by signal {signum}')
+        outcome = terminate_tree(proc.pid, proc)
+        if outcome == 'survivor' or (outcome == 'unreadable' and writes_checkout):
+            unknown(state, label)
+        raise Stop(130, f'{label} interrupted by signal {signum}')
+    # Hold signals before the first durable trace of this step. Popen's child
+    # restores the incoming mask; only this coordinator keeps signals held.
+    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled)
+    try:
+        for sig in handled:
+            signal.signal(sig, interrupted)
+        begun(state, label)
+        state['last_dispatch'] = {'pid': None, 'pgid': None, 'backend': backend,
+                                  'dispatch_id': None, 'step': label}
+        write_state(state)
+        with stdout.open('wb') as out, stderr.open('wb') as err:
+            child_mask = old_mask
+            def restore_child_mask():
+                signal.pthread_sigmask(signal.SIG_SETMASK, child_mask)
+            try:
+                proc = subprocess.Popen([str(x) for x in argv], cwd=WS,
+                                        env=child_env(state['unit'], round_n), stdin=subprocess.DEVNULL,
+                                        stdout=out, stderr=err, start_new_session=True,
+                                        preexec_fn=restore_child_mask,
+                                        **({'umask': CALLER_UMASK} if writes_checkout else {}))
+            except OSError as error:
+                finished(state)
+                return None, False, str(error)
+            state['last_dispatch'].update({'pid': proc.pid, 'pgid': proc.pid})
+            write_state(state)
+            restore_mask, old_mask = old_mask, None
+            signal.pthread_sigmask(signal.SIG_SETMASK, restore_mask)
+            timed_out = False
+            try:
+                status = proc.wait(timeout=seconds)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                stopping = True
+                outcome = terminate_tree(proc.pid, proc)
+                if outcome == 'survivor' or (outcome == 'unreadable' and writes_checkout):
+                    unknown(state, label)
+                try:
+                    status = proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    unknown(state, label)
+                if pending_signal is not None:
+                    raise Stop(130, f'{label} interrupted by signal {pending_signal}')
+            if group_alive(proc.pid) and not terminate_group(proc.pid, proc):
+                unknown(state, label)
+            if pending_signal is not None:
+                raise Stop(130, f'{label} interrupted by signal {pending_signal}')
+            return status, timed_out, None
+    finally:
+        try:
+            if old_mask is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+        finally:
+            for sig, previous in previous_handlers.items():
+                signal.signal(sig, previous)
+            if gate_log is not None:
+                try:
+                    fd = os.open(gate_log, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+                except OSError:
+                    pass
+                else:
+                    try:
+                        if stat.S_ISREG(os.fstat(fd).st_mode):
+                            os.fchmod(fd, 0o600)
+                    finally:
+                        os.close(fd)
+
+
+def capture_dispatch(state: dict, agent: dict, label: str, prompt: str, cap: int, round_n=None, dispatch_seconds=3600, mode='read-only'):
     data = prompt.encode('utf-8')
     if len(data) > cap:
         return None, 'too-large'
@@ -728,45 +897,19 @@ def capture_dispatch(state: dict, agent: dict, label: str, prompt: str, cap: int
     original = digest(data)
     doc = read_run(state)
     state['seq'] = max((x['seq'] for x in doc['events']), default=0)
-    begun(state, label)
     backend = agent['backend']
-    argv = [SCRIPT / '../backends' / backend / 'dispatch.sh', '--read-only', '--prompt-file', prompt_file, '--model', agent['model']]
+    argv = [SCRIPT / '../backends' / backend / 'dispatch.sh']
+    if mode == 'read-only':
+        argv.append('--read-only')
+    argv += ['--prompt-file', prompt_file, '--model', agent['model']]
     if 'effort' in agent:
         argv += ['--effort', agent['effort']]
     stdout, stderr = directory / (label + '.stdout'), directory / (label + '.stderr')
-    with stdout.open('wb') as out, stderr.open('wb') as err:
-        proc = None
-        previous_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
-        def interrupted(signum, _frame):
-            if proc is not None:
-                terminate_group(proc.pid, proc)
-            raise Stop(130, f'dispatch interrupted by signal {signum}')
-        try:
-            for sig in previous_handlers:
-                signal.signal(sig, interrupted)
-            try:
-                proc = subprocess.Popen([str(x) for x in argv], cwd=WS, env=child_env(state['unit'], round_n), stdout=out, stderr=err, start_new_session=True)
-            except OSError as error:
-                finished(state)
-                return None, f'adapter start failed: {error}'
-            state['last_dispatch'] = {'pid': proc.pid, 'pgid': proc.pid, 'backend': backend, 'dispatch_id': None}
-            write_state(state)
-            timed_out = False
-            try:
-                status = proc.wait(timeout=dispatch_seconds)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                if not terminate_group(proc.pid, proc):
-                    unknown(state, label)
-                try:
-                    status = proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    unknown(state, label)
-            if group_alive(proc.pid) and not terminate_group(proc.pid, proc):
-                unknown(state, label)
-        finally:
-            for sig, previous in previous_handlers.items():
-                signal.signal(sig, previous)
+    status, timed_out, start_error = supervised(state, label, argv, stdout, stderr,
+                                                 dispatch_seconds, round_n, backend,
+                                                 writes_checkout=(mode == 'implement'))
+    if start_error:
+        return None, f'adapter start failed: {safe_detail(start_error)}'
     try:
         changed = digest(prompt_file.read_bytes()) != original
     except OSError:
@@ -797,7 +940,7 @@ def capture_dispatch(state: dict, agent: dict, label: str, prompt: str, cap: int
         raise Outcome('blocked', 'dispatch-identity')
     start, end = starts[0], ends[0]
     dispatch_id = start.get('dispatch_id')
-    if not isinstance(dispatch_id, str) or not dispatch_id or start.get('backend') != backend or start.get('mode') != 'read-only' or start.get('unit') != state['unit'] or end.get('dispatch_id') != dispatch_id or type(end.get('exit')) is not int or end.get('exit') != 0 or end.get('unit') != state['unit']:
+    if not isinstance(dispatch_id, str) or not dispatch_id or start.get('backend') != backend or start.get('mode') != mode or start.get('unit') != state['unit'] or end.get('dispatch_id') != dispatch_id or type(end.get('exit')) is not int or end.get('exit') != 0 or end.get('unit') != state['unit'] or (round_n is not None and (type(start.get('round')) is not int or start.get('round') != round_n or type(end.get('round')) is not int or end.get('round') != round_n)):
         raise Outcome('blocked', 'dispatch-identity')
     state['last_dispatch']['dispatch_id'] = dispatch_id
     write_state(state)
@@ -826,6 +969,8 @@ def capture_dispatch(state: dict, agent: dict, label: str, prompt: str, cap: int
             raise ValueError('empty message')
     except (OSError, UnicodeError, ValueError):
         raise Outcome('blocked', 'final-message')
+    if mode == 'implement':
+        atomic(directory / (label + '.final-message.txt'), message.encode('utf-8'))
     finished(state)
     return message, None
 
@@ -860,8 +1005,8 @@ def lookalike_heading(lines: list[str]) -> int | None:
 
 
 def spec_parts(message: str):
-    if len(message.strip().encode('utf-8')) > 32768:
-        return 'over 32768 bytes', 'invalid'
+    if len(message.encode('utf-8')) > 10000:
+        return 'over 10000 bytes', 'invalid'
     if has_controls(message):
         return 'control or format character', 'invalid'
     data = message.strip()
@@ -895,7 +1040,7 @@ def branch_cleanup(state: dict):
     current = git('branch', '--show-current').stdout.decode().strip()
     if current == state['base_branch'] and git('show-ref', '--verify', '--quiet', 'refs/heads/' + branch).returncode != 0:
         return
-    status = git('status', '--porcelain')
+    status = clean_status()
     clean = status.returncode == 0 and status.stdout == b''
     head = git('rev-parse', 'HEAD').stdout.decode().strip()
     if current == branch and clean and head == state['base_sha']:
@@ -918,6 +1063,8 @@ def terminal(state: dict, target: str, reason: str | None, cleanup=False):
     state['reason'] = reason
     begun(state, 'terminal', target)
     doc = read_run(state)
+    state['seq'] = max((x['seq'] for x in doc['events']), default=state['seq'])
+    write_state(state)
     unit_started = any(x['event'] == 'unit.begin' and x.get('unit') == state['unit'] for x in doc['events'])
     unit_ended = any(x['event'] == 'unit.end' and x.get('unit') == state['unit'] for x in doc['events'])
     if unit_started and not unit_ended:
@@ -971,7 +1118,7 @@ def ignored_manifest(state: dict, cap: int):
 def spec_command(unit: dict, cfg: dict, refs: dict):
     judge, _ = can_agents(unit, cfg)
     new_unit_preconditions(unit)
-    status = git('status', '--porcelain')
+    status = clean_status()
     if status.returncode:
         fail(3, f'cannot inspect working tree: {error_text(status)}')
     if status.stdout:
@@ -1011,6 +1158,7 @@ def spec_command(unit: dict, cfg: dict, refs: dict):
             if kind == 'invalid':
                 if attempt == 2:
                     raise Outcome('blocked', 'spec-invalid', parts)
+                prompt += '\nYour previous reply could not be used: ' + parts + '.\n'
                 continue
             lines, positions, bodies = parts
             final = '\n'.join(lines[:positions[-1]+1]) + '\n' + refs['coordinator-environment.md']
@@ -1064,8 +1212,22 @@ def tree_id(unit: str) -> str:
     return value
 
 
-def ignored_report(manifest: dict | None) -> str:
-    if not manifest or manifest.get('tracked') is False:
+def ignored_report(manifest: dict | None, unit: str | None = None) -> str:
+    def record(paths: list[str]):
+        if unit is None:
+            return
+        path = unit_dir(unit) / 'ignored-files.txt'
+        if paths:
+            atomic(path, (quoted_paths(paths) + '\n').encode('utf-8'))
+        else:
+            path.unlink(missing_ok=True)
+    def bounded(paths: list[str]) -> str:
+        shown = quoted_paths(paths[:50]) if paths else '(none)'
+        if len(paths) > 50:
+            shown += f'\n(and {len(paths) - 50} more; full list in the unit directory: ignored-files.txt)'
+        return shown
+    if manifest is None or manifest.get('tracked') is False:
+        record([])
         return 'Ignored files were not compared.'
     prior = manifest.get('files', {})
     current = {}
@@ -1078,7 +1240,8 @@ def ignored_report(manifest: dict | None) -> str:
                 continue
             current[name] = {'size': info.st_size, 'mtime_ns': info.st_mtime_ns}
     changed = sorted(name for name, info in current.items() if prior.get(name) != info)
-    return 'New or changed ignored files:\n' + (quoted_paths(changed) if changed else '(none)')
+    record(changed)
+    return 'New or changed ignored files:\n' + bounded(changed)
 
 
 def quoted_paths(paths: list[str]) -> str:
@@ -1149,7 +1312,10 @@ def utf8_text(value):
 def has_controls(value: str) -> bool:
     return any((ord(ch) < 32 and ch not in '\n\t') or 127 <= ord(ch) <= 159
                or 0x202A <= ord(ch) <= 0x202E or 0x2066 <= ord(ch) <= 0x2069
-               or ord(ch) in (0x200B, 0x2060, 0xFEFF) for ch in value)
+               or ord(ch) in (0x200B, 0x2028, 0x2029, 0x2060, 0xFEFF)
+               or 0x2061 <= ord(ch) <= 0x2064 or 0xFFF9 <= ord(ch) <= 0xFFFB
+               or 0xE0000 <= ord(ch) <= 0xE0FFF or unicodedata.category(ch) == 'Co'
+               for ch in value)
 
 
 def verdict_strings_safe(value) -> bool:
@@ -1198,10 +1364,14 @@ def review_prompt(template: str, spec: bytes, diff: str, links: list[str], ignor
     return template.replace('{{SECTIONS}}', sections)
 
 
-def review_step(state: dict, base: str, tree: str, spec: bytes, judge: dict, round_n: int, manifest: dict | None, cfg: dict, refs: dict, cal: dict):
+def review_step(state: dict, base: str, tree: str, spec: bytes, judge: dict, round_n: int, manifest: dict | None, cfg: dict, refs: dict, cal: dict, track_prepare=False):
+    if track_prepare:
+        begun(state, f'review-prepare-{round_n}')
     binary, links = classify(base, tree)
-    ignored = ignored_report(manifest)
+    ignored = ignored_report(manifest, state['unit'])
     if binary:
+        if track_prepare:
+            finished(state)
         return None, 'binary-change:\n' + quoted_paths(binary), tree, ignored
     diff_raw = git_ok('diff', '--text', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', base, tree)
     try:
@@ -1211,7 +1381,11 @@ def review_step(state: dict, base: str, tree: str, spec: bytes, judge: dict, rou
     template = refs['coordinator-review-prompt.md']
     first = review_prompt(template, spec, diff, links, ignored)
     if len(first.encode('utf-8')) > cfg['caps']['prompt_bytes']:
+        if track_prepare:
+            finished(state)
         return None, 'too-large', tree, ignored
+    if track_prepare:
+        finished(state)
     def dispatch_verdict(prompt, label):
         for attempt in (1,2):
             message, error = capture_dispatch(state, judge, f'{label}-{attempt}', prompt,
@@ -1281,6 +1455,247 @@ def check_command(unit: dict, spec: bytes, args, cfg: dict, refs: dict, cal: dic
     except Outcome as error:
         terminal(state, 'blocked', error.reason)
         fail(6, f'blocked({error.reason})')
+
+
+def dial(cal: dict, name: str) -> str:
+    try:
+        value = cal['dials'][name]['value']
+        if not isinstance(value, str):
+            raise ValueError(name)
+        return value
+    except (KeyError, TypeError, ValueError):
+        fail(5, f'invalid calibration document: {name}')
+
+
+def gate_policy(cfg: dict, cal: dict) -> str:
+    gate = cfg.get('gate')
+    setting = dial(cal, 'gate')
+    if gate and gate['mode'] == 'strict' and setting in ('strict', 'baseline'):
+        return 'strict'
+    if gate and gate['mode'] == 'passthrough' and gate['runner_unsupported'] and setting == 'baseline':
+        return 'passthrough'
+    fail(3, f'gate matrix refuses dial={setting}, config={gate["mode"] if gate else "missing"}')
+
+
+def run_preconditions(unit: str, cfg: dict, cal: dict):
+    state = state_of(unit)
+    if not state or state is UNREADABLE or state_kind(state) != 'spec-ready':
+        fail(3, 'unit is not spec-ready')
+    approved = state.get('spec', {})
+    if approved.get('approved') is not True or not isinstance(approved.get('digest'), str):
+        fail(3, 'spec is not approved')
+    try:
+        data = (unit_dir(unit) / 'approved-spec.txt').read_bytes()
+    except OSError:
+        fail(3, 'approved spec unreadable')
+    if digest(data) != approved['digest']:
+        fail(3, 'approved spec digest mismatch')
+    try:
+        approved_text = data.decode('utf-8')
+    except UnicodeError:
+        fail(3, 'approved spec is not UTF-8')
+    if has_controls(approved_text):
+        fail(3, 'approved spec contains control or format character')
+    lines = approved_text.splitlines()
+    if not lines or not lines[0].startswith('Unit: ') or not lines[0][6:].strip():
+        fail(3, 'approved spec has no Unit: name')
+    branch = git('branch', '--show-current')
+    if branch.returncode or branch.stdout.decode().strip() != state['branch'] or state['branch'] != 'canvas/' + unit:
+        fail(3, 'checkout is not the unit branch')
+    head = git('rev-parse', 'HEAD')
+    if head.returncode or head.stdout.decode().strip() != state['base_sha']:
+        fail(3, 'HEAD is not the unit base SHA')
+    status = clean_status()
+    if status.returncode or status.stdout:
+        fail(3, 'working tree is dirty or unavailable')
+    agents = {'judge': state['judge'], 'implementer': state['implementer']}
+    judge, implementer = can_agents(agents, cfg)
+    policy = gate_policy(cfg, cal)
+    if dial(cal, 'dispatch-mode') != 'implement':
+        fail(3, 'dispatch-mode is not implement')
+    current = context()
+    if current.get('state') != 'active' or current.get('run') != state['run']:
+        fail(3, 'journal context does not name unit run')
+    return state, data, lines[0][6:].strip(), judge, implementer, policy
+
+
+def parked(state: dict, reason: str, detail: str | None = None):
+    if detail is not None:
+        state['detail'] = detail
+        write_state(state)
+    terminal(state, 'parked', reason, cleanup=True)
+    suffix = f': {detail}' if detail else ''
+    fail(7, f'parked({reason}){suffix}')
+
+
+def iterate_prompt(template: str, spec: bytes, previous: dict) -> str:
+    lines = [json.dumps(previous['summary'], ensure_ascii=True)]
+    lines += [json.dumps(item, ensure_ascii=True, sort_keys=True) for item in previous['findings']]
+    values = {'SPEC': spec.decode('utf-8'), 'VERDICT_LINES': '\n'.join(lines)}
+    return re.sub(r'\{\{(SPEC|VERDICT_LINES)\}\}', lambda match: values[match.group(1)], template)
+
+
+def run_command(args, cfg: dict, refs: dict, cal: dict):
+    state, spec, title, judge, implementer, policy = run_preconditions(args.unit, cfg, cal)
+    manifest = read_json(unit_dir(args.unit) / 'ignored-manifest.json')
+    doc = read_run(state)
+    state['seq'] = max((x['seq'] for x in doc['events']), default=state['seq'])
+    write_state(state)
+    previous = None
+    try:
+        for round_n in range(1, cfg['caps']['rounds'] + 1):
+            run_write(state, 'round-begin', ['round-begin', '--unit', args.unit, '--round', str(round_n)],
+                      'round.begin', {'unit': args.unit, 'round': round_n})
+            prompt = spec.decode('utf-8') if previous is None else iterate_prompt(refs['coordinator-iterate-prompt.md'], spec, previous)
+            _, error = capture_dispatch(state, implementer, f'implement-{round_n}', prompt,
+                                        cfg['caps']['prompt_bytes'], round_n,
+                                        cfg['caps']['dispatch_seconds'], mode='implement')
+            if error:
+                parked(state, 'too-large' if error == 'too-large' else 'implement-dispatch-failed', error)
+            head = git('rev-parse', 'HEAD')
+            branch = git('branch', '--show-current')
+            if head.returncode or branch.returncode or head.stdout.decode().strip() != state['base_sha'] or branch.stdout.decode().strip() != state['branch']:
+                raise Outcome('blocked', 'head-moved')
+            begun(state, f'snapshot-{round_n}')
+            tree = tree_id(args.unit)
+            ignored = ignored_report(manifest, args.unit)
+            base_tree = git_ok('rev-parse', state['base_sha'] + '^{tree}').decode().strip()
+            finished(state)
+            if tree == base_tree:
+                print(ignored, flush=True)
+                parked(state, 'empty-diff')
+            result, reason, tree, ignored = review_step(state, state['base_sha'], tree, spec,
+                                                        judge, round_n, manifest, cfg, refs, cal, track_prepare=True)
+            if reason:
+                print(f'no review: {reason}\n{ignored}', flush=True)
+                parked(state, reason.split(':', 1)[0] if reason.startswith('binary-change:') else
+                       ('review-dispatch-failed' if reason.startswith('review-dispatch-failed:') else reason), reason)
+            if result['verdict'] == 'iterate':
+                if round_n == cfg['caps']['rounds']:
+                    parked(state, 'round-cap')
+                previous = result
+                continue
+            try:
+                fresh = calibration()
+                stop = dial(fresh, 'stop')
+                fresh_policy = gate_policy(cfg, fresh)
+            except Stop as error:
+                raise Outcome('blocked', 'gate-matrix' if error.code == 3 else 'calibration')
+            path = 'worktree' if stop == 'worktree' else 'commit'
+            state['stop_point'], state['path'] = stop, path
+            state['round'], state['tree'], state['verdict'] = round_n, tree, result
+            state['ignored'], state['gate_policy'] = ignored, fresh_policy
+            write_state(state)
+            begun(state, 'tree-check')
+            if tree_id(args.unit) != tree:
+                raise Outcome('blocked', 'tree-changed')
+            finished(state)
+            commit = None
+            if path == 'commit':
+                begun(state, 'stage')
+                staged = git('add', '-A')
+                if staged.returncode:
+                    raise Outcome('blocked', 'stage-failed', safe_detail(staged.stderr or staged.stdout))
+                finished(state)
+                message = unit_dir(args.unit) / 'commit-message.txt'
+                atomic(message, (title + '\n\nUnit-Id: ' + args.unit + '\nApproved-Spec-SHA256: ' + state['spec']['digest'] +
+                                 '\nReviewed-Tree: ' + tree + '\nCoordinator-Run: ' + state['run'] + '\n').encode('utf-8'))
+                commit_out = unit_dir(args.unit) / 'commit.stdout'
+                commit_err = unit_dir(args.unit) / 'commit.stderr'
+                code, timeout, start_error = supervised(state, 'commit', ['git', 'commit', '-F', message],
+                                                        commit_out, commit_err, cfg['caps']['commit_seconds'], round_n,
+                                                        writes_checkout=True)
+                if timeout:
+                    raise Outcome('blocked', 'commit-timeout')
+                if start_error or code:
+                    finished(state)
+                    parked(state, 'commit-failed', safe_detail(start_error if start_error else commit_err.read_bytes(), commit_err))
+                commit = git_ok('rev-parse', 'HEAD').decode().strip()
+                state['commit'] = commit
+                write_state(state)
+                if git_ok('rev-parse', 'HEAD^{tree}').decode().strip() != tree:
+                    raise Outcome('blocked', 'commit-tree-mismatch')
+                parents = git_ok('rev-list', '--parents', '-n', '1', 'HEAD').decode().split()
+                if len(parents) != 2 or parents[0] != commit or parents[1] != state['base_sha']:
+                    raise Outcome('blocked', 'head-moved')
+                status = clean_status()
+                if status.returncode or status.stdout:
+                    raise Outcome('blocked', 'tree-dirty-after-commit')
+                commit_doc = read_run(state)
+                if new_events(state, commit_doc):
+                    raise Outcome('blocked', 'journal-write')
+                state['seq'] = max((x['seq'] for x in commit_doc['events']), default=state['seq'])
+                finished(state)
+            log = unit_dir(args.unit) / 'gate.log'
+            gate_out = unit_dir(args.unit) / 'gate.stdout'
+            gate_err = unit_dir(args.unit) / 'gate.stderr'
+            argv = [SCRIPT / 'run-gate.sh', '--purpose', 'unit-final', '--log', log]
+            if fresh_policy == 'strict':
+                argv.append('--strict')
+            argv += ['--', *cfg['gate']['argv']]
+            state['gate_log'] = str(log)
+            write_state(state)
+            code, timeout, start_error = supervised(state, 'gate', argv, gate_out, gate_err,
+                                                    cfg['caps']['gate_seconds'], round_n,
+                                                    writes_checkout=True, gate_log=log)
+            if timeout:
+                finished(state)
+                parked(state, 'gate-timeout', str(log))
+            if start_error:
+                raise Outcome('blocked', 'gate-record', safe_detail(start_error))
+            doc = read_run(state)
+            events = new_events(state, doc)
+            state['seq'] = max((x['seq'] for x in doc['events']), default=state['seq'])
+            write_state(state)
+            if len(events) != 1 or events[0].get('event') != 'gate.result':
+                raise Outcome('blocked', 'gate-record')
+            event = events[0]
+            if (event.get('purpose') != 'unit-final' or event.get('policy') != fresh_policy or
+                event.get('unit') != args.unit or type(event.get('round')) is not int or event['round'] != round_n or
+                type(event.get('gate_exit')) is not int or event.get('verdict') not in ('red', 'green') or
+                (event['gate_exit'] == 0) != (event['verdict'] == 'green')):
+                raise Outcome('blocked', 'gate-record')
+            if code != event['gate_exit']:
+                raise Outcome('blocked', 'gate-record')
+            if event['verdict'] == 'red':
+                finished(state)
+                print(f'gate log: {log}', flush=True)
+                parked(state, 'gate-red', str(log))
+            expected_head = commit or state['base_sha']
+            expected_binding = 'clean' if commit else 'dirty'
+            if (event.get('binding') != expected_binding or
+                any(event.get(key) != expected_head for key in ('pre_head', 'post_head')) or
+                any(event.get(key) != tree for key in ('pre_tree', 'post_tree'))):
+                raise Outcome('blocked', 'gate-binding')
+            head = git('rev-parse', 'HEAD')
+            branch = git('branch', '--show-current')
+            if (head.returncode or branch.returncode or head.stdout.decode().strip() != expected_head or
+                branch.stdout.decode().strip() != state['branch']):
+                raise Outcome('blocked', 'head-moved')
+            if tree_id(args.unit) != tree:
+                raise Outcome('blocked', 'tree-changed')
+            if commit:
+                status = clean_status()
+                if status.returncode or status.stdout:
+                    raise Outcome('blocked', 'tree-changed')
+            finished(state)
+            state['state'], state['reason'] = 'awaiting-engineer', None
+            write_state(state)
+            report = {key: state.get(key) for key in ('unit', 'run', 'branch', 'base_sha', 'stop_point',
+                                                     'path', 'commit', 'tree', 'round', 'verdict',
+                                                     'gate_policy', 'gate_log', 'ignored')}
+            if fresh_policy == 'passthrough':
+                report['gate_limit'] = 'exit code only'
+                state['gate_limit'] = 'exit code only'
+                write_state(state)
+            print(json.dumps(report, ensure_ascii=True), flush=True)
+            return
+    except Outcome as error:
+        if error.detail is not None:
+            state['detail'] = error.detail
+            write_state(state)
+        terminal(state, 'blocked', error.reason, cleanup=True)
+        fail(6, f'blocked({error.reason})' + (f': {error.detail}' if error.detail else ''))
 
 
 def process_group(pgid: int | None):
@@ -1398,6 +1813,12 @@ def abandon_command(args):
         print('commits beyond base:\n' + git('log', '--oneline', state['base_sha']+'..HEAD').stdout.decode())
     print('git status:\n' + git('status', '--short').stdout.decode())
     pgid = ((state or {}).get('last_dispatch') or {}).get('pgid')
+    last = (state or {}).get('last_dispatch') or {}
+    step = (state or {}).get('step') or {}
+    if (step.get('phase') == 'begun' and step.get('name') == last.get('step') and
+        not isinstance(last.get('pid'), int) and not args.dispatches_terminated):
+        fail(3, 'Passing --dispatches-terminated asserts that the begun ' + str(step['name']) +
+             ' step and its descendants have terminated or cannot produce further side effects.')
     live = process_group(pgid)
     print('live process group:\n' + ('\n'.join(live) if live else (f'pgid={pgid}' if pgid else '(none)')))
     if isinstance(pgid, int) and pgid > 0 and group_alive(pgid) and not args.dispatches_terminated:
@@ -1486,10 +1907,14 @@ def status_command(args):
                 continue
             spec_path = path / 'spec.txt'
             current = digest(spec_path.read_bytes()) if spec_path.exists() else None
-            units.append({'unit': path.name, 'state': state.get('state'), 'reason': state.get('reason'),
-                          'run': state.get('run'), 'branch': state.get('branch'), 'base_sha': state.get('base_sha'),
-                          'spec_digest': current, 'approved': current is not None and current == state.get('spec', {}).get('digest') and bool(state.get('spec', {}).get('approved')),
-                          'verdict_recorded': (path / 'verdict.json').is_file()})
+            item = {'unit': path.name, 'state': state.get('state'), 'reason': state.get('reason'),
+                    'run': state.get('run'), 'branch': state.get('branch'), 'base_sha': state.get('base_sha'),
+                    'spec_digest': current, 'approved': current is not None and current == state.get('spec', {}).get('digest') and bool(state.get('spec', {}).get('approved')),
+                    'verdict_recorded': (path / 'verdict.json').is_file()}
+            if state_kind(state) == 'awaiting-engineer':
+                item.update({key: state.get(key) for key in ('stop_point', 'path', 'commit', 'tree', 'round',
+                                                             'verdict', 'gate_policy', 'gate_limit', 'gate_log', 'ignored')})
+            units.append(item)
     if args.unit:
         units = [x for x in units if x['unit'] == args.unit]
     obj = {'schema': 1, 'key': KEY, 'cdir': str(CDIR), 'quarantine': marker, 'units': units}
@@ -1506,7 +1931,7 @@ def init_command():
         if not path.exists():
             path.mkdir(mode=0o700)
     validate_cdir()
-    print(f'KEY={KEY}\nCDIR={CDIR}\n# config.json (create as 0600, owned by you):\n# {{"schema":1,"base_branch":"main","remote":"origin","agents":{{"judge":{{"backend":"claude","model":"sonnet"}},"implementer":{{"backend":"codex","model":"gpt-5"}}}},"caps":{{"rounds":3,"prompt_bytes":120000,"ignored_files":5000,"dispatch_seconds":3600}},"gate":{{"argv":["python3","-m","unittest"],"mode":"strict","runner_unsupported":false}}}}')
+    print(f'KEY={KEY}\nCDIR={CDIR}\n# config.json (create as 0600, owned by you):\n# {{"schema":1,"base_branch":"main","remote":"origin","agents":{{"judge":{{"backend":"claude","model":"sonnet"}},"implementer":{{"backend":"codex","model":"gpt-5"}}}},"caps":{{"rounds":3,"prompt_bytes":120000,"ignored_files":5000,"dispatch_seconds":3600,"commit_seconds":300,"gate_seconds":3600}},"gate":{{"argv":["python3","-m","unittest"],"mode":"strict","runner_unsupported":false}}}}')
 
 
 def parser():
@@ -1519,6 +1944,7 @@ def parser():
     p = sub.add_parser('abandon'); p.add_argument('--unit'); p.add_argument('--run'); p.add_argument('--dispatches-terminated', action='store_true')
     p = sub.add_parser('release-quarantine'); p.add_argument('--id', required=True); p.add_argument('--processes-gone', action='store_true'); p.add_argument('--note-file', required=True)
     p = sub.add_parser('check-diff'); p.add_argument('--unit-file', required=True); p.add_argument('--spec', required=True); p.add_argument('--spec-digest', required=True); p.add_argument('--base', required=True)
+    p = sub.add_parser('run'); p.add_argument('--unit', required=True)
     return root
 
 
@@ -1534,6 +1960,8 @@ def main():
     if args.command == 'abandon' and args.unit and not UNIT_RE.fullmatch(args.unit):
         fail(2, 'invalid unit id')
     if args.command == 'status' and args.unit and not UNIT_RE.fullmatch(args.unit):
+        fail(2, 'invalid unit id')
+    if args.command == 'run' and not UNIT_RE.fullmatch(args.unit):
         fail(2, 'invalid unit id')
     spec = outside_file(args.spec, 'spec file') if args.command == 'check-diff' else None
     if spec is not None:
@@ -1558,9 +1986,9 @@ def main():
         finally:
             release_lock(fd)
         return 0
-    cfg = config() if args.command in ('spec','check-diff') else None
-    refs = references() if args.command in ('spec','check-diff') else None
-    cal = calibration() if args.command in ('spec','check-diff') else None
+    cfg = config() if args.command in ('spec','check-diff','run') else None
+    refs = references() if args.command in ('spec','check-diff','run') else None
+    cal = calibration() if args.command in ('spec','check-diff','run') else None
     fd = lock()
     try:
         unknowns = reconcile()
@@ -1578,6 +2006,8 @@ def main():
             spec_command(unit, cfg, refs)
         elif args.command == 'check-diff':
             check_command(unit, spec, args, cfg, refs, cal)
+        elif args.command == 'run':
+            run_command(args, cfg, refs, cal)
         elif args.command == 'approve-spec':
             approve_command(args)
         elif args.command == 'abandon':

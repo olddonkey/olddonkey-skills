@@ -22,8 +22,9 @@ Components:
   one-release forwarding shims removed in 0.5.0. The shared observable interface
   is recorded in `references/dispatch-contract.md` and enforced by the contract
   suites. `scripts/loop-coordinator` is the foreground, headless coordinator:
-  it drafts specs through a judge, records engineer approval, and performs a
-  diagnostic diff review. Its operator guide is `references/coordinator.md`;
+  it drafts specs through a judge, records engineer approval, performs a
+  diagnostic diff review, and runs approved implementation rounds through a
+  bound gate, stopping for the engineer. Its operator guide is `references/coordinator.md`;
   `tests/coordinator-selftest.sh` uses temporary repositories and CLI stubs.
   `lib/loopauth/` is stdlib-only python3 shared by `scripts/loop-journal`
   and `scripts/loop-index` (canonical JSON and digests, the task-graph-v1
@@ -101,7 +102,9 @@ run):
 9. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
    `scripts/loop-evidence` record card) — expect `selftest: PASS (157 checks)`.
 10. `bash skills/implementation-loop/tests/coordinator-selftest.sh` — expect
-    `selftest: PASS (735 checks)`. It uses only local temporary repositories
+    `selftest: PASS (1745 checks)` with a readable process table. In a restricted
+    sandbox without `ps`, it expects `selftest: PASS (1641 checks)` and marks
+    the process-tree cases as skipped. It uses only local temporary repositories
     and backend CLI stubs, and never calls a real agent. `COORD_SELFTEST_JOBS`
     defaults to 4; set it to 1 for declaration-order serial execution.
 11. `bash skills/implementation-loop/tests/reduce-selftest.sh` (`lib/loopauth`:
