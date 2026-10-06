@@ -42,6 +42,11 @@
 # Omitted values are left to the Codex CLI's normal config resolution.
 
 set -euo pipefail
+# The adapter's own state is private (0600/0700), but the files a Codex
+# implementer creates in the real workspace belong to the engineer. The CLI
+# child therefore starts with the mask that was in force when this adapter was
+# invoked, and the private mask covers only what the adapter itself creates.
+CALLER_UMASK="$(umask)"
 umask 077
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
@@ -310,6 +315,7 @@ else
   describe "tier" "" "service_tier" >&2
   echo "mode: $MODE_LABEL" >&2
   echo "sandbox (requested): $SANDBOX_MODE" >&2
+  echo "worktree umask: $CALLER_UMASK (caller's; the CLI child inherits it)" >&2
   case "$ACTION" in
     fresh) echo "resume: no (fresh dispatch)" >&2 ;;
     resume) echo "resume: managed exact id${RESUME_ID:+ $RESUME_ID}" >&2 ;;
@@ -324,7 +330,7 @@ fi
 # handling, and stale-generation recovery.
 exec python3 - \
   "$STATE_ROOT" "$WORKSPACE" "$SANDBOX_MODE" "$ACTION" "$RESUME_ID" \
-  "$CODEX_BIN" "$MODEL" "$EFFORT" "$PROMPT" "$JOURNAL_HELPER" <<'PY'
+  "$CODEX_BIN" "$MODEL" "$EFFORT" "$PROMPT" "$JOURNAL_HELPER" "$CALLER_UMASK" <<'PY'
 import datetime
 import fcntl
 import hashlib
@@ -348,7 +354,11 @@ import time
     effort,
     prompt,
     journal_helper,
+    caller_umask_text,
 ) = sys.argv[1:]
+# The mask the adapter's caller had; this process keeps 0o077 for its own
+# state and hands the caller's mask only to the CLI child.
+CALLER_UMASK = int(caller_umask_text, 8)
 
 OWNER = os.getuid()
 FORBIDDEN = {
@@ -1160,6 +1170,10 @@ try:
         # group is the only state in which a CLI may exist unrecorded.
         record["state"] = "running"
         write_meta(record)
+        # preexec_fn runs in the child between fork and exec, so the CLI and
+        # everything it writes into the workspace see the caller's umask while
+        # this process keeps its private one. This interpreter has no threads,
+        # which is the condition under which preexec_fn is safe.
         child = subprocess.Popen(
             argv,
             cwd=workspace,
@@ -1168,6 +1182,7 @@ try:
             stderr=subprocess.STDOUT,
             start_new_session=True,
             close_fds=True,
+            preexec_fn=lambda: os.umask(CALLER_UMASK),
         )
         # start_new_session makes the child the leader of its own session and
         # process group, so its pid is also the group id. The group is

@@ -157,6 +157,12 @@ post-repair baseline. The sibling `writable-ledger.tsv` is append-only and
 records path, generation, and status for every grok home, temp root, and
 implement CWD.
 
+The adapter sets no umask of its own: grok runs under the caller's mask, and
+so does the snapshot copy below, so a file or directory the implementer
+creates keeps the modes the engineer's shell would give (the `worktree-umask`
+rule in [dispatch-contract.md](../../references/dispatch-contract.md)). Run
+state is made private with explicit modes.
+
 After grok exits, the adapter performs this ordered transition:
 
 1. terminate the recorded process group and prove `pgrep -g <PGID>` is empty

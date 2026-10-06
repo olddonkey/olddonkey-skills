@@ -2,6 +2,9 @@
 # Contract-suite execution wrapper for the Codex adapter.
 
 set -euo pipefail
+# Fixture setup is private, but the adapter starts under the mask this driver
+# was called with; the worktree-umask rule sets that mask deliberately.
+CALLER_UMASK="$(umask)"
 umask 077
 
 [[ "${1:-}" == "run" && $# -ge 5 ]] || {
@@ -104,6 +107,7 @@ esac
 case "$CASE_NAME" in
   help|prompt-required|missing-*|unknown-flags|background)
     cd "$TMPDIR_ABS"
+    umask "$CALLER_UMASK"
     exec "$ADAPTER" "$@"
     ;;
 esac
@@ -150,6 +154,13 @@ done
 printf '%s' "$last" > "$CONTRACT_TMPDIR/$CONTRACT_CASE.observed-prompt"
 printf '%s\n' "$model" > "$CONTRACT_TMPDIR/$CONTRACT_CASE.observed-model"
 printf '%s\n' "$mode" > "$CONTRACT_TMPDIR/$CONTRACT_CASE.observed-mode"
+if [[ "$CONTRACT_CASE" == "worktree-umask" ]]; then
+  # What the implementer creates must carry the caller's umask, not the
+  # adapter's private one; the suite reads these modes back from the worktree.
+  mkdir implementer-dir
+  printf 'created by the implementer\n' > implementer-file.txt
+  printf 'nested\n' > implementer-dir/nested.txt
+fi
 : "${output:?Codex stub did not receive -o}"
 if [[ "$CONTRACT_CASE" == "final-message" ]]; then
   printf '%s' $'final line one\nsecond "quoted" back\\slash café' > "$output"
@@ -172,6 +183,7 @@ chmod 755 "$CODEX_STUB"
 
 setup_loop_journal_fixture
 cd "$WORKSPACE"
+umask "$CALLER_UMASK"
 exec env \
   HOME="$HOME_DIR" \
   CODEX_HOME="$HOME_DIR/.codex" \
