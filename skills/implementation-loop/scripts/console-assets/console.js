@@ -1788,6 +1788,20 @@
     }
   }
 
+  // A dial's select holds the user's pick until Apply sends it, so a render
+  // writes the select only when the stored value differs from the one it
+  // last showed. A change that arrives while the select has focus waits
+  // until focus leaves.
+  function syncDialSelect(select) {
+    if (select._shown === select._want || document.activeElement === select) {
+      return;
+    }
+    select._shown = select._want;
+    if (select.value !== select._want) {
+      select.value = select._want;
+    }
+  }
+
   function createDial(item) {
     var key = item.key;
     var box = el("div");
@@ -1821,7 +1835,7 @@
       select.appendChild(option);
     }
     select.addEventListener("focusout", function () {
-      applySelectValue(select, select._want);
+      syncDialSelect(select);
     });
     var apply = el("button");
     apply.setAttribute("type", "button");
@@ -1835,6 +1849,8 @@
     reset.className = "dial-reset";
     txt(reset, "Reset to default");
     reset.addEventListener("click", function () {
+      // Reset also drops a pick that was never applied.
+      select._shown = null;
       resetDial(key);
     });
     controls.appendChild(select);
@@ -1871,7 +1887,7 @@
       box._grant = null;
     }
     box._select._want = current;
-    applySelectValue(box._select, current);
+    syncDialSelect(box._select);
     setDisabled(box._select, locked);
     setDisabled(box._apply, locked);
     setDisabled(box._reset, locked);

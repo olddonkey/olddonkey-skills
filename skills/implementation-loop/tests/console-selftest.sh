@@ -789,6 +789,7 @@ vm.runInContext(extractBlock(/var FLOW =/), sandbox);
   "appendLinkOrText",
   "dialMetaText",
   "applySelectValue",
+  "syncDialSelect",
   "setDisabled",
   "createDial",
   "updateDial",
@@ -1243,6 +1244,7 @@ vm.runInContext(extractBlock(/var FLOW =/), liveSandbox);
   "appendLinkOrText",
   "dialMetaText",
   "applySelectValue",
+  "syncDialSelect",
   "setDisabled",
   "createDial",
   "updateDial",
@@ -2600,6 +2602,346 @@ check("flow: index output without counts or timeline, or with no runs, shows an 
   liveSandbox.drawFlow(root, flowState("A", old));
   expectHint(/no run totals or timeline/);
 });
+
+// Dial picks run the page's own chain: renderDials -> createDial/updateDial
+// for a poll, and the Apply/Reset click handlers -> postDial/resetDial ->
+// fetch. Only the DOM and fetch are fakes.
+function extractList(name) {
+  const match = new RegExp("var " + name + " = \\[[^\\]]*\\];").exec(src);
+  if (!match) {
+    throw new Error("missing list " + name);
+  }
+  return match[0];
+}
+
+const dialNodes = {};
+const dialRequests = [];
+const dialSandbox = {
+  document: {
+    activeElement: null,
+    createElement: function (name) {
+      return makeLiveNode(name);
+    },
+    getElementById: function (id) {
+      return Object.prototype.hasOwnProperty.call(dialNodes, id) ? dialNodes[id] : null;
+    },
+  },
+  fetch: function (url, init) {
+    const request = { url: String(url), init: init || {} };
+    const reply = new Promise(function (resolve) {
+      request.respond = function (status, payload) {
+        resolve({
+          ok: status >= 200 && status < 300,
+          status: status,
+          json: function () {
+            return Promise.resolve(payload);
+          },
+        });
+      };
+    });
+    dialRequests.push(request);
+    return reply;
+  },
+  lastDials: null,
+  dialsBusy: false,
+  sessionCsrf: "csrf-selftest",
+};
+vm.createContext(dialSandbox);
+vm.runInContext(extractList("DIAL_ORDER"), dialSandbox);
+vm.runInContext(extractBlock(/var DIAL_OPTIONS =/), dialSandbox);
+vm.runInContext(extractList("PERMISSION_KEYS"), dialSandbox);
+[
+  "el",
+  "txt",
+  "setClass",
+  "wipe",
+  "keyedMap",
+  "itemById",
+  "syncKeyed",
+  "placeBefore",
+  "updateOptional",
+  "chip",
+  "bindLiveRegions",
+  "isPermissionKey",
+  "setDisabled",
+  "dialMetaText",
+  "syncDialSelect",
+  "createDial",
+  "updateDial",
+  "dialItems",
+  "policyKeys",
+  "noticeText",
+  "noticeClass",
+  "ensureDialsSkeleton",
+  "showDialsInert",
+  "renderDials",
+  "setDialError",
+  "apiHeaders",
+  "postDial",
+  "resetDial",
+].forEach(function (name) {
+  vm.runInContext(
+    "this." + name + " = " + extractBlock(new RegExp("function " + name + "\\(")),
+    dialSandbox
+  );
+});
+
+function dialDoc(stored) {
+  const dials = {};
+  dialSandbox.DIAL_ORDER.forEach(function (key) {
+    dials[key] = { value: dialSandbox.DIAL_OPTIONS[key][0], scope: "policy", source: "default" };
+  });
+  Object.keys(stored || {}).forEach(function (key) {
+    dials[key] = {
+      value: stored[key],
+      scope: "policy",
+      source: "store",
+      set_by: "console",
+      set_at: "2026-10-05T00:00:00Z",
+    };
+  });
+  return { schema: 1, store: "present", dials: dials };
+}
+
+// A fresh page showing the given stored values; returns one dial's card.
+function dialPage(key, stored) {
+  dialRequests.length = 0;
+  dialSandbox.lastDials = null;
+  dialSandbox.dialsBusy = false;
+  dialSandbox.document.activeElement = null;
+  dialNodes["dials-root"] = makeLiveNode("div");
+  dialNodes["dials-error"] = makeLiveNode("p");
+  dialSandbox.renderDials(dialDoc(stored));
+  let box = null;
+  liveWalk(dialNodes["dials-root"], function (node) {
+    if (node.nodeName === "select" && node.getAttribute("data-dial") === key) {
+      box = node.parentNode.parentNode;
+    }
+  });
+  if (!box || !box._select || !box._apply || !box._reset) {
+    throw new Error("renderDials drew no card for " + key);
+  }
+  return box;
+}
+
+// What pullDials does with each poll response.
+function dialPoll(stored) {
+  dialSandbox.renderDials(dialDoc(stored));
+}
+
+// Chromium 152 on the real page: when focus moves, document.activeElement is
+// already off the old element (it is <body>) while that element's focusout
+// handler runs. "late" is the other order, where it still names the old
+// element during focusout.
+function dialFocus(node, late) {
+  const doc = dialSandbox.document;
+  const from = doc.activeElement;
+  if (from === node) {
+    return;
+  }
+  if (!late) {
+    doc.activeElement = null;
+  }
+  if (from) {
+    (from.listeners.focusout || []).forEach(function (fn) {
+      fn();
+    });
+  }
+  doc.activeElement = node;
+}
+
+function dialEnabled(node) {
+  if (node.getAttribute("disabled") !== null) {
+    throw new Error(node.nodeName + " " + node.className + " is disabled");
+  }
+}
+
+function dialPick(select, value) {
+  dialEnabled(select);
+  dialFocus(select);
+  select.value = value;
+}
+
+// A mouse click or Tab + Enter: focus reaches the button first, then click.
+function dialPress(button, late) {
+  dialEnabled(button);
+  dialFocus(button, late);
+  (button.listeners.click || []).forEach(function (fn) {
+    fn();
+  });
+}
+
+function dialSent(index) {
+  const request = dialRequests[index];
+  if (!request) {
+    throw new Error("no request " + index + " (" + dialRequests.length + " made)");
+  }
+  return request.init.method + " " + request.url + " " + request.init.body;
+}
+
+function expectSelect(box, want, when) {
+  if (box._select.value !== want) {
+    throw new Error(when + ": select shows " + box._select.value + ", want " + want);
+  }
+}
+
+function expectSent(index, want, when) {
+  if (dialSent(index) !== want) {
+    throw new Error(when + ": sent " + dialSent(index) + ", want " + want);
+  }
+  if (dialRequests.length !== index + 1) {
+    throw new Error(when + ": " + dialRequests.length + " requests made");
+  }
+}
+
+check("dials: a pick survives focus moving to Apply, and Apply posts the pick (headless)", function () {
+  [false, true].forEach(function (late) {
+    const when = late ? "activeElement still the select in focusout" : "activeElement off the select in focusout";
+    const box = dialPage("gate", { gate: "strict" });
+    expectSelect(box, "strict", when + ", first render");
+    dialPick(box._select, "skip");
+    dialPress(box._apply, late);
+    expectSent(0, 'POST /api/dials {"key":"gate","value":"skip"}', when);
+    if (dialRequests[0].init.headers["X-Console-CSRF"] !== "csrf-selftest") {
+      throw new Error(when + ": the request lost its CSRF header");
+    }
+    expectSelect(box, "skip", when + ", request in flight");
+    if (box._value.textContent !== "strict") {
+      throw new Error(when + ": stored value shows " + box._value.textContent + " before the reply");
+    }
+  });
+});
+
+check("dials: an unchanged poll leaves an unapplied pick alone, focused or not, and Apply still posts it (headless)", function () {
+  const box = dialPage("gate", { gate: "strict" });
+  dialPick(box._select, "skip");
+  dialPoll({ gate: "strict" });
+  expectSelect(box, "skip", "poll while focused");
+  dialFocus(null);
+  expectSelect(box, "skip", "focus left for the page");
+  dialPoll({ gate: "strict" });
+  expectSelect(box, "skip", "poll while unfocused");
+  dialFocus(box._apply);
+  dialPoll({ gate: "strict" });
+  expectSelect(box, "skip", "poll between Tab and Enter");
+  dialPress(box._apply);
+  expectSent(0, 'POST /api/dials {"key":"gate","value":"skip"}', "Apply after three polls");
+});
+
+check("dials: a stored value that changes while the select has focus is applied when focus leaves (headless)", function () {
+  let box = dialPage("gate", { gate: "strict" });
+  dialFocus(box._select);
+  dialPoll({ gate: "baseline" });
+  expectSelect(box, "strict", "changed poll while focused");
+  if (box._value.textContent !== "baseline") {
+    throw new Error("stored value text stayed " + box._value.textContent);
+  }
+  dialPoll({ gate: "baseline" });
+  expectSelect(box, "strict", "second poll while focused");
+  dialFocus(box._apply);
+  expectSelect(box, "baseline", "focus left after a deferred change");
+
+  box = dialPage("gate", { gate: "strict" });
+  dialPick(box._select, "skip");
+  dialPoll({ gate: "baseline" });
+  expectSelect(box, "skip", "changed poll while a pick is focused");
+  dialFocus(null);
+  expectSelect(box, "baseline", "focus left with a pick and a deferred change");
+
+  box = dialPage("gate", { gate: "strict" });
+  dialPick(box._select, "skip");
+  dialFocus(null);
+  dialPoll({ gate: "baseline" });
+  expectSelect(box, "baseline", "changed poll while unfocused");
+
+  box = dialPage("gate", { gate: "strict" });
+  dialFocus(box._select);
+  dialPoll({ gate: "baseline" });
+  dialFocus(null, true);
+  dialPoll({ gate: "baseline" });
+  expectSelect(box, "baseline", "next poll when activeElement still named the select in focusout");
+});
+
+const unsettledChecks = [];
+process.on("exit", function () {
+  unsettledChecks.forEach(function (name) {
+    console.log("not ok - %s: never settled", name);
+  });
+});
+
+function checkLater(name, fn) {
+  unsettledChecks.push(name);
+  function settle(error) {
+    unsettledChecks.splice(unsettledChecks.indexOf(name), 1);
+    if (error) {
+      console.log("not ok - %s: %s", name, error.message ? error.message : error);
+    } else {
+      console.log("ok - %s", name);
+    }
+  }
+  return Promise.resolve()
+    .then(fn)
+    .then(
+      function () {
+        settle(null);
+      },
+      function (error) {
+        settle(error || new Error("rejected"));
+      }
+    );
+}
+
+// The reply handlers in postDial/resetDial run as promise jobs.
+function dialReply(index, status, payload) {
+  dialRequests[index].respond(status, payload);
+  return new Promise(function (resolve) {
+    setImmediate(resolve);
+  });
+}
+
+checkLater("dials: a failed Apply keeps the pick for a retry, a successful one shows the stored value, and Reset drops an unapplied pick (headless)", async function () {
+  const box = dialPage("gate", { gate: "strict" });
+  dialPick(box._select, "skip");
+  dialPress(box._apply);
+  expectSent(0, 'POST /api/dials {"key":"gate","value":"skip"}', "first Apply");
+  if (box._apply.getAttribute("disabled") !== "disabled") {
+    throw new Error("Apply stayed enabled while its request was in flight");
+  }
+  await dialReply(0, 502, { error: "loop-calibration failed" });
+  if (dialNodes["dials-error"].textContent !== "loop-calibration failed") {
+    throw new Error("error text " + dialNodes["dials-error"].textContent);
+  }
+  expectSelect(box, "skip", "after a failed Apply");
+  if (box._value.textContent !== "strict") {
+    throw new Error("a failed Apply changed the stored value text to " + box._value.textContent);
+  }
+  dialPress(box._apply);
+  expectSent(1, 'POST /api/dials {"key":"gate","value":"skip"}', "retry");
+  await dialReply(1, 200, dialDoc({ gate: "skip" }));
+  expectSelect(box, "skip", "after a successful Apply");
+  if (box._value.textContent !== "skip") {
+    throw new Error("stored value text " + box._value.textContent + " after a successful Apply");
+  }
+  dialPoll({ gate: "skip" });
+  expectSelect(box, "skip", "poll after a successful Apply");
+
+  dialPick(box._select, "strict");
+  dialPress(box._reset);
+  expectSent(2, 'POST /api/dials/reset {"key":"gate"}', "Reset");
+  expectSelect(box, "skip", "Reset pressed over an unapplied pick");
+  await dialReply(2, 200, dialDoc({}));
+  expectSelect(box, "baseline", "after Reset");
+
+  dialPick(box._select, "skip");
+  dialPress(box._reset);
+  expectSent(3, 'POST /api/dials/reset {"key":"gate"}', "Reset at the default");
+  expectSelect(box, "baseline", "Reset pressed at the default over an unapplied pick");
+  await dialReply(3, 200, dialDoc({}));
+  expectSelect(box, "baseline", "after Reset at the default");
+  dialPick(box._select, "strict");
+  dialPress(box._apply);
+  expectSent(4, 'POST /api/dials {"key":"gate","value":"strict"}', "Apply after Reset");
+});
 JS
 then
   :
@@ -2653,6 +2995,10 @@ else
   fail "flow: render, filter change, and run switch make no request (headless)"
   fail "flow: a poll updates the SVG in place; nodes, edges, and filter options keep their identity (headless)"
   fail "flow: index output without counts or timeline, or with no runs, shows an empty-state hint (headless)"
+  fail "dials: a pick survives focus moving to Apply, and Apply posts the pick (headless)"
+  fail "dials: an unchanged poll leaves an unapplied pick alone, focused or not, and Apply still posts it (headless)"
+  fail "dials: a stored value that changes while the select has focus is applied when focus leaves (headless)"
+  fail "dials: a failed Apply keeps the pick for a retry, a successful one shows the stored value, and Reset drops an unapplied pick (headless)"
 fi
 
 # ---------------------------------------------------------------------------
