@@ -83,7 +83,7 @@ run):
    `selftest: PASS (268 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
    — expect `selftest: PASS (106 checks)`;
    `bash skills/implementation-loop/tests/console-selftest.sh` — expect
-   `selftest: PASS (164 checks)`; and
+   `selftest: PASS (165 checks)`; and
    `bash skills/implementation-loop/tests/calibration-selftest.sh` — expect
    `selftest: PASS (121 checks)`. The journal, console, and calibration suites
    each run `tests/link-count-cases.py`, which loads that script's Python body
