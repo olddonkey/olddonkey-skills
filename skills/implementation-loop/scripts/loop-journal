@@ -68,6 +68,8 @@ EXIT_APPROVAL_CONSUME = 10
 # The bash wrapper passes its own path first; the rest is the command line.
 SELF_PATH = sys.argv.pop(1) if len(sys.argv) > 1 else ""
 OWNER = os.getuid()
+# How many times validate_regular looks at a path whose link count reads 0.
+RESTAT_ATTEMPTS = 16
 RUN_ID_RE = __import__("re").compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$")
 D2A_SENTENCE = (
     "Supplying --acknowledge <dispatch-id> asserts that the dispatch and its "
@@ -293,12 +295,28 @@ def ensure_directory(path: str) -> None:
 
 
 def validate_regular(path: str, *, allow_missing: bool = False) -> os.stat_result | None:
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        if allow_missing:
-            return None
-        raise JournalError(f"file is missing: {path}", EXIT_D4A) from None
+    # A link count of 0 is not a hard link. It is the file a concurrent
+    # atomic replace has just renamed over: lstat resolved the name to the
+    # old inode and read it after the rename unlinked it (measured on Linux
+    # and macOS). The name now refers to the replacement, so look again: a
+    # bounded number of times, with a growing pause because the stale
+    # result can persist for milliseconds. Only a count above 1 is a hard
+    # link.
+    for attempt in range(RESTAT_ATTEMPTS):
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            if allow_missing:
+                return None
+            raise JournalError(f"file is missing: {path}", EXIT_D4A) from None
+        if info.st_nlink != 0:
+            break
+        time.sleep(0.001 * attempt)
+    else:
+        raise JournalError(
+            f"file link count stayed at 0 across {RESTAT_ATTEMPTS} checks: {path}",
+            EXIT_D4A,
+        )
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise JournalError(f"not a regular file: {path}", EXIT_D4A)
     if info.st_uid != OWNER:
@@ -362,6 +380,27 @@ def create_regular(path: str, content: bytes = b"") -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    validate_regular(path)
+
+
+def ensure_lock_file(path: str) -> None:
+    # Create or accept, never check-then-create: another first writer, or
+    # loop-calibration, can create the lock in between.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        pass
+    except OSError as error:
+        raise JournalError(f"cannot open {path}: {error}", EXIT_D4A) from error
+    else:
+        try:
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     validate_regular(path)
 
 
@@ -429,10 +468,14 @@ def bootstrap_store(paths: dict[str, str]) -> None:
     ensure_directory(paths["root"])
     no_symlink_from(paths["root"], paths["runs_dir"])
     ensure_directory(paths["runs_dir"])
-    if not os.path.lexists(paths["lock"]):
-        create_regular(paths["lock"])
-    else:
-        validate_regular(paths["lock"])
+    ensure_lock_file(paths["lock"])
+
+
+def complete_store(paths: dict[str, str]) -> None:
+    # Caller holds meta.lock. generation and runs.tsv are created here and
+    # not in bootstrap_store, so that they are only ever written under the
+    # lock: an unlocked first writer could rename its initial "0" over a
+    # generation that another writer had already advanced.
     if not os.path.lexists(paths["generation"]):
         atomic_write(paths["generation"], "0\n")
     else:
@@ -1205,6 +1248,7 @@ def cmd_append(args: argparse.Namespace) -> int:
         preflight_unknown_schema(paths, preflight_context_runs(paths))
         bootstrap_store(paths)
         with Lock(paths):
+            complete_store(paths)
             record, reason = load_context(paths, canonical)
             if record is not None:
                 refuse_unknown_schema(paths, record["run"])
@@ -1230,6 +1274,7 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
     try:
         bootstrap_store(paths)
         with Lock(paths):
+            complete_store(paths)
             rows = rebuild_runs_tsv(paths)
     except JournalError as error:
         fail(str(error), error.code)
@@ -1245,6 +1290,7 @@ def cmd_gc(args: argparse.Namespace) -> int:
         preflight_unknown_schema(paths, preflight_store_runs(paths))
         bootstrap_store(paths)
         with Lock(paths):
+            complete_store(paths)
             infos = []
             for run_id in list_run_ids(paths):
                 info = inspect_run(paths, run_id)
@@ -1334,6 +1380,7 @@ def cmd_begin_run(args: argparse.Namespace) -> int:
         preflight_unknown_schema(paths, preflight_context_runs(paths, store_only=True))
         bootstrap_store(paths)
         with Lock(paths):
+            complete_store(paths)
             record, reason = None, None
             if os.path.lexists(paths["context"]):
                 record, reason = read_context_file(paths["context"], store_file=True)
@@ -1399,6 +1446,7 @@ def cmd_end_run(args: argparse.Namespace) -> int:
         preflight_unknown_schema(paths, preflight_context_runs(paths))
         bootstrap_store(paths)
         with Lock(paths):
+            complete_store(paths)
             record = require_fresh_context(paths, canonical)
             events, seq = repair_and_prepare(paths, record["run"])
             _ = events
@@ -1470,6 +1518,7 @@ def cmd_recover(args: argparse.Namespace) -> int:
         preflight_unknown_schema(paths, preflight_context_runs(paths))
         bootstrap_store(paths)
         with Lock(paths):
+            complete_store(paths)
             record = require_fresh_context(paths, canonical)
             info = inspect_run(paths, record["run"])
             if not info["exists"]:

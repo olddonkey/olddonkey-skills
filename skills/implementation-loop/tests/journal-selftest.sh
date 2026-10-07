@@ -38,7 +38,7 @@ export PYTHONDONTWRITEBYTECODE=1
 # A caller's declared attribution must not leak into fixture events.
 unset LOOP_UNIT LOOP_ROUND
 
-PINNED_CHECKS=604
+PINNED_CHECKS=621
 CHECKS=0
 FAILED_CHECKS=0
 CASE_STATUS=0
@@ -2233,6 +2233,146 @@ expect_status 5 "lib: a symlinked module inside lib/loopauth is refused"
 ln -s "$JOURNAL" "$TMP_ROOT/bin/loop-journal"
 run_cmd lib-script-symlink "$TMP_ROOT/bin/loop-journal" --help
 expect_status 0 "lib: a symlinked script resolves lib/ from its real path"
+
+# --- generation and runs.tsv are written only under meta.lock ---
+# A store holding nothing but the lock: a writer that cannot take the lock
+# must leave it that way, and the first writer that does take it completes it.
+WS_FIRST="$(workspace first-writer)"
+STORE_FIRST="$(store_dir "$WS_FIRST")"
+mkdir -p "$STORE_FIRST/runs"
+chmod 700 "$STORE_FIRST" "$STORE_FIRST/runs"
+: >"$STORE_FIRST/meta.lock"
+chmod 600 "$STORE_FIRST/meta.lock"
+python3 - "$STORE_FIRST/meta.lock" "$TMP_ROOT/first-lock.ready" <<'PY' &
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(20)
+PY
+LOCK_HOLDER_PID=$!
+for _ in $(seq 1 100); do [[ -e "$TMP_ROOT/first-lock.ready" ]] && break; sleep 0.05; done
+run_cmd first-busy env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=0 "$JOURNAL" begin-run --workspace "$WS_FIRST"
+expect_status 3 "first writer: a held lock yields lock-busy exit 3"
+if [[ ! -e "$STORE_FIRST/generation" && ! -e "$STORE_FIRST/runs.tsv" ]]; then
+  pass "first writer: without the lock neither generation nor runs.tsv is created"
+else
+  fail "first writer: without the lock neither generation nor runs.tsv is created"
+fi
+kill "$LOCK_HOLDER_PID" 2>/dev/null || true
+wait "$LOCK_HOLDER_PID" 2>/dev/null || true
+LOCK_HOLDER_PID=""
+run_cmd first-rebuild "$JOURNAL" rebuild --workspace "$WS_FIRST"
+expect_status 0 "first writer: the first command to take the lock succeeds"
+if python3 - "$STORE_FIRST" <<'PY'
+import os, stat, sys
+root = sys.argv[1]
+expected = {"generation": b"0\n", "runs.tsv": b""}
+for name, content in expected.items():
+    path = os.path.join(root, name)
+    info = os.lstat(path)
+    assert stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600, name
+    assert open(path, "rb").read() == content, name
+PY
+then
+  pass "first writer: generation starts at 0 and runs.tsv empty, both 0600"
+else
+  fail "first writer: generation starts at 0 and runs.tsv empty, both 0600"
+fi
+
+# The hard-link refusal is unchanged: a second link to generation is exit 5.
+ln "$STORE_FIRST/generation" "$TMP_ROOT/first-generation.alias"
+run_cmd first-hard-link "$JOURNAL" begin-run --workspace "$WS_FIRST"
+expect_status 5 "hard link: a second link to generation is refused"
+expect_output stderr "file has multiple hard links" "hard link: the refusal names the hard link"
+rm -f "$TMP_ROOT/first-generation.alias"
+run_cmd first-begin "$JOURNAL" begin-run --workspace "$WS_FIRST"
+expect_status 0 "hard link: begin-run succeeds once the second link is gone"
+if [[ "$(field_from "$CASE_STDOUT" generation)" == "1" && "$(cat "$STORE_FIRST/generation")" == "1" ]]; then
+  pass "first writer: the first run is generation 1"
+else
+  fail "first writer: the first run is generation 1"
+fi
+
+# Three first-ever writers started together on a fresh store, one of them
+# begin-run. All must succeed, and generation must end at 1: a first writer
+# that initialised generation outside the lock could put 0 back.
+RACE_ROUNDS=20
+RACE_LOG="$TMP_ROOT/first-race.log"
+: >"$RACE_LOG"
+race_exit_bad=0
+race_state_bad=0
+for round in $(seq 1 "$RACE_ROUNDS"); do
+  WS_RACE="$(workspace "first-race-$round")"
+  STORE_RACE="$(store_dir "$WS_RACE")"
+  printf '== round %s ==\n' "$round" >>"$RACE_LOG"
+  race_pids=()
+  env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=60 "$JOURNAL" rebuild --workspace "$WS_RACE" \
+    >>"$RACE_LOG" 2>&1 &
+  race_pids+=("$!")
+  env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=60 "$JOURNAL" begin-run --workspace "$WS_RACE" \
+    >"$TMP_ROOT/first-race-begin.stdout" 2>>"$RACE_LOG" &
+  race_pids+=("$!")
+  env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=60 "$JOURNAL" rebuild --workspace "$WS_RACE" \
+    >>"$RACE_LOG" 2>&1 &
+  race_pids+=("$!")
+  for pid in "${race_pids[@]}"; do
+    if ! wait "$pid"; then
+      race_exit_bad=$((race_exit_bad + 1))
+      printf 'round %s: a writer exited nonzero\n' "$round" >>"$RACE_LOG"
+    fi
+  done
+  if ! python3 - "$STORE_RACE" "$TMP_ROOT/first-race-begin.stdout" >>"$RACE_LOG" 2>&1 <<'PY'
+import os, sys
+root, begin_stdout = sys.argv[1], sys.argv[2]
+printed = dict(
+    line.split("=", 1) for line in open(begin_stdout, encoding="utf-8").read().splitlines()
+)
+generation = open(os.path.join(root, "generation"), encoding="utf-8").read()
+rows = open(os.path.join(root, "runs.tsv"), encoding="utf-8").read().splitlines()
+leftovers = [name for name in os.listdir(root) if name.startswith(".tmp-")]
+problems = []
+if printed.get("generation") != "1":
+    problems.append("begin-run printed generation %r" % printed.get("generation"))
+if generation != "1\n":
+    problems.append("generation file holds %r" % generation)
+if len(rows) != 1 or rows[0].split("\t")[:3] != ["1", printed.get("run"), "active"]:
+    problems.append("runs.tsv rows %r" % rows)
+if leftovers:
+    problems.append("temp files left: %r" % leftovers)
+if problems:
+    raise SystemExit("; ".join(problems))
+PY
+  then
+    race_state_bad=$((race_state_bad + 1))
+  fi
+done
+CASE_STDOUT=""
+CASE_STDERR="$RACE_LOG"
+if [[ $race_exit_bad -eq 0 ]]; then
+  pass "first writers: three started together all exit 0 in each of $RACE_ROUNDS rounds"
+else
+  fail "first writers: three started together all exit 0 in each of $RACE_ROUNDS rounds ($race_exit_bad nonzero)"
+fi
+if [[ $race_state_bad -eq 0 ]]; then
+  pass "first writers: generation ends at 1 with one run row and no temp file in each of $RACE_ROUNDS rounds"
+else
+  fail "first writers: generation ends at 1 with one run row and no temp file in each of $RACE_ROUNDS rounds ($race_state_bad wrong)"
+fi
+
+# --- A link count of 0 is a file being replaced, not a hard link ---
+link_count_case() { # $1=case $2=description
+  run_cmd "link-count-$1" env TMPDIR="$TMP_ROOT" \
+    python3 "$SCRIPT_DIR/link-count-cases.py" "$JOURNAL" "$1"
+  expect_status 0 "link count: $2"
+}
+link_count_case replaced-once "0 on the first look is read again and the file accepted"
+link_count_case replaced-repeatedly "0 on five looks in a row is still accepted"
+link_count_case never-settles "0 on every look is refused after a bounded number of looks, not as a hard link"
+link_count_case hard-link "a second link is refused as a hard link"
+link_count_case hard-link-after-replace "0 and then a second link is refused as a hard link"
+link_count_case removed-after-replace "0 and then no file is reported missing"
+link_count_case live-replace "a file being replaced in a tight loop is never refused"
 
 if [[ $CHECKS -ne $PINNED_CHECKS ]]; then
   printf 'selftest: FAIL (expected %d checks, ran %d)\n' "$PINNED_CHECKS" "$CHECKS" >&2

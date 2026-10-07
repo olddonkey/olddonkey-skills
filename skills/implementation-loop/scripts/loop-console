@@ -52,7 +52,12 @@ EXIT_D4A = 5
 EXIT_STORE = 6
 
 OWNER = os.getuid()
+# How many times validate_regular looks at a path whose link count reads 0.
+RESTAT_ATTEMPTS = 16
 TAIL_BYTES = 64 * 1024
+# Longer than loop-calibration's metadata-lock wait (5 s), so a busy lock
+# comes back as its exit 3 instead of a killed helper.
+CALIBRATION_WRITE_TIMEOUT_SEC = 15
 CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; "
     "connect-src 'self'; frame-ancestors 'none'; form-action 'none'; "
@@ -108,7 +113,10 @@ not apply the Origin or Sec-Fetch-Site restriction.
 POST /api/dials and /api/dials/reset are mutations: they require the
 same session+CSRF checks plus an exact Origin match (already required
 for every POST). The console writes no calibration bytes itself; it
-shells out to loop-calibration with --set-by console.
+shells out to loop-calibration with --set-by console. loop-calibration
+serializes each write on the workspace metadata lock (meta.lock); if
+that lock stays busy for its whole bounded wait the write is refused
+with 503 and the store is unchanged.
 
 State directory (D4a):
   $HOME/.config/olddonkey-loop/console/<workspace-key>/
@@ -238,12 +246,28 @@ def ensure_directory(path: str) -> None:
 
 
 def validate_regular(path: str, *, allow_missing: bool = False) -> os.stat_result | None:
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        if allow_missing:
-            return None
-        raise ConsoleError(f"file is missing: {path}", EXIT_D4A) from None
+    # A link count of 0 is not a hard link. It is the file a concurrent
+    # atomic replace has just renamed over: lstat resolved the name to the
+    # old inode and read it after the rename unlinked it (measured on Linux
+    # and macOS). The name now refers to the replacement, so look again: a
+    # bounded number of times, with a growing pause because the stale
+    # result can persist for milliseconds. Only a count above 1 is a hard
+    # link.
+    for attempt in range(RESTAT_ATTEMPTS):
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            if allow_missing:
+                return None
+            raise ConsoleError(f"file is missing: {path}", EXIT_D4A) from None
+        if info.st_nlink != 0:
+            break
+        time.sleep(0.001 * attempt)
+    else:
+        raise ConsoleError(
+            f"file link count stayed at 0 across {RESTAT_ATTEMPTS} checks: {path}",
+            EXIT_D4A,
+        )
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise ConsoleError(f"not a regular file: {path}", EXIT_D4A)
     if info.st_uid != OWNER:
@@ -622,14 +646,14 @@ def helper_stderr(completed: subprocess.CompletedProcess[bytes]) -> str:
 
 
 def run_loop_calibration(
-    calibration: str, argv: list[str]
+    calibration: str, argv: list[str], timeout: float = 5
 ) -> tuple[subprocess.CompletedProcess[bytes] | None, int, str | None]:
     try:
         completed = subprocess.run(
             [calibration, *argv],
             check=False,
             capture_output=True,
-            timeout=5,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return None, 504, "loop-calibration timed out"
@@ -645,6 +669,8 @@ def parse_calibration_document(
         message = helper_stderr(completed) or "loop-calibration failed"
         if completed.returncode == 2:
             return None, 400, message
+        if completed.returncode == 3:
+            return None, 503, message
         if completed.returncode == 6:
             if "repair or remove" not in message:
                 message = (
@@ -1116,7 +1142,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
                 return
             argv.extend(["--provenance", provenance])
         completed, status, run_error = run_loop_calibration(
-            self.server.state.calibration, argv
+            self.server.state.calibration, argv, CALIBRATION_WRITE_TIMEOUT_SEC
         )
         if completed is None:
             self._json_error(status, run_error or "loop-calibration failed")
@@ -1156,7 +1182,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             "console",
         ]
         completed, status, run_error = run_loop_calibration(
-            self.server.state.calibration, argv
+            self.server.state.calibration, argv, CALIBRATION_WRITE_TIMEOUT_SEC
         )
         if completed is None:
             self._json_error(status, run_error or "loop-calibration failed")
