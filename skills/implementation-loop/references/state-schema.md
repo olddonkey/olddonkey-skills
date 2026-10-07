@@ -67,12 +67,14 @@ The store contains `runs/`, `runs.tsv` (rebuildable cache), `context`,
 digits (`scripts/loop-journal:RUN_ID_RE`).
 
 **Envelope fields** (`scripts/loop-journal:ENVELOPE_KEYS`): `schema`, `seq`,
-`ts`, `event`, `run`, `attribution_failure`. Attributed lines carry
+`ts`, `event`, `run`, `attribution_failure`. Attributed schema-1 lines carry
 `schema=1`, monotonic `seq`, UTC `ts`, `event`, and `run`
 (`scripts/loop-journal:append_event`). Unattributed lines omit `seq` and
 record `attribution_failure` (`scripts/loop-journal:append_unattributed`).
+Schema-2 lines carry the same envelope with `schema=2` and are never
+unattributed (see [Schema 2](#schema-2-task-graph-v1-vocabulary-tg-v10a1) below).
 
-**Closed event list** (`scripts/loop-journal:EVENT_SPECS`):
+**Closed event list** (schema 1, `scripts/loop-journal:EVENT_SPECS`):
 
 `run.begin`, `run.end`, `unit.begin`, `unit.end`, `round.begin`,
 `checkpoint`, `review.recorded`, `publish.recorded`, `dispatch.start`,
@@ -100,21 +102,25 @@ only to snapshot bytes, and never write, repair, rebuild, or create a store.
   `run`, `ended`, `end_status`, `tail`, `complete`, and `events`. The events are
   the parsed segment objects in order, including a valid unterminated last
   line but excluding a torn last line. `tail` is `clean`, `unterminated`, or
-  `torn`; `complete` is true exactly for `clean`. `ended` reflects a `run.end`
-  event and `end_status` is its status or null. This works after context
+  `torn`; `complete` is true exactly for `clean`. `ended` reflects a schema-1
+  `run.end` event and `end_status` is the last such event's status or null;
+  schema-2 lines affect neither field. This works after context
   retirement and does not read context. A newline-terminated non-object line
   is mid-file corruption; an unterminated non-object last line is a torn tail.
   Output JSON is ASCII-safe, including stored non-ASCII and escaped surrogate
   strings. Exits: 0 when printed; 2 for usage,
   invalid or missing run, or no store; 3 for a busy lock; 4 for mid-file
-  corruption; 6 for a different event `run`, or an absent,
+  corruption; 6 for a different, absent, or non-string event `run`, or an absent,
   non-integer, repeated, or decreasing `seq`. It does not validate payloads
-  or dispatch ids.
+  or dispatch ids. Exit 9 means an unknown-schema line. Run and sequence
+  checks cover all parsed lines before the schema check, so an unknown-schema
+  line with an invalid run or sequence exits 6 rather than 9.
 - `loop-journal find-run --plan TEXT` prints one JSON object with `schema: 1`,
   sorted `runs` and `ambiguous` id lists. `runs` contains segments whose first
-  event is `run.begin` with the exact plan, including a valid first event
+  event is a schema-1 `run.begin` with the exact plan, including a valid first event
   without a trailing newline. `ambiguous` contains segments without a
-  parseable first event or whose first event is not `run.begin`; later
+  parseable first event, whose first event is not `run.begin`, or whose first
+  line is not schema 1 (including schema 2 or an unknown schema); later
   corruption does not affect the result. An absent plan on
   a valid `run.begin` is neither a match nor ambiguous. A missing store
   prints empty lists and creates nothing. Exits: 0 when printed; 2 for usage,
@@ -258,6 +264,294 @@ Each run object also carries:
 
 Events in `unattributed.jsonl` are in no run's timeline or counts; the
 top-level `unattributed_events` count is unchanged.
+
+### Schema 2 (task-graph-v1 vocabulary `tg-v1.0a1`)
+
+Authority is `lib/loopauth/` (stdlib-only python3): `canonical.py`
+(encoding and digests), `vocabulary.py` (record shapes, digest subjects, the
+guarded transition table), and `reduce.py` (the pure reducer).
+`scripts/loop-journal` and `scripts/loop-index` import it only from the
+`lib/` directory beside their own real `scripts/` directory and refuse a
+symlinked `lib/`, package directory, or module (journal exit 5, index exit 6).
+
+**Claims, not facts.** The journal is observational and unauthenticated. A
+schema-2 record may name an authority record (a request, answer, approval,
+capability, receipt) by digest, but every such reference, and every fact only
+the authority store could establish, is a **claim** its writer asserted. The
+reducer checks claims for shape and internal consistency and records each
+guard as `claimed`, never `verified`; no node is completion-eligible while any
+guard is only claimed, so schema 2 reduces runs and certifies nothing.
+Verification against the authority store is later work (sub-unit 0a.3).
+
+**Writing.** `loop-journal append --schema 2 --event E --json OBJ` validates
+the payload against `vocabulary.py` and writes the whole event as canonical
+JSON (sorted keys); `schema`, `seq`, `ts`, `event`, and `run` are added as for
+schema 1. `--field` is refused with `--schema 2`, only `--schema 2` is defined,
+and `LOOP_UNIT`/`LOOP_ROUND` are never read. A schema-2 record needs a fresh
+context and its `run_id` must equal that context's run; it is never written to
+`unattributed.jsonl`. Refusals exit 2 and name a reason code in brackets
+(`[missing-field]`, `[evidence-missing]`, `[strong-assurance]`,
+`[run-mismatch]`, `[request-digest-mismatch]`, ...). `approval.consume` is a
+reserved word whose shape is defined, but the journal refuses it, with or
+without `--schema`, with exit 10: consuming an approval is an authority-store
+transition. Without `--schema`, `append` is byte-for-byte schema 1.
+
+**Reading and failing closed.** A segment may mix schema-1 and schema-2 lines;
+every reader dispatches on each line's own `schema`. `loop-journal`'s
+schema-1 views — a run's terminal status and generation, and `recover`'s
+dispatch matching — read schema-1 lines only: a schema-2 line never closes a
+`dispatch.start`, never ends a run, and never counts as a duplicate. A line
+whose `schema` is absent or anything but the integer 1 or 2 is **unknown**:
+`loop-journal` reads the run as `degraded` (never terminal), `loop-index`
+counts it in the run's `unknown_schema_lines` and reads the run and the
+journal as `degraded`, and the reducer reports it and marks the run degraded;
+none interprets the line. The shared check every mutating command runs before
+its first write — `append` (either schema), `begin-run` (before retiring a
+stale context), `end-run`, `recover`, and `gc` (for every run in the store) —
+exits 9 on an unknown-schema line and never mutates, retires, deletes,
+truncates, or rewrites anything. It runs first as a read-only scan of the run
+the command would touch (the context's run; every run for `gc`), before the
+store is bootstrapped, so not even a missing `meta.lock`, `generation`, or
+`runs.tsv` is recreated; it repeats under the lock. `rebuild` still records
+the run as `degraded` in `runs.tsv`. `loop-index` counts schema-2 lines per
+run in `schema_2_events`; they feed none of the schema-1 views (units,
+dispatches, gates, checkpoint, counts, timeline).
+
+**Canonical encoding and digests** (`canonical.py`). UTF-8 JSON, object keys
+sorted by code point, no insignificant whitespace, integers only; floats,
+NaN, infinities, non-string keys, and duplicate keys are refused. Two limits
+are part of the format, and a value outside either has no canonical encoding
+and is refused: integers lie in [−(2^53 − 1), 2^53 − 1] (2^53 − 1 is
+accepted, 2^53 refused), and nesting is at most 64 levels deep, counting
+arrays and objects (a scalar is depth 0, `[]` and `{}` depth 1, `[[1]]` depth
+2; depth 64 is accepted, 65 refused). `digest(x) = "sha256:" +
+hex(sha256(canonical(x)))`. Digests cover named subject objects, never the
+record itself:
+
+| record | `request_digest` over | `result_digest` over |
+| --- | --- | --- |
+| `attempt.begin` | unit `{node_type, stop_point, node_spec_digest, input_content, dispatch}`; investigation `{node_type, node_spec_digest, input_content, dispatch}`; operation `{node_type, node_spec_digest, input_content, invocation, catalog_entry_digest}`; approval `{node_type, node_spec_digest, envelope_digest}` | — |
+| `operation.reserve` / `.spawned` / `.released` / `.result` | `{invocation, expected_preconditions}` | `.result` only: `{outcome, producer, log_digest, identity, output_content}` |
+| `gate.result` | `{suite_invocation, input_content}` | `{verdict, gate_exit, suite_exit, binding, producer, log_digest, output_content}` |
+| `review.recorded` | `{request_id, reviewed_content_digest}` | `{verdict, reviewer, findings_digest}` |
+| `publish.recorded` | `{stop_point, branch, content}` | `{outcome, sha, pr, head_sha, error_code}` |
+| `node.transition` | `{node_id, attempt_id, from, to}` | `{to, evidence, stop_point_result, markers, content}` |
+| `reconciliation.result` | carried: the substituted record's request subject | `{reconciliation_outcome, method, substitutes, observed_content, receipt_ref, substituted_result, producer}` |
+
+A subject always holds every field it names; an omitted optional field is JSON
+`null`, so omitted and explicitly `null` digest the same. Both digests are
+recomputed in exactly two places: `loop-journal append --schema 2` refuses a
+record whose claimed digest differs from the recomputed one, and the reducer
+re-validates every schema-2 line it folds (digests included) and rejects a
+mismatching line. `loop-journal`'s run inspection (`rebuild`, `gc`, context
+staleness, `recover`) and `loop-index` classify schema-2 lines by `schema`
+only and never recompute their digests, so a schema-2 line edited in place
+after it was written is caught only when the reducer reads it. Either check
+rejects internally inconsistent records only, and says nothing about whether
+the recorded invocation really ran or the producer really wrote the record. A
+reference's `digest` is `digest({"event": E, "payload": P})` over the named
+record's payload `P` (every field but the journal envelope).
+
+**Shapes.** Content is `{kind: "git", head, tree_oid}` or `{kind: "non-git",
+content_digest}`; an invocation is `{argv, cwd, env_digest, executor_version}`;
+a producer is `{tool, tool_digest}`; process identity is `{adapter: P,
+effect_child: P}` with `P = {boot_id, pid, pgid, start_time}`. A reference is
+`{kind, digest, node_id, attempt_id, content}` plus the claims its kind may
+carry (for example `answer`, `verdict`, `reviewer`, `input_content`,
+`receipt_object`); `content` is `null` for kinds that concern no content
+(answers, requests, expiries, cancellations, quiescence, reservations). A
+reference must claim the same `node_id` and `attempt_id` as its record.
+
+**Records.** Every record carries `vocabulary: "tg-v1.0a1"`. The binding
+envelope — `run_id`, `run_snapshot_digest`, `node_id`, `node_spec_digest`,
+`attempt_id`, `content`, `request_digest`, `result_digest` — is required on
+`gate.result`, `review.recorded`, `publish.recorded`, `operation.result`, and
+`node.transition`. Payloads are closed: an unknown field is refused.
+
+| event | fields beyond the vocabulary word |
+| --- | --- |
+| `attempt.begin` | `run_id`, `run_snapshot_digest`, `node_id`, `node_spec_digest`, `attempt_id`, `parent_attempt_id?`, `input_content`, `node_type`, `stop_point` (units), the node type's request fields, `request_digest` |
+| `node.transition` | the binding envelope, `from`, `to`, `node_type`, `stop_point` (units), `evidence` (the row's claimed evidence), `stop_point_result?`, `markers?` |
+| `operation.reserve` / `.spawned` / `.released` | `run_id`, `run_snapshot_digest`, `node_id`, `node_spec_digest`, `attempt_id`, `request_digest`, `invocation`, `expected_preconditions`, `retry_class` (`safe-retry`, `reconcilable`, `manual-only`); `.spawned` adds `identity` |
+| `operation.result` | the binding envelope, the reserve fields, `outcome` (`succeeded`, `failed`), `producer`, `log_digest`, `identity`, `output_content` |
+| `reconciliation.result` | the substituted record's `run_id`, `run_snapshot_digest`, `node_id`, `node_spec_digest`, `attempt_id`, `request_digest`; `reconciliation_outcome` (`succeeded`, `failed`, `unresolved`), `method` (`reconciliation`, `receipt-lookup`), `substitutes` (`operation-result`, `publish`; `dispatch-end` refused), `observed_content`, `receipt_ref` (receipt lookup only), `producer`, `result_digest`, `substituted_result` |
+| `graph.diverged` | `run_id`, `prior_semantic_digest`, `observed_semantic_digest` (must differ), `successor_run_id` |
+| `gate.result` | the binding envelope, `policy`, `purpose`, `binding`, `verdict`, `gate_exit` (consistent with `verdict`), `suite_exit`, `suite_invocation`, `input_content`, `producer`, `log_digest`, `output_content`; optional `totals`, `pre_*`/`post_*`, `reason`, `unit`, `round`, `input_isolation` |
+| `review.recorded` | the binding envelope, `reviewer`, `request_id`, `reviewed_content_digest`, `verdict`, `findings_digest` |
+| `publish.recorded` | the binding envelope, `stop_point`, `branch`, `outcome` (`published`, `failed`); `published` needs `sha`, and `pr` and `head_sha` (equal to `sha`) at `pr` or `merge`; `failed` needs `error_code`; inapplicable fields are absent or `null` |
+
+A `substituted_result` holds the substituted kind's claimed result:
+`{outcome, output_content, identity}` for `operation-result`, and the
+`publish.recorded` fields with the same requiredness for `publish`. An
+`unresolved` reconciliation carries neither `substituted_result` nor
+`observed_content` and substitutes nothing.
+
+**Assurance axes.** `input_isolation` (`endpoint-sampled` / `immutable`),
+`capability_assurance` (`declared` / `enforced`), `atomicity` (`unproven` /
+`atomic`), and `conformance` (`unproven` / `conformant`) may appear on any
+schema-2 record. The journal refuses the strong (second) value from any
+caller; an absent axis reads as weak, and every record reduces with every axis
+weakest.
+
+**Lifecycle, results, and markers.** Two axes and a marker set:
+
+- lifecycle state: `ready`, `blocked`, `starting`, `running`,
+  `unknown-outcome`; terminal `succeeded`, `failed`, `cancelled`, `parked`.
+  An `attempt.begin` starts in `ready`. Nothing transitions out of a terminal
+  state: a new `attempt.begin` (naming the latest attempt as
+  `parent_attempt_id`, same `node_type`) starts a new attempt instead.
+- stop-point result, carried only into `succeeded`: a unit's pinned stop
+  point `worktree`, `commit`, `pr`, `merge` yields `reviewed-worktree`,
+  `gated-commit`, `pr-open`, `integrated`; an investigation yields
+  `informational`; operation and approval nodes carry none.
+- markers `stale`, `superseded`, `landed-but-ungated`, carried by any node in
+  any state and set by each transition; omitted, `null`, and empty all mean
+  the empty set, duplicates are refused. A marker is never a result and never
+  success.
+
+**The guarded transition table.** Each `node.transition` carries its row's
+claimed evidence under `evidence`; a row's specific entry wins, and the two
+general rows apply only from a non-terminal state with no specific row to the
+same target.
+
+| from → to | claimed evidence |
+| --- | --- |
+| ready → starting | `selection_ref`, `authorization_ref`, `preconditions_digest` |
+| ready → blocked | `request_ref` |
+| blocked → ready | `answer_ref` (`answer`: `granted` or `answered`), `revalidation_digest` |
+| blocked → failed | `answer_ref` (`answer`: `denied`) |
+| blocked → parked | exactly one of `expiry_ref`, `no_permitted_actor: true` |
+| starting → running | `identity`, `observation_ref` to this attempt's `operation.spawned` with that identity |
+| starting → failed | `spawn_error`, `effect: "none"` |
+| starting → blocked | `drift_ref`, `barrier_closed_ref` to this attempt's `operation.reserve`, with no `operation.released` for the attempt |
+| running → blocked | `quiescence_ref`, `request_ref` |
+| running → succeeded | `terminal_evidence` for the pinned row, and the pinned `stop_point_result` |
+| running → failed | `failure_evidence` |
+| running → unknown-outcome | `lost_child: true` |
+| unknown-outcome → succeeded | optional `reconciliation_ref` (kind `reconciliation` or `receipt-lookup`; `attestation` refused), `terminal_evidence`, the pinned `stop_point_result` |
+| unknown-outcome → failed | optional `reconciliation_ref` (as above), `failure_evidence` |
+| unknown-outcome → parked | `unresolvable_reason` |
+| any non-terminal → cancelled | `cancel_ref`, `quiescence_ref` |
+| any non-terminal → parked | `park_reason` |
+
+`attempt.begin` pins `node_type` and, for a unit, `stop_point`; every later
+transition of the attempt must repeat them, so `terminal_evidence` is always
+selected by the pinned values.
+
+| node / stop point | `terminal_evidence` (each reference claims its content) |
+| --- | --- |
+| unit / worktree | `review_ref` (`verdict: pass`, `reviewer`) |
+| unit / commit | `review_ref`, `gate_ref` (`verdict: green`, `input_content`), `branch`, `sha` |
+| unit / pr | the commit row, `publish_ref` (`outcome: published`, `pr`, `head_sha` = `sha`) |
+| unit / merge | the pr row, `pre_merge_gate_ref`, `integration_content`, `provider_receipt_ref` (`receipt_object`, `outcome: merged`), `receipt_object` (equal to the receipt's), `target_containment` `{target_ref, contains: true}` |
+| investigation | `dispatch_ref`, `transcript_digest`, `report_digest` |
+| operation | `operation_result_ref` (`outcome: succeeded`) |
+| approval | `answer_ref` (`answer: granted`) |
+
+`failure_evidence` is `{phase, failing_ref, reason}`: a unit's `dispatch`
+(`dispatch-end` with a nonzero `exit`, or `dispatch-abandoned`), `review`
+(`review`, `verdict: iterate`, `iteration_limit_reached: true`), `gate`
+(`gate`, `verdict: red`), `publish` (`publish`, `outcome: failed`), or
+`integrate`; an investigation's `dispatch`; an operation's `operation`
+(`operation-result`, `outcome: failed`). An approval node has no `running →
+failed` phase. `integrate` is admissible only for a unit pinned to `merge`
+(any other pin is refused, `failure-phase`); its `failing_ref` is either the
+pre-merge gate — a red `gate` whose claimed `input_content` equals the
+`integration_content` that `failure_evidence` then also carries (a
+difference is refused, `evidence-inconsistent`) — or a `provider-receipt`
+with `outcome: refused`, which carries no `integration_content`.
+
+**Relations.** For each pair that must concern the same content (review ↔
+gate ↔ publication, and the pre-merge gate ↔ `integration_content`), exactly
+equal claimed content is recorded `identity-claimed`, anything else —
+including the same tree under a different head — `unproven`. At `commit`,
+`pr`, and `merge`, each referenced candidate content (`review_ref`,
+`gate_ref`, and at `pr`/`merge` `publish_ref`) is also related to the
+terminal evidence's `sha`: `identity-claimed` only when it is git content
+whose `head` equals `sha`, `unproven` otherwise (non-git content included),
+so references that agree with each other but not with `sha` stay unproven.
+Relations are recorded, never refused, and never read as identity.
+
+**Resolved journal references.** A reference to an accepted `operation.result`,
+`gate.result`, `review.recorded` or `publish.recorded` must agree with the
+record's event, node and attempt. Its required `content` is always compared:
+
+| reference kind | record field compared with reference `content` | other claims compared when present |
+| --- | --- | --- |
+| `operation-result` | `output_content` | `outcome` |
+| `gate` | `input_content` | `verdict`, `input_content` |
+| `review` | `content` (what was reviewed) | `verdict`, `reviewer` |
+| `publish` | `content` | `outcome`, `pr`, `head_sha` |
+
+An omitted claim is not a contradiction; a carried claim that the record
+does not state is a contradiction. Required claims are still selected by the
+vocabulary's evidence row. A resolving publication must also match the
+attempt's pinned `stop_point` and, for success, the terminal evidence's
+`branch`, mirroring the substitution path. Contradictions are refused as
+`reference-contradicted`; unresolved digests remain claims. Only the accepted
+prefix can resolve a reference, and guards remain `claimed`. A reconciliation
+receipt's `outcome` may be omitted; when present, a `succeeded` reconciliation
+requires `merged`, and a `failed` reconciliation requires `refused`.
+A mismatch is refused by the vocabulary as `evidence-inconsistent` (including
+through the journal CLI). An `unresolved` reconciliation constrains neither
+receipt outcome and substitutes nothing.
+
+**Late records and reconciliation.** An exit from `unknown-outcome` carries
+the full row evidence. Without `reconciliation_ref`, the operation-result or
+publish reference must resolve to an already accepted record of this attempt;
+an unresolved digest is refused (`reconciliation-required`). Rows without a
+substitutable slot remain park-only in both success and failure directions.
+This late-record form carries `evidence: {terminal_evidence: ...}` for success
+(and the pinned `stop_point_result`), or `evidence: {failure_evidence: ...}`
+for failure, with the resolving reference present in that full evidence.
+Alternatively, exactly one missing reference
+of the pinned row may be replaced by the `reconciliation_ref`'s record:
+`publish_ref` (unit `pr`/`merge`) or `operation_result_ref` (operation) into
+`succeeded`, the `failing_ref` of a `publish` or `operation` phase into
+`failed`. The record must belong to the attempt (in `unknown-outcome`), its
+`method` must equal the reference's kind, its `reconciliation_outcome` must
+match the transition, and its outcome pair must agree (`succeeded` ↔
+`succeeded`/`published`, `failed` ↔ `failed`), with `observed_content` equal
+to the substituted content. An `operation-result` substitute's
+`request_digest` must be one of the attempt's `operation.reserve` requests; a
+`publish` substitute's is recomputed from `{stop_point, branch, content}` with
+the pinned stop point. The substitution is refused when a record of that kind
+already exists for the attempt and request (agreeing or not), when two
+reconciliations substitute the same record, or when the reference is present;
+a record of that kind arriving after the substitution is refused. A lost
+dispatch cannot be substituted (schema-1 `dispatch.end` has no binding): it
+can only be parked.
+
+**The reducer** (`reduce.py`, pure). `reduce_run(events, *, run=None)` returns per-node
+state, `stop_point_result`, markers, guards (all `claimed`), transitions with
+their relations, per-record axes (weakest) and declared `unit`/`round`
+attribution, `rejected` records with a reason code, `unknown_schema`
+positions, `degraded`, and `gates` with `gate_ineligibility` reasons —
+`binding-changed`, `binding-unavailable`, `isolation-weak`,
+`verdict-not-green`, `verdict-inconsistent`, `envelope-missing` — each rule
+contributing its own reason. Schema-1 records reduce with every axis weakest
+and are never completion evidence. `completion_eligible` is always false.
+The optional keyword `run=ID` binds the expected journal run. A schema-1 or
+schema-2 line carrying another string `run` is refused as `run-mismatch`.
+Without `run=`, the first recognized-schema line carrying a string `run`
+pins it, so a foreign first line can cause later genuine lines to be refused;
+callers that know the segment id should pass it. For compatibility, even
+with `run=`, a schema-1 line whose `run` is absent or non-string remains
+`legacy`; `read-run` instead exits 6 for that shape. Schema-2 lines still
+require a string envelope `run`.
+Across records it also refuses: a record naming an attempt with no
+`attempt.begin`, or disagreeing with that attempt's `node_id`, `run_id`,
+`run_snapshot_digest`, or `node_spec_digest`; a second open attempt for a
+node; a `run_snapshot_digest` other than the run's first; a transition of a
+superseded attempt or from a state the attempt is not in; an
+`operation.spawned`, `.released`, or `.result` with no matching
+`operation.reserve`; and any new attempt after `graph.diverged`.
+Relevant rejection codes include `run-mismatch` (foreign string run),
+`reference-contradicted` (a resolving reference disagrees with its record or
+publication pin/branch), `reconciliation-required` (an unresolved late-record
+reference without reconciliation), `substitution-kind` (no substitutable slot;
+park only), `substitution-not-absent` (a real record already exists), and
+`substituted` (a late record arrives after substitution).
 
 ---
 

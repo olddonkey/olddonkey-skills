@@ -25,6 +25,10 @@ Components:
   it drafts specs through a judge, records engineer approval, and performs a
   diagnostic diff review. Its operator guide is `references/coordinator.md`;
   `tests/coordinator-selftest.sh` uses temporary repositories and CLI stubs.
+  `lib/loopauth/` is stdlib-only python3 shared by `scripts/loop-journal`
+  and `scripts/loop-index` (canonical JSON and digests, the task-graph-v1
+  schema-2 vocabulary, and the pure reducer); both import it only from the
+  `lib/` beside their real `scripts/` directory and refuse a symlinked `lib/`.
 - `skills/engineering-mode/` — goal-first wrapper over the loop. Shared
   playbooks in `references/playbooks/`, plus `scripts/tree-oid.sh` and its
   selftest.
@@ -80,8 +84,8 @@ run):
    `bash skills/implementation-loop/backends/claude/selftest.sh` — expect
    `selftest: PASS (307 checks)`.
 7. `bash skills/implementation-loop/tests/journal-selftest.sh` — expect
-   `selftest: PASS (268 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
-   — expect `selftest: PASS (106 checks)`;
+   `selftest: PASS (621 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
+   — expect `selftest: PASS (114 checks)`; and
    `bash skills/implementation-loop/tests/console-selftest.sh` — expect
    `selftest: PASS (165 checks)`; and
    `bash skills/implementation-loop/tests/calibration-selftest.sh` — expect
@@ -100,14 +104,19 @@ run):
     `selftest: PASS (735 checks)`. It uses only local temporary repositories
     and backend CLI stubs, and never calls a real agent. `COORD_SELFTEST_JOBS`
     defaults to 4; set it to 1 for declaration-order serial execution.
-11. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
-   — expect `selftest: PASS (207 checks)`.
-12. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
-13. Packaging checks: both marketplace JSON manifests must parse; every
+11. `bash skills/implementation-loop/tests/reduce-selftest.sh` (`lib/loopauth`:
+   canonical encoding, the schema-2 vocabulary, and the reducer against a
+   frozen oracle of the transition table and the terminal_evidence matrix,
+   plus schema-2 records written through `loop-journal append --schema 2`) —
+   expect `selftest: PASS (803 checks)`.
+12. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
+    — expect `selftest: PASS (207 checks)`.
+13. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
+14. Packaging checks: both marketplace JSON manifests must parse; every
    `SKILL.md` (under `skills/` and `cursor-implementation-loop/skills/`) must
    have non-empty `name:` and `description:` frontmatter; engineering-mode and
    Codex-loop Markdown must have no dangling relative links.
-14. `tree-oid` job (runs on ubuntu **and** macos):
+15. `tree-oid` job (runs on ubuntu **and** macos):
    `bash skills/engineering-mode/scripts/tree-oid-selftest.sh` and the
    Cursor copy — expect `selftest: PASS (202 checks)` each. Keep these scripts
    portable across GNU and BSD userlands.

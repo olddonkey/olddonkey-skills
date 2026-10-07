@@ -3,6 +3,7 @@
 #
 # Usage:
 #   loop-journal append --workspace DIR --event TYPE [--field k=v]... [--json OBJ]
+#   loop-journal append --schema 2 --workspace DIR --event TYPE --json OBJ
 #   loop-journal rebuild [--workspace DIR]
 #   loop-journal gc [--workspace DIR]
 #   loop-journal begin-run [--workspace DIR] [--plan TEXT]
@@ -19,13 +20,27 @@
 # dispatch.start, dispatch.end, dispatch.abandoned, and gate.result only, unless
 # the payload already carries them. An invalid value exits 2.
 #
+# Schema 2 (task-graph-v1 vocabulary tg-v1.0a1): `append --schema 2` validates
+# the --json payload against lib/loopauth/vocabulary.py, recomputes its
+# request_digest/result_digest, refuses strong assurance values, and writes the
+# whole event as canonical JSON (sorted keys). Without --schema, append is
+# schema 1 exactly as before. approval.consume is refused (exit 10). Every
+# mutating command refuses (exit 9) a run whose segment holds a line with an
+# unknown schema, before it creates or writes anything in the store (a
+# read-only scan, repeated under the lock), and never rewrites that line.
+# Schema-1 interpretation (run terminal state, generation, recover's dispatch
+# matching) reads schema-1 lines only.
+#
+# Shared code is imported from the sibling lib/ of this script's real path; a
+# symlinked lib/ is refused.
+#
 # Test-only overrides (not for production):
 #   LOOP_JOURNAL_GC_CAP_BYTES     default 52428800 (50 MB)
 #   LOOP_JOURNAL_LOCK_TIMEOUT_SEC default 5
 
 set -euo pipefail
 umask 077
-exec python3 - "$@" <<'PY'
+exec python3 - "${BASH_SOURCE[0]}" "$@" <<'PY'
 from __future__ import annotations
 
 import argparse
@@ -47,7 +62,11 @@ EXIT_D4A = 5
 EXIT_STORE = 6
 EXIT_RECOVER = 7
 EXIT_ACTIVE_RUN = 8
+EXIT_UNKNOWN_SCHEMA = 9
+EXIT_APPROVAL_CONSUME = 10
 
+# The bash wrapper passes its own path first; the rest is the command line.
+SELF_PATH = sys.argv.pop(1) if len(sys.argv) > 1 else ""
 OWNER = os.getuid()
 # How many times validate_regular looks at a path whose link count reads 0.
 RESTAT_ATTEMPTS = 16
@@ -152,6 +171,41 @@ class JournalError(Exception):
 def fail(message: str, code: int) -> None:
     print(f"error: {message}", file=sys.stderr)
     raise SystemExit(code)
+
+
+def load_loopauth() -> tuple[object, object]:
+    """Import lib/loopauth from the lib/ directory beside this script's real
+    scripts/ directory. A symlinked or missing lib/, package directory, or
+    package entry is refused (exit 5); nothing else on sys.path can shadow it."""
+    if not SELF_PATH:
+        fail("cannot resolve the loop-journal script path", EXIT_D4A)
+    real = os.path.realpath(SELF_PATH)
+    lib = os.path.join(os.path.dirname(os.path.dirname(real)), "lib")
+    package = os.path.join(lib, "loopauth")
+    for path in (lib, package):
+        try:
+            info = os.lstat(path)
+        except OSError:
+            fail(f"shared library directory is missing: {path}", EXIT_D4A)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            fail(f"refusing shared library path (symlink or not a directory): {path}", EXIT_D4A)
+    for entry in os.scandir(package):
+        if entry.is_symlink():
+            fail(f"refusing shared library path (symlink): {entry.path}", EXIT_D4A)
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, lib)
+    import importlib
+
+    module = importlib.import_module("loopauth")
+    if os.path.dirname(os.path.realpath(str(module.__file__))) != package:
+        fail(f"loopauth resolved outside {package}", EXIT_D4A)
+    return (
+        importlib.import_module("loopauth.canonical"),
+        importlib.import_module("loopauth.vocabulary"),
+    )
+
+
+canonjson, vocabulary = load_loopauth()
 
 
 def utc_iso() -> str:
@@ -520,6 +574,13 @@ def parse_segment(data: bytes) -> tuple[list[dict], int, bool]:
     return events, 0, False
 
 
+def schema_1_lines(events: list[dict]) -> list[dict]:
+    """The schema-1 view of a segment. Every reading of `event` or a payload
+    field here (run.begin/run.end, dispatch matching in recover) uses only
+    these lines: a schema-2 line never closes a dispatch or ends a run."""
+    return [event for event in events if vocabulary.line_schema(event) == 1]
+
+
 def inspect_run(paths: dict[str, str], run_id: str) -> dict:
     path = segment_path(paths, run_id)
     if not os.path.lexists(path):
@@ -532,16 +593,26 @@ def inspect_run(paths: dict[str, str], run_id: str) -> dict:
             "bytes": 0,
             "generation": None,
             "status": "missing",
+            "unknown_schema": [],
         }
     validate_regular(path)
     info = os.lstat(path)
     data = read_file_bytes(path)
     events, truncated, mid = parse_segment(data)
+    # Dispatch on each line's schema. A line whose schema is neither 1 nor 2
+    # is degraded evidence: the run reads degraded and never terminal.
+    unknown = [
+        index + 1
+        for index, event in enumerate(events)
+        if vocabulary.line_schema(event) is None
+    ]
+    legacy = schema_1_lines(events)
+    degraded = mid or bool(unknown)
     terminal = False
-    status = "degraded" if mid else "active"
+    status = "degraded" if degraded else "active"
     generation = None
-    if not mid:
-        for event in events:
+    if not degraded:
+        for event in legacy:
             if event.get("event") == "run.begin":
                 try:
                     generation = int(event.get("generation"))
@@ -556,7 +627,7 @@ def inspect_run(paths: dict[str, str], run_id: str) -> dict:
                 status = str(event.get("status"))
     else:
         status = "degraded"
-        for event in events:
+        for event in legacy:
             if event.get("event") == "run.begin":
                 try:
                     generation = int(event.get("generation"))
@@ -568,11 +639,29 @@ def inspect_run(paths: dict[str, str], run_id: str) -> dict:
         "events": events,
         "truncated_bytes": truncated,
         "mid_corrupt": mid,
-        "terminal": False if mid else terminal,
+        "terminal": False if degraded else terminal,
         "bytes": info.st_size,
         "generation": generation,
         "status": status,
+        "unknown_schema": unknown,
     }
+
+
+def refuse_unknown_schema(
+    paths: dict[str, str], run_id: str, info: dict | None = None
+) -> None:
+    """The fail-closed segment check every mutating command runs before its
+    first write: a run whose segment holds an unknown-schema line is never
+    mutated, retired, or deleted, and that line is never rewritten."""
+    if info is None:
+        info = inspect_run(paths, run_id)
+    if info["unknown_schema"]:
+        lines = ", ".join(str(item) for item in info["unknown_schema"])
+        raise JournalError(
+            f"run {run_id} has line(s) with an unknown schema (line {lines}); "
+            "refusing to mutate, retire, or delete it",
+            EXIT_UNKNOWN_SCHEMA,
+        )
 
 
 def list_run_ids(paths: dict[str, str]) -> list[str]:
@@ -594,6 +683,50 @@ def list_run_ids(paths: dict[str, str]) -> list[str]:
         validate_regular(entry.path)
         found.append(run_id)
     return found
+
+
+def preflight_unknown_schema(paths: dict[str, str], run_ids: list[str]) -> None:
+    """The read-only half of the fail-closed segment check, run before
+    bootstrap_store can create a directory, meta.lock, generation, or
+    runs.tsv: a run the command would touch whose segment holds an
+    unknown-schema line is refused (exit 9) with the store untouched. A run
+    this pass cannot read is left to the locked path, which repeats the check
+    under the lock."""
+    for run_id in run_ids:
+        try:
+            info = inspect_run(paths, run_id)
+        except JournalError:
+            continue
+        refuse_unknown_schema(paths, run_id, info)
+
+
+def preflight_context_runs(paths: dict[str, str], *, store_only: bool = False) -> list[str]:
+    """Read-only: the run of the context the locked path will read
+    (LOOP_CONTEXT when set, unless store_only, else the store's context
+    file), or [] when there is none or it cannot be read."""
+    try:
+        no_symlink_from(managed_loop_root(), paths["runs_dir"])
+        no_symlink_from(managed_loop_root(), paths["context"])
+        override = None if store_only else os.environ.get("LOOP_CONTEXT")
+        if override:
+            record, _reason = read_context_file(override, store_file=False)
+        else:
+            record, _reason = read_context_file(paths["context"], store_file=True)
+    except JournalError:
+        return []
+    return [record["run"]] if record is not None else []
+
+
+def preflight_store_runs(paths: dict[str, str]) -> list[str]:
+    """Read-only: every run segment in the store, or [] when the runs
+    directory is missing or cannot be listed."""
+    try:
+        no_symlink_from(managed_loop_root(), paths["runs_dir"])
+        if not os.path.lexists(paths["runs_dir"]):
+            return []
+        return list_run_ids(paths)
+    except JournalError:
+        return []
 
 
 def rebuild_runs_tsv(paths: dict[str, str]) -> list[dict]:
@@ -762,7 +895,18 @@ def append_line(path: str, obj: dict) -> None:
     line = dump_json(obj) + "\n"
     if "\n" in line[:-1] or "\r" in line:
         fail("serialized event contains a raw newline", EXIT_USAGE)
-    data = line.encode("utf-8")
+    append_bytes(path, line.encode("utf-8"))
+
+
+def append_canonical_line(path: str, obj: dict) -> None:
+    """A schema-2 event: the whole object as canonical JSON (sorted keys)."""
+    data = canonjson.canonical(obj) + b"\n"
+    if b"\n" in data[:-1] or b"\r" in data:
+        fail("serialized event contains a raw newline", EXIT_USAGE)
+    append_bytes(path, data)
+
+
+def append_bytes(path: str, data: bytes) -> None:
     created = False
     if not os.path.lexists(path):
         create_regular(path)
@@ -1002,7 +1146,78 @@ def append_unattributed(
     return obj
 
 
+def refuse_approval_consume(event: str) -> None:
+    if event == "approval.consume":
+        fail(
+            "approval.consume is refused in Phase A: only the authority store can "
+            "consume an approval; a journal line never does",
+            EXIT_APPROVAL_CONSUME,
+        )
+
+
+def cmd_append_schema_2(args: argparse.Namespace) -> int:
+    if args.schema != "2":
+        fail(f"unsupported --schema {args.schema}; only --schema 2 is defined", EXIT_USAGE)
+    if args.field:
+        fail("--schema 2 takes its payload from --json only", EXIT_USAGE)
+    if args.json is None:
+        fail("--schema 2 requires --json", EXIT_USAGE)
+    try:
+        payload = canonjson.loads(args.json)
+    except canonjson.CanonicalError as error:
+        fail(f"invalid --json: {error}", EXIT_USAGE)
+    if not isinstance(payload, dict):
+        fail("--json must be an object", EXIT_USAGE)
+    try:
+        vocabulary.validate_record(args.event, payload)
+    except vocabulary.VocabularyError as error:
+        fail(f"schema-2 {args.event} refused [{error.code}]: {error.message}", EXIT_USAGE)
+    canonical = resolve_workspace(args.workspace)
+    paths = store_paths(canonical)
+    try:
+        preflight_unknown_schema(paths, preflight_context_runs(paths))
+        bootstrap_store(paths)
+        with Lock(paths):
+            record, reason = load_context(paths, canonical)
+            if record is not None:
+                refuse_unknown_schema(paths, record["run"])
+            if reason is not None or record is None:
+                # A schema-2 record binds to the active run; it is never
+                # written unattributed.
+                fail(
+                    f"schema-2 {args.event} refused [no-context]: no fresh context "
+                    f"({reason or 'context missing'})",
+                    EXIT_USAGE,
+                )
+            run_id = record["run"]
+            if payload.get("run_id") != run_id:
+                fail(
+                    f"schema-2 {args.event} refused [run-mismatch]: run_id "
+                    f"{payload.get('run_id')} differs from the active run {run_id}",
+                    EXIT_USAGE,
+                )
+            if inspect_run(paths, run_id)["mid_corrupt"]:
+                fail("mid-file corruption", EXIT_MID_CORRUPT)
+            _events, seq = repair_and_prepare(paths, run_id)
+            obj: dict = {
+                "schema": vocabulary.SCHEMA,
+                "seq": seq,
+                "ts": utc_iso(),
+                "event": args.event,
+                "run": run_id,
+            }
+            obj.update(payload)
+            append_canonical_line(segment_path(paths, run_id), obj)
+            rebuild_runs_tsv(paths)
+    except JournalError as error:
+        fail(str(error), error.code)
+    return EXIT_OK
+
+
 def cmd_append(args: argparse.Namespace) -> int:
+    refuse_approval_consume(args.event)
+    if args.schema is not None:
+        return cmd_append_schema_2(args)
     if args.json is not None and args.field:
         fail("--json and --field are mutually exclusive", EXIT_USAGE)
     payload: dict = {}
@@ -1030,10 +1245,13 @@ def cmd_append(args: argparse.Namespace) -> int:
     canonical = resolve_workspace(args.workspace)
     paths = store_paths(canonical)
     try:
+        preflight_unknown_schema(paths, preflight_context_runs(paths))
         bootstrap_store(paths)
         with Lock(paths):
             complete_store(paths)
             record, reason = load_context(paths, canonical)
+            if record is not None:
+                refuse_unknown_schema(paths, record["run"])
             if reason is not None:
                 run_id = record["run"] if record else None
                 append_unattributed(paths, args.event, payload, reason, run_id)
@@ -1069,6 +1287,7 @@ def cmd_gc(args: argparse.Namespace) -> int:
     paths = store_paths(canonical)
     cap = gc_cap_bytes()
     try:
+        preflight_unknown_schema(paths, preflight_store_runs(paths))
         bootstrap_store(paths)
         with Lock(paths):
             complete_store(paths)
@@ -1079,6 +1298,9 @@ def cmd_gc(args: argparse.Namespace) -> int:
                 if info["generation"] is None:
                     info["generation"] = 0
                 infos.append(info)
+            # Fail closed before any deletion or cache rewrite.
+            for item in infos:
+                refuse_unknown_schema(paths, item["run_id"], item)
             total = sum(int(item["bytes"]) for item in infos)
             terminated = [
                 item
@@ -1155,12 +1377,15 @@ def cmd_begin_run(args: argparse.Namespace) -> int:
         if contains_newline(args.plan):
             fail("values must not contain raw newlines", EXIT_USAGE)
     try:
+        preflight_unknown_schema(paths, preflight_context_runs(paths, store_only=True))
         bootstrap_store(paths)
         with Lock(paths):
             complete_store(paths)
             record, reason = None, None
             if os.path.lexists(paths["context"]):
                 record, reason = read_context_file(paths["context"], store_file=True)
+                if record is not None and reason is None:
+                    refuse_unknown_schema(paths, record["run"])
                 if record is not None and reason is None and not context_stale(paths, record):
                     if (
                         record["workspace"] == canonical
@@ -1206,6 +1431,8 @@ def cmd_begin_run(args: argparse.Namespace) -> int:
 
 def require_fresh_context(paths: dict[str, str], canonical: str) -> dict:
     record, reason = load_context(paths, canonical)
+    if record is not None:
+        refuse_unknown_schema(paths, record["run"])
     if reason is not None or record is None:
         fail(f"no fresh context ({reason or 'context missing'})", EXIT_USAGE)
     return record
@@ -1216,6 +1443,7 @@ def cmd_end_run(args: argparse.Namespace) -> int:
     canonical = resolve_workspace(args.workspace)
     paths = store_paths(canonical)
     try:
+        preflight_unknown_schema(paths, preflight_context_runs(paths))
         bootstrap_store(paths)
         with Lock(paths):
             complete_store(paths)
@@ -1287,6 +1515,7 @@ def cmd_recover(args: argparse.Namespace) -> int:
     paths = store_paths(canonical)
     acks = list(args.acknowledge or [])
     try:
+        preflight_unknown_schema(paths, preflight_context_runs(paths))
         bootstrap_store(paths)
         with Lock(paths):
             complete_store(paths)
@@ -1298,7 +1527,8 @@ def cmd_recover(args: argparse.Namespace) -> int:
                 fail("mid-file corruption", EXIT_MID_CORRUPT)
             # Every refusal below is decided on the parsed events before the
             # first write: no tail repair, append, or context retirement.
-            events = list(info["events"])
+            # Dispatch matching reads schema-1 lines only.
+            events = schema_1_lines(info["events"])
             duplicated = duplicated_dispatch_ids(events)
             if duplicated:
                 fail(
@@ -1385,7 +1615,9 @@ def cmd_read_run(args: argparse.Namespace) -> int:
         tail = "unterminated"
     else:
         tail = "clean"
-    ends = [event for event in events if event.get("event") == "run.end"]
+    if any(vocabulary.line_schema(event) is None for event in events):
+        fail("unknown-schema line in the run", EXIT_UNKNOWN_SCHEMA)
+    ends = [event for event in schema_1_lines(events) if event.get("event") == "run.end"]
     print(dump_json({
         "schema": 1,
         "run": args.run,
@@ -1438,7 +1670,8 @@ def cmd_find_run(args: argparse.Namespace) -> int:
         first_end = data.find(b"\n")
         first_line = data if first_end < 0 else data[: first_end + 1]
         events, _, mid_corrupt = parse_segment(first_line)
-        if mid_corrupt or not events or events[0].get("event") != "run.begin":
+        if (mid_corrupt or not events or vocabulary.line_schema(events[0]) != 1
+                or events[0].get("event") != "run.begin"):
             ambiguous.append(run_id)
         elif events[0].get("plan") == args.plan:
             runs.append(run_id)
@@ -1457,7 +1690,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Exit codes: 2 usage/missing read-run store or segment, 3 lock busy, "
             "4 mid-corrupt (including newline-terminated non-object), "
             "5 D4a/malformed runs directory, 6 store/read-run run or seq mismatch, "
-            "7 recover refusal, 8 active run."
+            "7 recover refusal, 8 active run, 9 unknown-schema line in the run, "
+            "10 approval.consume refused."
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1470,6 +1704,11 @@ def build_parser() -> argparse.ArgumentParser:
     append.add_argument("--event", required=True)
     append.add_argument("--field", action="append", default=[])
     append.add_argument("--json", default=None)
+    append.add_argument(
+        "--schema",
+        default=None,
+        help="2: validate --json against the tg-v1.0a1 vocabulary and write canonical JSON",
+    )
     append.set_defaults(func=cmd_append)
 
     rebuild = sub.add_parser("rebuild", help="rebuild runs.tsv from segments")
