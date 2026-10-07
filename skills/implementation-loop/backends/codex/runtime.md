@@ -159,18 +159,37 @@ the pre-launch protection.
 
 State is keyed by the SHA-256 of the canonical workspace. A non-blocking
 `fcntl.flock` is held across selection, child execution, and the final state
-transition. The authoritative `meta.tsv` lifecycle is
-`initializing → running → ready|failed`; highest generation wins. A highest
-`initializing` or `running` record refuses both fresh dispatch and resume, so a
-crashed wrapper cannot fall back to an older live session. `current` is only a
-validated cache.
+transition, and is released only when the wrapper process exits. The
+authoritative `meta.tsv` lifecycle is `initializing → running → ready|failed`;
+highest generation wins. `initializing` is written before any CLI exists and
+`running` immediately before the spawn. A highest `initializing` or `running`
+record refuses both fresh dispatch and resume, so a crashed wrapper cannot fall
+back to an older live session. `current` is only a validated cache.
+
+The lock file is also the holder record. Its single line is
+
+```text
+<holder-id> TAB wrapper_pid=N [TAB child_dispatch=ID TAB child_pgid=N [TAB child_start=S]]
+```
+
+The first two fields name whoever holds the lock now. The child fields name
+the last CLI the workspace spawned: the generation it belongs to, its process
+group (the child is started in its own session, so its pid is the group id),
+and an opaque start-time identity. Later invocations carry the child fields
+forward until the next spawn. `meta.tsv` and the generation directory did not
+change for this: schema `1`, the same seven keys, the same four files. An
+adapter from before this record and one from after it read each other's state;
+the older one rewrites the lock line without the child fields, which only
+costs a later recovery its process check.
 
 Managed resume is release-enabled for the calibrated tuple above. `--resume`
 selects the highest ready loop-owned exact id, and `--resume ID` additionally
 asserts that id. It never selects unrelated interactive work. Reset the source
 constant to `0` if the adapter argv, state schema, or pinned config keys change,
 and leave it reset until `tests/integration-test.sh --require codex` recalibrates
-the changed tuple.
+the changed tuple. Signal handling, the lock file's holder line, and
+`--recover-stale` changed none of the three: the argv builder, `meta.tsv`, the
+pinned `-c` keys, and the record `--resume` selects are as calibrated.
 
 The integration harness uses the shipped adapter while the release switch is
 enabled. It retains a narrow recalibration fallback: when the mandated reset is
@@ -181,7 +200,72 @@ resume assertions exercise the shipped adapter.
 Migration note: a session created by the former companion runtime has no loop
 record. After finishing or cancelling any in-flight legacy job, use
 `--resume-unmanaged <exact-id>` once; a successful turn adopts that id so later
-ordinary `--resume` can use it.
+ordinary `--resume` can use it. The same flag is the explicit exact-id resume
+after a failed or recovered turn, described below.
+
+### Stopping a dispatch and recovering a stale generation
+
+**Stopping.** SIGTERM, SIGINT, and SIGHUP to the wrapper stop the dispatch: the
+Codex process group gets SIGTERM, then SIGKILL after two seconds if any member
+remains; the generation is recorded `failed`; `dispatch.end` is journaled with
+the exit status; and the wrapper exits 128 plus the signal number (143, 130,
+129). To cancel an in-flight dispatch, send the wrapper SIGTERM. A refused
+concurrent dispatch names it: `workspace lock is held by <id> (wrapper pid N)`.
+A disposition inherited as ignored is left ignored, so `nohup` keeps a dispatch
+running through SIGHUP, and a job backgrounded by a non-interactive shell keeps
+ignoring SIGINT. A closed output reader, which is how a parent session that
+ended without signalling the wrapper appears, ends the dispatch the same way
+with exit 141. A handled stop leaves nothing to recover.
+
+**What still goes stale.** SIGKILL of the wrapper, or a host crash, runs no
+handler. The record stays `running`, the CLI may still be alive, and the next
+dispatch refuses with `highest generation is still running: <id>` and names
+`--recover-stale`.
+
+**Recovering.** From the workspace root, run the adapter with `--recover-stale`
+and no other argument. It never dispatches, never signals a process, prints
+only to stderr, and exits 0 when the workspace is dispatchable afterwards
+(including when there was nothing to recover) or 5 when it refuses.
+
+| what it finds, holding the workspace lock | verdict | `--recover-stale` | `--recover-stale-unverified` |
+| --- | --- | --- | --- |
+| the lock is held | the wrapper is alive | refuses, naming the holder | refuses |
+| highest generation is `ready`, `failed`, or absent | nothing is stale | no change, exit 0 | no change, exit 0 |
+| `initializing` | dead: no CLI was started | records `failed` | records `failed` |
+| `running`; the recorded process group has no members | dead | records `failed` | records `failed` |
+| `running`; the recorded pid is alive with the recorded start time | alive | refuses; prints the `kill` commands for the group | refuses |
+| `running`; no process group is recorded for this generation | unverifiable | refuses; prints a `ps` check for this generation | records `failed`, labelled unverified |
+| `running`; the group has members but its leader is gone or has another start time | unverifiable | refuses; prints how to list the members | records `failed`, labelled unverified |
+
+The free lock is the proof that the wrapper is gone; the kernel releases it on
+any death, and no pid comparison is as strong. Only two findings prove the CLI
+dead: the generation never reached `running`, or its recorded process group is
+empty. A start-time match proves it alive, and nothing overrides that: stop the
+group with the printed commands and run `--recover-stale` again. A start-time
+mismatch is never taken as proof of death, because a wrong answer there would
+fail a generation whose CLI is still writing to the workspace.
+`--recover-stale-unverified` is the operator's assertion for the rows the
+adapter cannot decide; check with the printed command first.
+
+No process group is recorded for a generation written by an adapter from before
+this record, or when the wrapper was killed in the instant between spawning the
+CLI and recording its group. The check does not see a descendant that moved
+itself out of the CLI's process group.
+
+**After recovery.** The generation is `failed`, and `--resume` refuses exactly
+as it does after any failed turn: it selects only a highest `ready` record and
+never an earlier one, even one with the same session id. This is deliberate. A
+killed turn leaves the session with a partial turn and the workspace with
+whatever that turn had written, so continuing is the operator's decision:
+start a fresh dispatch, or name the session with `--resume-unmanaged
+<exact-id>`. Recovery prints the recovered generation's session id and the
+newest ready generation's. A successful turn makes plain `--resume` available
+again.
+
+Recovery writes no journal event. The wrapper that died never wrote
+`dispatch.end`, and its exit status is unknown, so a loop run that recorded the
+dispatch still shows it open. `loop-journal recover --acknowledge <id>` is the
+journal's own acknowledgement and retires that run.
 
 ### External tools and foreground lifecycle
 
@@ -190,7 +274,8 @@ outside both shell sandboxes. The config scan discloses `mcp_servers`, `apps`,
 `plugins`, and `notify`; it warns and proceeds by default, or refuses when
 `CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1`. This is accepted exposure, not isolation.
 
-There is no detached-job registry or cancel subcommand. Background the adapter
-at the harness level if needed; its own exit is authoritative. The run state
-retains `prompt.txt`, an append-only `transcript.log`, `last-message.txt`, and
-`meta.tsv` for diagnosis after failure.
+There is no detached-job registry or cancel subcommand; cancelling is SIGTERM
+to the wrapper, as above. Background the adapter at the harness level if
+needed; its own exit is authoritative. The run state retains `prompt.txt`, an
+append-only `transcript.log`, `last-message.txt`, and `meta.tsv` for diagnosis
+after failure.

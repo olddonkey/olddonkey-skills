@@ -31,7 +31,7 @@ export LC_ALL=C
 # A caller's declared attribution must not leak into fixture events.
 unset LOOP_UNIT LOOP_ROUND
 
-PINNED_CHECKS=111
+PINNED_CHECKS=114
 CHECKS=0
 FAILED_CHECKS=0
 CASE_STATUS=0
@@ -2016,6 +2016,132 @@ then
 else
   fail "schema: declared attribution, run totals, and timeline are documented"
 fi
+
+# The schema cites source by name. `path:name` must be defined in `path`, a
+# bare `:name` in the file of the nearest `path:name` before it, and an
+# artifact's file name must appear in the file its writer cell names. A
+# line-number citation is refused: nothing can check that it still points at
+# the code it meant.
+cat > "$TMP_ROOT/citecheck.py" <<'PY'
+import os, re, sys
+
+schema, root = sys.argv[1:]
+text = open(schema, encoding="utf-8").read()
+PATH = r"(?:scripts|backends|tests)/[A-Za-z0-9_./-]+"
+NAME = r"[A-Za-z_][A-Za-z0-9_]*"
+problems = []
+sources = {}
+
+
+def source(path):
+    if path not in sources:
+        full = os.path.join(root, path)
+        if os.path.isfile(full):
+            sources[path] = open(full, encoding="utf-8").read()
+        else:
+            sources[path] = None
+            problems.append("%s: no such file" % path)
+    return sources[path]
+
+
+def defined(name, body):
+    # A Python def or class, a shell function, or an assignment in either.
+    name = re.escape(name)
+    pattern = r"^[ \t]*(?:(?:def|class)[ \t]+%s\b|%s\(\)[ \t]*\{|%s[ \t]*=(?!=))" % (
+        name,
+        name,
+        name,
+    )
+    return re.search(pattern, body, re.M) is not None
+
+
+for match in re.finditer(r"%s:\d+|(?<![\w\"]):\d+(?:-\d+)?\b" % PATH, text):
+    problems.append("line-number citation %r" % match.group(0))
+
+if text.count("`") % 2:
+    problems.append("unbalanced backticks: code spans cannot be paired")
+named = 0
+current = None
+for span in re.findall(r"`([^`]+)`", text):
+    if re.fullmatch(PATH, span):
+        source(span)
+        continue
+    if not re.match(r"(?:%s)?:" % PATH, span):
+        continue
+    match = re.fullmatch(r"(%s)?:(%s)" % (PATH, NAME), span)
+    if match is None:
+        problems.append("citation %r is not path:name or :name" % span)
+        continue
+    current = match.group(1) or current
+    if current is None:
+        problems.append("citation %r follows no path:name" % span)
+        continue
+    body = source(current)
+    if body is not None and not defined(match.group(2), body):
+        problems.append("%s does not define %s" % (current, match.group(2)))
+    named += 1
+if named == 0:
+    problems.append("no path:name citation found")
+
+rows = 0
+backend = None
+for line in text.splitlines():
+    heading = re.match(r"^### (Claude|Codex|Grok|Cursor)\s*$", line)
+    if heading:
+        backend = heading.group(1).lower()
+        continue
+    if line.startswith("## "):
+        backend = None
+    if backend is None or not line.startswith("|"):
+        continue
+    cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+    if len(cells) < 8 or cells[0] == "artifact":
+        continue
+    if all(cell.replace("-", "") == "" for cell in cells):
+        continue
+    artifact = cells[0].strip("`")
+    writer = re.fullmatch(r"`(%s)(?::%s)?`" % (PATH, NAME), cells[1])
+    if writer is None:
+        problems.append("%s %s: writer cell %r" % (backend, artifact, cells[1]))
+        continue
+    body = source(writer.group(1))
+    if body is not None and artifact not in body:
+        problems.append("%s does not name %s" % (writer.group(1), artifact))
+    rows += 1
+if rows == 0:
+    problems.append("no artifact table row found")
+
+if problems:
+    raise SystemExit("\n".join(problems))
+PY
+CASE_STDOUT=""
+CASE_STDERR="$TMP_ROOT/citecheck.stderr"
+if python3 "$TMP_ROOT/citecheck.py" "$SCHEMA" "$SCRIPT_DIR/.." 2>"$CASE_STDERR"; then
+  pass "schema: every citation names something its file defines, and none is a line number"
+else
+  fail "schema: every citation names something its file defines, and none is a line number"
+fi
+sed 's|`scripts/loop-journal:parse_segment`|`scripts/loop-journal:452-477`|' \
+  "$SCHEMA" > "$TMP_ROOT/schema-line-cite.md"
+if ! cmp -s "$SCHEMA" "$TMP_ROOT/schema-line-cite.md" \
+  && ! python3 "$TMP_ROOT/citecheck.py" "$TMP_ROOT/schema-line-cite.md" "$SCRIPT_DIR/.." \
+    2>"$CASE_STDERR" \
+  && grep -q "line-number citation" "$CASE_STDERR"; then
+  pass "schema: the citation check refuses a line-number citation"
+else
+  fail "schema: the citation check refuses a line-number citation"
+fi
+sed 's|`scripts/loop-journal:parse_segment`|`scripts/loop-journal:parse_segments`|' \
+  "$SCHEMA" > "$TMP_ROOT/schema-stale-name.md"
+if ! cmp -s "$SCHEMA" "$TMP_ROOT/schema-stale-name.md" \
+  && ! python3 "$TMP_ROOT/citecheck.py" "$TMP_ROOT/schema-stale-name.md" "$SCRIPT_DIR/.." \
+    2>"$CASE_STDERR" \
+  && grep -q "scripts/loop-journal does not define parse_segments" "$CASE_STDERR"; then
+  pass "schema: the citation check refuses a name the cited file does not define"
+else
+  fail "schema: the citation check refuses a name the cited file does not define"
+fi
+CASE_STDERR=""
 
 WS_REVIEWER="$(workspace reviewer)"
 run_cmd reviewer-begin "$RUN" begin --workspace "$WS_REVIEWER"

@@ -762,6 +762,11 @@ ESC_CASES=(
   "e-punct|*_{}#+-.!~|\\*\\_\\{\\}\\#\\+\\-\\.\\!\\~"
   "e-url|https://example.com/a|https\\://example\\.com/a"
   "e-www|www.example.com|www\\.example\\.com"
+  # No escape reaches these: GitHub links an email-shaped value and an
+  # @mention after parsing, and a backslash or an entity in place of the @
+  # changes nothing. They print as plain text, and --help says so.
+  "e-email|user@example.com|user@example\\.com"
+  "e-mention|@someone|@someone"
 )
 for entry in "${ESC_CASES[@]}"; do
   IFS='|' read -r esc_unit esc_raw _ <<< "$entry"
@@ -930,6 +935,13 @@ if [[ $CASE_STATUS -eq 0 ]] && grep -q 'values match' "$CASE_STDOUT"; then
   pass "usage: --help exits 0 and names the strength values"
 else
   fail "usage: --help exits 0 and names the strength values"
+fi
+if grep -q 'cannot stop what a renderer links after parsing' "$CASE_STDOUT" \
+  && grep -q 'email-shaped value' "$CASE_STDOUT" && grep -q '@mention' "$CASE_STDOUT" \
+  && grep -q 'issue reference' "$CASE_STDOUT" && grep -q 'commit' "$CASE_STDOUT"; then
+  pass "usage: --help names what the escaping cannot stop a renderer from linking"
+else
+  fail "usage: --help names what the escaping cannot stop a renderer from linking"
 fi
 
 run_cmd index-no-home env -u HOME "$EVIDENCE" --workspace "$WS_MAIN" --unit u-green
