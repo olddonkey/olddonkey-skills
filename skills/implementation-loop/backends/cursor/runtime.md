@@ -143,7 +143,11 @@ For each fresh dispatch:
 8. Only on a successful agent result, run `git apply -p2 --check --binary`
    against the real unit worktree. A failed check leaves it untouched and
    retains both copies for forensics. A passing check is followed by
-   `git apply -p2 --binary`.
+   `git apply -p2 --binary`. The adapter sets no umask of its own, so both
+   run under the caller's mask and a new file or directory gets the modes the
+   engineer's shell would give (the `worktree-umask` rule in
+   [dispatch-contract.md](../../references/dispatch-contract.md)); run state
+   is made private with explicit `chmod`.
 9. Clean the copies after success unless `CURSOR_LOOP_KEEP_COPIES=1` was chosen
    for debugging. Failures retain copies, JSON, stderr, and any forensic patch.
 

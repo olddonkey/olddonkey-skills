@@ -13,6 +13,10 @@
 # and applies a checked pristine-vs-frozen patch. It never stages or commits.
 
 set -euo pipefail
+# The copies and run state are private (0600/0700), but the patch is applied
+# to the real worktree under the mask that was in force when this adapter was
+# invoked, so new files get the modes the engineer's own shell would give.
+CALLER_UMASK="$(umask)"
 umask 077
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
@@ -732,13 +736,13 @@ if [[ $READ_ONLY -eq 0 && $FINAL_STATUS -eq 0 ]]; then
     if [[ -s "$PATCH_PATH" ]]; then
       # --whitespace=nowarn overrides a configured apply.whitespace, which
       # would otherwise rewrite (fix) or refuse (error) the agent's lines.
-      if ! (umask 022; cd "$WORKSPACE" && git apply -p2 --check --binary --whitespace=nowarn "$PATCH_PATH") \
+      if ! (umask "$CALLER_UMASK"; cd "$WORKSPACE" && git apply -p2 --check --binary --whitespace=nowarn "$PATCH_PATH") \
         > "$STATE_DIR/apply-check.log" 2>&1; then
         echo "error: captured claude patch does not apply cleanly; real worktree was not changed" >&2
         FINAL_STATUS=12
       else
         APPLIED=yes
-        if ! (umask 022; cd "$WORKSPACE" && git apply -p2 --binary --whitespace=nowarn "$PATCH_PATH") \
+        if ! (umask "$CALLER_UMASK"; cd "$WORKSPACE" && git apply -p2 --binary --whitespace=nowarn "$PATCH_PATH") \
           > "$STATE_DIR/apply.log" 2>&1; then
           echo "error: captured claude patch failed during apply after a successful check" >&2
           FINAL_STATUS=13
@@ -779,6 +783,7 @@ echo "claude version: $CLAUDE_VERSION"
 echo "model: $MODEL_DESCRIPTION"
 echo "effort: $EFFORT_DESCRIPTION"
 echo "mode: $MODE"
+echo "worktree umask: $CALLER_UMASK (caller's; the patch is applied under it)"
 echo "tools granted: $TOOLS_GRANTED"
 echo "session id: ${SESSION_ID:-<not reported>}"
 echo "resume: no (fresh dispatch only)"

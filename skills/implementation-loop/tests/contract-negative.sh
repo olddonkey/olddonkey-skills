@@ -12,7 +12,7 @@ TMP_ROOT_RAW="$(mktemp -d "$SCRIPT_DIR/.contract-negative.XXXXXX")"
 TMP_ROOT="$(CDPATH= cd -- "$TMP_ROOT_RAW" && pwd -P)"
 trap 'rm -rf -- "$TMP_ROOT"' EXIT HUP INT TERM
 
-RULES="help prompt-file prompt-inline prompt-precedence prompt-required dash-prompt missing-values repeated-flags unknown-flags readonly-alias background exit-status signal-status env-namespace summary-fields journal-missing journal-start-refusal journal-events journal-unattributed journal-readonly-mode final-message"
+RULES="help prompt-file prompt-inline prompt-precedence prompt-required dash-prompt missing-values repeated-flags unknown-flags readonly-alias background exit-status signal-status env-namespace summary-fields journal-missing journal-start-refusal journal-events journal-unattributed journal-readonly-mode final-message worktree-umask"
 CHECKS=0
 FAILURES=0
 
@@ -116,6 +116,14 @@ if [[ "$BROKEN_RULE" == "summary-fields" ]]; then
   exit 0
 fi
 
+if [[ "$BROKEN_RULE" == "worktree-umask" ]]; then
+  # The adapter's private mask leaks into what the implementer creates.
+  umask 077
+  mkdir implementer-dir
+  printf 'created\n' > implementer-file.txt
+  printf 'nested\n' > implementer-dir/nested.txt
+fi
+
 if [[ "$BROKEN_RULE" == "final-message" ]]; then
   dispatch_id="20260901T000000Z-a1b2c3d4"
   : "${LOOP_JOURNAL:?}"
@@ -182,4 +190,4 @@ if [[ $FAILURES -gt 0 ]]; then
   exit 1
 fi
 
-printf 'contract-negative: PASS (%d checks; 21 broken adapters rejected)\n' "$CHECKS"
+printf 'contract-negative: PASS (%d checks; 22 broken adapters rejected)\n' "$CHECKS"
