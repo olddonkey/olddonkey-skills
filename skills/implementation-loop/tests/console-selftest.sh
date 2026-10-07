@@ -789,6 +789,7 @@ vm.runInContext(extractBlock(/var FLOW =/), sandbox);
   "appendLinkOrText",
   "dialMetaText",
   "applySelectValue",
+  "syncDialSelect",
   "setDisabled",
   "createDial",
   "updateDial",
@@ -1243,6 +1244,7 @@ vm.runInContext(extractBlock(/var FLOW =/), liveSandbox);
   "appendLinkOrText",
   "dialMetaText",
   "applySelectValue",
+  "syncDialSelect",
   "setDisabled",
   "createDial",
   "updateDial",
@@ -2600,6 +2602,423 @@ check("flow: index output without counts or timeline, or with no runs, shows an 
   liveSandbox.drawFlow(root, flowState("A", old));
   expectHint(/no run totals or timeline/);
 });
+
+// Dial picks run the page's own chain: renderDials -> createDial/updateDial
+// for a poll, and the Apply/Reset click handlers -> postDial/resetDial ->
+// fetch. Only the DOM and fetch are fakes.
+function extractList(name) {
+  const match = new RegExp("var " + name + " = \\[[^\\]]*\\];").exec(src);
+  if (!match) {
+    throw new Error("missing list " + name);
+  }
+  return match[0];
+}
+
+const dialNodes = {};
+const dialRequests = [];
+const dialSandbox = {
+  document: {
+    activeElement: null,
+    createElement: function (name) {
+      return makeLiveNode(name);
+    },
+    getElementById: function (id) {
+      return Object.prototype.hasOwnProperty.call(dialNodes, id) ? dialNodes[id] : null;
+    },
+  },
+  fetch: function (url, init) {
+    const request = { url: String(url), init: init || {} };
+    const reply = new Promise(function (resolve) {
+      request.respond = function (status, payload) {
+        resolve({
+          ok: status >= 200 && status < 300,
+          status: status,
+          json: function () {
+            return Promise.resolve(payload);
+          },
+        });
+      };
+    });
+    dialRequests.push(request);
+    return reply;
+  },
+  lastDials: null,
+  dialsBusy: false,
+  sessionCsrf: "csrf-selftest",
+};
+vm.createContext(dialSandbox);
+vm.runInContext(extractList("DIAL_ORDER"), dialSandbox);
+vm.runInContext(extractBlock(/var DIAL_OPTIONS =/), dialSandbox);
+vm.runInContext(extractList("PERMISSION_KEYS"), dialSandbox);
+[
+  "el",
+  "txt",
+  "setClass",
+  "wipe",
+  "keyedMap",
+  "itemById",
+  "syncKeyed",
+  "placeBefore",
+  "updateOptional",
+  "chip",
+  "bindLiveRegions",
+  "isPermissionKey",
+  "setDisabled",
+  "dialMetaText",
+  "syncDialSelect",
+  "createDial",
+  "updateDial",
+  "dialItems",
+  "policyKeys",
+  "noticeText",
+  "noticeClass",
+  "ensureDialsSkeleton",
+  "showDialsInert",
+  "renderDials",
+  "setDialError",
+  "apiHeaders",
+  "postDial",
+  "resetDial",
+].forEach(function (name) {
+  vm.runInContext(
+    "this." + name + " = " + extractBlock(new RegExp("function " + name + "\\(")),
+    dialSandbox
+  );
+});
+
+function dialDoc(stored) {
+  const dials = {};
+  dialSandbox.DIAL_ORDER.forEach(function (key) {
+    dials[key] = { value: dialSandbox.DIAL_OPTIONS[key][0], scope: "policy", source: "default" };
+  });
+  Object.keys(stored || {}).forEach(function (key) {
+    dials[key] = {
+      value: stored[key],
+      scope: "policy",
+      source: "store",
+      set_by: "console",
+      set_at: "2026-10-05T00:00:00Z",
+    };
+  });
+  return { schema: 1, store: "present", dials: dials };
+}
+
+// A fresh page showing the given stored values; returns one dial's card.
+function dialPage(key, stored) {
+  dialRequests.length = 0;
+  dialSandbox.lastDials = null;
+  dialSandbox.dialsBusy = false;
+  dialSandbox.document.activeElement = null;
+  dialNodes["dials-root"] = makeLiveNode("div");
+  dialNodes["dials-error"] = makeLiveNode("p");
+  dialSandbox.renderDials(dialDoc(stored));
+  let box = null;
+  liveWalk(dialNodes["dials-root"], function (node) {
+    if (node.nodeName === "select" && node.getAttribute("data-dial") === key) {
+      box = node.parentNode.parentNode;
+    }
+  });
+  if (!box || !box._select || !box._apply || !box._reset) {
+    throw new Error("renderDials drew no card for " + key);
+  }
+  return box;
+}
+
+// What pullDials does with each poll response.
+function dialPoll(stored) {
+  dialSandbox.renderDials(dialDoc(stored));
+}
+
+// Chromium 152 on the real page: when focus moves, document.activeElement is
+// already off the old element (it is <body>) while that element's focusout
+// handler runs. "late" is the other order, where it still names the old
+// element during focusout.
+function dialFocus(node, late) {
+  const doc = dialSandbox.document;
+  const from = doc.activeElement;
+  if (from === node) {
+    return;
+  }
+  if (!late) {
+    doc.activeElement = null;
+  }
+  if (from) {
+    (from.listeners.focusout || []).forEach(function (fn) {
+      fn();
+    });
+  }
+  doc.activeElement = node;
+}
+
+function dialEnabled(node) {
+  if (node.getAttribute("disabled") !== null) {
+    throw new Error(node.nodeName + " " + node.className + " is disabled");
+  }
+}
+
+function dialPick(select, value) {
+  dialEnabled(select);
+  dialFocus(select);
+  select.value = value;
+}
+
+// A mouse click or Tab + Enter: focus reaches the button first, then click.
+function dialPress(button, late) {
+  dialEnabled(button);
+  dialFocus(button, late);
+  (button.listeners.click || []).forEach(function (fn) {
+    fn();
+  });
+}
+
+function dialSent(index) {
+  const request = dialRequests[index];
+  if (!request) {
+    throw new Error("no request " + index + " (" + dialRequests.length + " made)");
+  }
+  return request.init.method + " " + request.url + " " + request.init.body;
+}
+
+function expectSelect(box, want, when) {
+  if (box._select.value !== want) {
+    throw new Error(when + ": select shows " + box._select.value + ", want " + want);
+  }
+}
+
+function expectSent(index, want, when) {
+  if (dialSent(index) !== want) {
+    throw new Error(when + ": sent " + dialSent(index) + ", want " + want);
+  }
+  if (dialRequests.length !== index + 1) {
+    throw new Error(when + ": " + dialRequests.length + " requests made");
+  }
+}
+
+check("dials: a pick survives focus moving to Apply, and Apply posts the pick (headless)", function () {
+  [false, true].forEach(function (late) {
+    const when = late ? "activeElement still the select in focusout" : "activeElement off the select in focusout";
+    const box = dialPage("gate", { gate: "strict" });
+    expectSelect(box, "strict", when + ", first render");
+    dialPick(box._select, "skip");
+    dialPress(box._apply, late);
+    expectSent(0, 'POST /api/dials {"key":"gate","value":"skip"}', when);
+    if (dialRequests[0].init.headers["X-Console-CSRF"] !== "csrf-selftest") {
+      throw new Error(when + ": the request lost its CSRF header");
+    }
+    expectSelect(box, "skip", when + ", request in flight");
+    if (box._value.textContent !== "strict") {
+      throw new Error(when + ": stored value shows " + box._value.textContent + " before the reply");
+    }
+  });
+});
+
+check("dials: an unchanged poll leaves an unapplied pick alone, focused or not, and Apply still posts it (headless)", function () {
+  const box = dialPage("gate", { gate: "strict" });
+  dialPick(box._select, "skip");
+  dialPoll({ gate: "strict" });
+  expectSelect(box, "skip", "poll while focused");
+  dialFocus(null);
+  expectSelect(box, "skip", "focus left for the page");
+  dialPoll({ gate: "strict" });
+  expectSelect(box, "skip", "poll while unfocused");
+  dialFocus(box._apply);
+  dialPoll({ gate: "strict" });
+  expectSelect(box, "skip", "poll between Tab and Enter");
+  dialPress(box._apply);
+  expectSent(0, 'POST /api/dials {"key":"gate","value":"skip"}', "Apply after three polls");
+});
+
+check("dials: a stored value that changes while the select has focus is applied when focus leaves (headless)", function () {
+  let box = dialPage("gate", { gate: "strict" });
+  dialFocus(box._select);
+  dialPoll({ gate: "baseline" });
+  expectSelect(box, "strict", "changed poll while focused");
+  if (box._value.textContent !== "baseline") {
+    throw new Error("stored value text stayed " + box._value.textContent);
+  }
+  dialPoll({ gate: "baseline" });
+  expectSelect(box, "strict", "second poll while focused");
+  dialFocus(box._apply);
+  expectSelect(box, "baseline", "focus left after a deferred change");
+
+  box = dialPage("gate", { gate: "strict" });
+  dialPick(box._select, "skip");
+  dialPoll({ gate: "baseline" });
+  expectSelect(box, "skip", "changed poll while a pick is focused");
+  dialFocus(null);
+  expectSelect(box, "baseline", "focus left with a pick and a deferred change");
+
+  box = dialPage("gate", { gate: "strict" });
+  dialPick(box._select, "skip");
+  dialFocus(null);
+  dialPoll({ gate: "baseline" });
+  expectSelect(box, "baseline", "changed poll while unfocused");
+
+  box = dialPage("gate", { gate: "strict" });
+  dialFocus(box._select);
+  dialPoll({ gate: "baseline" });
+  dialFocus(null, true);
+  dialPoll({ gate: "baseline" });
+  expectSelect(box, "baseline", "next poll when activeElement still named the select in focusout");
+});
+
+const unsettledChecks = [];
+process.on("exit", function () {
+  unsettledChecks.forEach(function (name) {
+    console.log("not ok - %s: never settled", name);
+  });
+});
+
+// The async checks share dialNodes and dialRequests, so each one starts
+// after the previous one has settled, in declaration order.
+let laterChain = Promise.resolve();
+
+function checkLater(name, fn) {
+  unsettledChecks.push(name);
+  function settle(error) {
+    unsettledChecks.splice(unsettledChecks.indexOf(name), 1);
+    if (error) {
+      console.log("not ok - %s: %s", name, error.message ? error.message : error);
+    } else {
+      console.log("ok - %s", name);
+    }
+  }
+  laterChain = laterChain
+    .then(fn)
+    .then(
+      function () {
+        settle(null);
+      },
+      function (error) {
+        settle(error || new Error("rejected"));
+      }
+    );
+  return laterChain;
+}
+
+// The reply handlers in postDial/resetDial run as promise jobs.
+function dialReply(index, status, payload) {
+  dialRequests[index].respond(status, payload);
+  return new Promise(function (resolve) {
+    setImmediate(resolve);
+  });
+}
+
+checkLater("dials: a failed Apply keeps the pick for a retry, a successful one shows the stored value, and Reset drops an unapplied pick (headless)", async function () {
+  const box = dialPage("gate", { gate: "strict" });
+  dialPick(box._select, "skip");
+  dialPress(box._apply);
+  expectSent(0, 'POST /api/dials {"key":"gate","value":"skip"}', "first Apply");
+  if (box._apply.getAttribute("disabled") !== "disabled") {
+    throw new Error("Apply stayed enabled while its request was in flight");
+  }
+  await dialReply(0, 502, { error: "loop-calibration failed" });
+  if (dialNodes["dials-error"].textContent !== "loop-calibration failed") {
+    throw new Error("error text " + dialNodes["dials-error"].textContent);
+  }
+  expectSelect(box, "skip", "after a failed Apply");
+  if (box._value.textContent !== "strict") {
+    throw new Error("a failed Apply changed the stored value text to " + box._value.textContent);
+  }
+  dialPress(box._apply);
+  expectSent(1, 'POST /api/dials {"key":"gate","value":"skip"}', "retry");
+  await dialReply(1, 200, dialDoc({ gate: "skip" }));
+  expectSelect(box, "skip", "after a successful Apply");
+  if (box._value.textContent !== "skip") {
+    throw new Error("stored value text " + box._value.textContent + " after a successful Apply");
+  }
+  dialPoll({ gate: "skip" });
+  expectSelect(box, "skip", "poll after a successful Apply");
+
+  dialPick(box._select, "strict");
+  dialPress(box._reset);
+  expectSent(2, 'POST /api/dials/reset {"key":"gate"}', "Reset");
+  expectSelect(box, "skip", "Reset pressed over an unapplied pick");
+  await dialReply(2, 200, dialDoc({}));
+  expectSelect(box, "baseline", "after Reset");
+
+  dialPick(box._select, "skip");
+  dialPress(box._reset);
+  expectSent(3, 'POST /api/dials/reset {"key":"gate"}', "Reset at the default");
+  expectSelect(box, "baseline", "Reset pressed at the default over an unapplied pick");
+  await dialReply(3, 200, dialDoc({}));
+  expectSelect(box, "baseline", "after Reset at the default");
+  dialPick(box._select, "strict");
+  dialPress(box._apply);
+  expectSent(4, 'POST /api/dials {"key":"gate","value":"strict"}', "Apply after Reset");
+});
+
+checkLater("dials: a failed Apply or Reset shows the server's error until the next Apply or Reset starts; a success leaves it clear, a repeated failure is announced again (headless)", async function () {
+  const box = dialPage("gate", { gate: "strict" });
+  const region = dialNodes["dials-error"];
+  function expectError(want, when) {
+    if (region.textContent !== want) {
+      throw new Error(when + ": error text is " + JSON.stringify(region.textContent) + ", want " + JSON.stringify(want));
+    }
+  }
+  if (countWrites(region).total !== 0) {
+    throw new Error("rendering the page wrote the error region");
+  }
+  dialPick(box._select, "skip");
+  dialPress(box._apply);
+  expectError("", "first Apply in flight");
+  if (countWrites(region).total !== 0) {
+    throw new Error("an Apply with no error to clear wrote the error region");
+  }
+  await dialReply(0, 503, { error: "lock busy" });
+  expectError("lock busy", "after a failed Apply");
+  let written = countWrites(region).total;
+
+  // Polls do not speak for the user's write, so they leave the message.
+  dialPoll({ gate: "strict" });
+  expectError("lock busy", "poll after a failed Apply");
+  if (countWrites(region).total !== written) {
+    throw new Error("a poll rewrote the error region");
+  }
+
+  // The retry empties the region at once; the same failure again is a
+  // fresh write, which is what a live region announces.
+  dialPress(box._apply);
+  expectSent(1, 'POST /api/dials {"key":"gate","value":"skip"}', "retry");
+  expectError("", "retry in flight");
+  written = countWrites(region).total;
+  await dialReply(1, 503, { error: "lock busy" });
+  expectError("lock busy", "after the retry failed the same way");
+  if (countWrites(region).total <= written) {
+    throw new Error("the repeated failure was not written to the error region");
+  }
+
+  dialPress(box._apply);
+  expectError("", "second retry in flight");
+  await dialReply(2, 200, dialDoc({ gate: "skip" }));
+  expectError("", "after a successful Apply");
+  if (box._value.textContent !== "skip") {
+    throw new Error("stored value text " + box._value.textContent + " after a successful Apply");
+  }
+  dialPoll({ gate: "skip" });
+  expectError("", "poll after a successful Apply");
+
+  // Reset follows the same rule, and a Reset clears a failed Apply's message.
+  dialPress(box._reset);
+  expectSent(3, 'POST /api/dials/reset {"key":"gate"}', "Reset");
+  await dialReply(3, 502, { error: "loop-calibration failed" });
+  expectError("loop-calibration failed", "after a failed Reset");
+  dialPress(box._reset);
+  expectError("", "Reset retry in flight");
+  await dialReply(4, 200, dialDoc({}));
+  expectError("", "after a successful Reset");
+  expectSelect(box, "baseline", "after a successful Reset");
+
+  dialPick(box._select, "strict");
+  dialPress(box._apply);
+  await dialReply(5, 502, {});
+  expectError("Dial update failed.", "after a failed Apply with no error string");
+  dialPress(box._reset);
+  expectSent(6, 'POST /api/dials/reset {"key":"gate"}', "Reset after a failed Apply");
+  expectError("", "Reset after a failed Apply, in flight");
+  await dialReply(6, 200, dialDoc({}));
+  expectError("", "after the Reset that followed a failed Apply");
+});
 JS
 then
   :
@@ -2653,6 +3072,11 @@ else
   fail "flow: render, filter change, and run switch make no request (headless)"
   fail "flow: a poll updates the SVG in place; nodes, edges, and filter options keep their identity (headless)"
   fail "flow: index output without counts or timeline, or with no runs, shows an empty-state hint (headless)"
+  fail "dials: a pick survives focus moving to Apply, and Apply posts the pick (headless)"
+  fail "dials: an unchanged poll leaves an unapplied pick alone, focused or not, and Apply still posts it (headless)"
+  fail "dials: a stored value that changes while the select has focus is applied when focus leaves (headless)"
+  fail "dials: a failed Apply keeps the pick for a retry, a successful one shows the stored value, and Reset drops an unapplied pick (headless)"
+  fail "dials: a failed Apply or Reset shows the server's error until the next Apply or Reset starts; a success leaves it clear, a repeated failure is announced again (headless)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -2687,6 +3111,7 @@ expect_status 0 "fixture: open codex dispatch"
 KEY="$(workspace_key "$WS")"
 CAL_REL=".config/olddonkey-loop/calibration/${KEY}.tsv"
 CAL_FILE="$HOME/$CAL_REL"
+META_LOCK="$HOME/.config/olddonkey-loop/journal/$KEY/meta.lock"
 CODEX_DIR="$HOME/.config/olddonkey-loop/codex/$KEY/$DISPATCH_ID"
 mkdir -p "$CODEX_DIR"
 python3 - "$CODEX_DIR/transcript.log" "$HOSTILE" <<'PY'
@@ -2755,7 +3180,10 @@ CASE_STDOUT="$TMP_ROOT/console.stdout"
 CASE_STDERR="$TMP_ROOT/console.stderr"
 : >"$CASE_STDOUT"
 : >"$CASE_STDERR"
-"$CONSOLE" --workspace "$WS" >"$CASE_STDOUT" 2>"$CASE_STDERR" &
+# The short metadata-lock wait reaches loop-calibration through the console
+# and keeps the lock-busy dial case quick; nothing else contends for it.
+env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=0.5 \
+  "$CONSOLE" --workspace "$WS" >"$CASE_STDOUT" 2>"$CASE_STDERR" &
 CONSOLE_PID=$!
 if wait_for_url "$CASE_STDOUT"; then
   pass "startup: printed a loopback URL"
@@ -2790,8 +3218,9 @@ if [[ -n "$PORT" && -n "$TOKEN" ]]; then
   HTTP_TAP="$TMP_ROOT/http.tap"
   if python3 - "$PORT" "$TOKEN" "$RUN_ID" "$DISPATCH_ID" "$HOSTILE" "$WS_REAL" \
     "$HOSTILE_ID" "$UNKNOWN_ID" "$HL_ID" "$SL_ID" "$GROK_ID" "$TRANSCRIPT_REAL" \
-    "$CAL_FILE" \
+    "$CAL_FILE" "$META_LOCK" \
     >"$HTTP_TAP" 2>"$TMP_ROOT/http.err" <<'PY'
+import fcntl
 import http.client
 import json
 import os
@@ -2811,6 +3240,7 @@ symlink_id = sys.argv[10]
 grok_id = sys.argv[11]
 transcript_real = sys.argv[12]
 cal_path = sys.argv[13]
+meta_lock_path = sys.argv[14]
 host_ok = "127.0.0.1:%d" % port
 origin_ok = "http://127.0.0.1:%d" % port
 csp = (
@@ -3635,6 +4065,62 @@ def dials_post_invalid():
         raise RuntimeError("invalid post mutated the store")
 
 
+def _post_dial(path, body):
+    return capture(
+        "POST",
+        path,
+        body=json.dumps(body),
+        headers=auth_headers(
+            extra={"Origin": origin_ok, "Content-Type": "application/json"}
+        ),
+    )
+
+
+def dials_lock_busy():
+    if not cookie or not csrf:
+        raise RuntimeError("no session")
+    before = store_bytes()
+    if b"backend\tgrok\t" not in before:
+        raise RuntimeError("expected a stored backend row, got %r" % before)
+    descriptor = os.open(meta_lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for path, body in (
+            ("/api/dials", {"key": "gate", "value": "strict"}),
+            ("/api/dials/reset", {"key": "backend"}),
+        ):
+            status, raw, headers = _post_dial(path, body)
+            if status != 503:
+                raise RuntimeError("%s under a held lock: status %s body %r" % (path, status, raw))
+            require_security(headers, "lock-busy " + path)
+            err = json.loads(raw.decode("utf-8")).get("error") or ""
+            if "lock busy" not in err:
+                raise RuntimeError("%s 503 message %r" % (path, err))
+            if store_bytes() != before:
+                raise RuntimeError("%s under a held lock mutated the store" % path)
+        status, raw, headers = capture("GET", "/api/dials", headers=auth_headers())
+        if status != 200:
+            raise RuntimeError("GET under a held lock: status %s body %r" % (status, raw))
+        row = (json.loads(raw.decode("utf-8")).get("dials") or {}).get("backend") or {}
+        if row.get("value") != "grok" or row.get("source") != "store":
+            raise RuntimeError("GET under a held lock: backend %r" % row)
+    finally:
+        os.close(descriptor)
+
+
+def dials_lock_released():
+    if not cookie or not csrf:
+        raise RuntimeError("no session")
+    status, raw, headers = _post_dial("/api/dials", {"key": "gate", "value": "strict"})
+    if status != 200:
+        raise RuntimeError("post after release: status %s body %r" % (status, raw))
+    dials = json.loads(raw.decode("utf-8")).get("dials") or {}
+    for key, value in (("gate", "strict"), ("backend", "grok")):
+        row = dials.get(key) or {}
+        if row.get("value") != value or row.get("source") != "store":
+            raise RuntimeError("after release %s is %r" % (key, row))
+
+
 def dials_reset():
     if not cookie or not csrf:
         raise RuntimeError("no session")
@@ -3738,6 +4224,8 @@ check("dials: POST /api/dials without CSRF is 403", dials_post_missing_csrf)
 check("dials: POST /api/dials with foreign Origin is 403", dials_post_foreign_origin)
 check("dials: POST /api/dials writes set_by=console on disk", dials_post_ok)
 check("dials: POST /api/dials invalid key/value is 400 and unchanged", dials_post_invalid)
+check("dials: a held meta.lock makes POST /api/dials and /api/dials/reset 503 and unchanged; GET still 200", dials_lock_busy)
+check("dials: the refused POST /api/dials succeeds once meta.lock is released", dials_lock_released)
 check("dials: POST /api/dials/reset removes the row", dials_reset)
 check("dials: rejected store GET is rejected; POST is 409 and unchanged", dials_rejected)
 PY
@@ -4524,6 +5012,20 @@ else
 fi
 stop_extra "$SRC_PID"
 SRC_PID=""
+
+# --- D4a: a link count of 0 is a file being replaced, not a hard link ---
+link_count_case() { # $1=case $2=description
+  run_cmd "link-count-$1" env TMPDIR="$TMP_ROOT" \
+    python3 "$SCRIPT_DIR/link-count-cases.py" "$CONSOLE" "$1"
+  expect_status 0 "link count: $2"
+}
+link_count_case replaced-once "0 on the first look is read again and the file accepted"
+link_count_case replaced-repeatedly "0 on five looks in a row is still accepted"
+link_count_case never-settles "0 on every look is refused after a bounded number of looks, not as a hard link"
+link_count_case hard-link "a second link is refused as a hard link"
+link_count_case hard-link-after-replace "0 and then a second link is refused as a hard link"
+link_count_case removed-after-replace "0 and then no file is reported missing"
+link_count_case live-replace "a file being replaced in a tight loop is never refused"
 
 if [[ $FAILED_CHECKS -gt 0 ]]; then
   printf 'selftest: FAIL (%d of %d checks failed)\n' "$FAILED_CHECKS" "$CHECKS" >&2
