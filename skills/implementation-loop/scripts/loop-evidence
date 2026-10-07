@@ -82,8 +82,13 @@ counted for no unit.
 
 Every journal-sourced string in markdown is escaped: CR, LF, and tab
 become a space; & < > " ' become HTML entities; then each of
-\\ ` * _ { } [ ] ( ) # + - . ! | ~ : is backslash-escaped. Nothing
-journal-sourced is emitted as a link, autolink, image, or raw HTML.
+\\ ` * _ { } [ ] ( ) # + - . ! | ~ : is backslash-escaped. So nothing
+journal-sourced is emitted as markdown link or image syntax or as raw
+HTML, and a URL-shaped (scheme://) or www. value is not autolinked.
+The escaping cannot stop what a renderer links after parsing: in a PR
+body GitHub still links an email-shaped value, an @mention (and
+notifies that user), an issue reference such as #12, and a commit
+SHA, and draws :name: as an emoji.
 json carries the same data with no escaping beyond JSON's own.
 
 The journal is local and unauthenticated: any process running as this

@@ -8,11 +8,12 @@ DISPATCH="$SCRIPT_DIR/dispatch.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/codex-loop-selftest.XXXXXX")" || exit 1
 STATE_PARENT="$(mktemp -d "$SCRIPT_DIR/.codex-loop-selftest.XXXXXX")" || exit 1
 SLASH_TMP_PARENT="$(mktemp -d /tmp/codex-loop-selftest-home.XXXXXX)" || exit 1
-CRASH_CHILD_PID=""
+LIVE_GROUPS=""
 cleanup() {
-  if [[ -n "$CRASH_CHILD_PID" ]]; then
-    kill -TERM "-$CRASH_CHILD_PID" 2>/dev/null || true
-  fi
+  local group
+  for group in $LIVE_GROUPS; do
+    kill -KILL -- "-$group" 2>/dev/null || true
+  done
   rm -rf "$TMP_ROOT" "$STATE_PARENT" "$SLASH_TMP_PARENT"
 }
 trap cleanup EXIT HUP INT TERM
@@ -91,6 +92,14 @@ expect_no_file_line() { # $1=file $2=exact line $3=description
     fail "$3 (unexpected exact line '$2' in $1)"
   else
     pass "$3"
+  fi
+}
+
+expect_file_contains() { # $1=file $2=fixed string $3=description
+  if [[ -f "$1" ]] && grep -Fq -- "$2" "$1"; then
+    pass "$3"
+  else
+    fail "$3 (missing: $2 in $1)"
   fi
 }
 
@@ -337,12 +346,130 @@ write_lines "$CODEX_STUB" \
   '    trap '\''exit 0'\'' TERM' \
   '    while :; do sleep 1; done' \
   '    ;;' \
+  '  stubborn)' \
+  '    trap "" TERM' \
+  '    printf "%s\n" "$$" > "${CODEX_STUB_CHILD_PID:?}"' \
+  '    while :; do sleep 1; done' \
+  '    ;;' \
+  '  chatty)' \
+  '    printf "%s\n" "$$" > "${CODEX_STUB_CHILD_PID:?}"' \
+  '    while :; do printf "tick\n"; sleep 0.2; done' \
+  '    ;;' \
   '  nonzero) exit 7 ;;' \
   '  signal) kill -TERM "$$" ;;' \
   'esac' \
   'exit 0'
 chmod +x "$CODEX_STUB"
 TEST_PATH="$BIN_DIR:$PATH"
+
+# A non-interactive shell starts background jobs with SIGINT ignored, and the
+# adapter leaves an inherited ignore alone. The launcher gives a backgrounded
+# wrapper known dispositions: default, or ignored for names in LAUNCH_IGNORE.
+LAUNCHER="$TMP_ROOT/launch.py"
+write_lines "$LAUNCHER" \
+  'import os' \
+  'import signal' \
+  'import sys' \
+  '' \
+  'ignored = set(filter(None, os.environ.pop("LAUNCH_IGNORE", "").split(",")))' \
+  'for name in ("SIGTERM", "SIGINT", "SIGHUP"):' \
+  '    signal.signal(getattr(signal, name), signal.SIG_IGN if name in ignored else signal.SIG_DFL)' \
+  'os.chdir(sys.argv[1])' \
+  'os.execvp(sys.argv[2], sys.argv[2:])'
+
+JOURNAL_STUB="$BIN_DIR/loop-journal-stub"
+write_lines "$JOURNAL_STUB" \
+  '#!/usr/bin/env bash' \
+  'printf "%s\n" "$*" >> "${JOURNAL_STUB_LOG:?}"'
+chmod +x "$JOURNAL_STUB"
+
+wait_until() { # remaining args=condition command; polls for up to 10 seconds
+  local attempt=0
+  until "$@" 2>/dev/null; do
+    attempt=$((attempt + 1))
+    [[ $attempt -lt 100 ]] || return 1
+    sleep 0.1
+  done
+}
+
+group_alive() { # $1=process group id
+  kill -0 -- "-$1" 2>/dev/null
+}
+
+group_gone() { # $1=process group id
+  ! group_alive "$1"
+}
+
+lock_has() { # $1=workspace state root $2=fixed string
+  grep -Fq -- "$2" "$1/.lock"
+}
+
+expect_group_gone() { # $1=process group id $2=description
+  if wait_until group_gone "$1"; then
+    pass "$2"
+  else
+    fail "$2 (process group $1 still has members)"
+  fi
+}
+
+# Start a dispatch whose stub holds after its banner, with default signal
+# dispositions, and wait until the adapter has recorded the child's process
+# group. Sets HELD_OUT HELD_WRAPPER_PID HELD_CHILD_PID HELD_ROOT HELD_ID
+# HELD_STATE.
+start_held_dispatch() { # $1=name $2=home $3=workspace, remaining=extra env assignments
+  local name="$1" home="$2" workspace="$3" roots
+  shift 3
+  HELD_OUT="$TMP_ROOT/$name.out"
+  HELD_CHILD_PID=""
+  HELD_ROOT=""
+  HELD_ID=""
+  HELD_STATE=""
+  rm -f "$TMP_ROOT/$name.child"
+  python3 "$LAUNCHER" "$workspace" env HOME="$home" CODEX_HOME="$home/.codex" PATH="$TEST_PATH" \
+    CODEX_STUB_LOG="$TMP_ROOT/$name.argv" CODEX_STUB_ACTION=hold \
+    CODEX_STUB_CHILD_PID="$TMP_ROOT/$name.child" "$@" \
+    "$DISPATCH" --prompt held > "$HELD_OUT" 2>&1 &
+  HELD_WRAPPER_PID=$!
+  wait_until test -s "$TMP_ROOT/$name.child" || return 1
+  HELD_CHILD_PID="$(sed -n '1p' "$TMP_ROOT/$name.child")"
+  LIVE_GROUPS="$LIVE_GROUPS $HELD_CHILD_PID"
+  roots=( "$home"/.config/olddonkey-loop/codex/* )
+  HELD_ROOT="${roots[0]}"
+  wait_until lock_has "$HELD_ROOT" "child_start=" || return 1
+  HELD_ID="$(cut -f1 "$HELD_ROOT/.lock" | sed -n '1p')"
+  HELD_STATE="$HELD_ROOT/$HELD_ID"
+}
+
+finish_held() { # waits for the held wrapper; sets CASE_STATUS and CASE_OUTPUT
+  local watchdog
+  # A wrapper that fails to stop must fail its checks, not hang the suite.
+  ( sleep 20; kill -KILL "$HELD_WRAPPER_PID" ) > /dev/null 2>&1 &
+  watchdog=$!
+  wait "$HELD_WRAPPER_PID" 2>/dev/null
+  CASE_STATUS=$?
+  kill "$watchdog" 2>/dev/null
+  wait "$watchdog" 2>/dev/null
+  CASE_OUTPUT="$HELD_OUT"
+}
+
+# A `running` record whose wrapper was SIGKILLed and whose CLI is gone too.
+# Sets FIX_HOME FIX_WORKSPACE and the HELD_* values.
+make_dead_stale_fixture() { # $1=name
+  FIX_HOME="$STATE_PARENT/$1-home"
+  FIX_WORKSPACE="$STATE_PARENT/$1-workspace"
+  mkdir -p "$FIX_HOME/.codex" "$FIX_WORKSPACE"
+  start_held_dispatch "$1" "$FIX_HOME" "$FIX_WORKSPACE" || return 1
+  kill -KILL "$HELD_WRAPPER_PID" 2>/dev/null
+  wait "$HELD_WRAPPER_PID" 2>/dev/null
+  kill -TERM -- "-$HELD_CHILD_PID" 2>/dev/null
+  wait_until group_gone "$HELD_CHILD_PID"
+}
+
+run_recover() { # $1=name $2=home $3=workspace $4=recovery flag
+  rm -f "$TMP_ROOT/$1.argv"
+  run_split_case_in_dir "$1" "$3" env HOME="$2" CODEX_HOME="$2/.codex" PATH="$TEST_PATH" \
+    CODEX_STUB_LOG="$TMP_ROOT/$1.argv" "$DISPATCH" "$4"
+}
 
 CASES="$SCRIPT_DIR/../../tests/codex-cases.tsv"
 INTEGRATION_HARNESS="$SCRIPT_DIR/../../tests/integration-test.sh"
@@ -900,33 +1027,24 @@ expect_missing_file "$TMP_ROOT/alias.argv" "symlink-alias overlap refuses before
 # generation while the Codex child remains alive.
 CRASH_HOME="$STATE_PARENT/crash-home"
 CRASH_WORKSPACE="$STATE_PARENT/crash-workspace"
+CRASH_SESSION="019c0000-0000-7000-8000-000000000001"
 mkdir -p "$CRASH_HOME/.codex" "$CRASH_WORKSPACE"
 run_split_case_in_dir crash-ready "$CRASH_WORKSPACE" env \
   HOME="$CRASH_HOME" CODEX_HOME="$CRASH_HOME/.codex" PATH="$TEST_PATH" \
   CODEX_STUB_LOG="$TMP_ROOT/crash-ready.argv" "$DISPATCH" --prompt ready
 expect_status 0 "wrapper-crash fixture first records an older ready generation"
+CRASH_READY_STATE="$(latest_run_state "$CASE_STDERR")"
 
-CRASH_WRAPPER_OUT="$TMP_ROOT/crash-wrapper.out"
-CRASH_CHILD_FILE="$TMP_ROOT/crash-child.pid"
-(
-  cd "$CRASH_WORKSPACE" || exit 1
-  exec env HOME="$CRASH_HOME" CODEX_HOME="$CRASH_HOME/.codex" PATH="$TEST_PATH" \
-    CODEX_STUB_LOG="$TMP_ROOT/crash-running.argv" CODEX_STUB_ACTION=hold \
-    CODEX_STUB_CHILD_PID="$CRASH_CHILD_FILE" "$DISPATCH" --prompt running
-) > "$CRASH_WRAPPER_OUT" 2>&1 &
-CRASH_WRAPPER_PID=$!
-for wait_index in 1 2 3 4 5 6 7 8 9 10; do
-  [[ ! -s "$CRASH_CHILD_FILE" ]] || break
-  sleep 0.1
-done
-if [[ -s "$CRASH_CHILD_FILE" ]]; then
-  CRASH_CHILD_PID="$(sed -n '1p' "$CRASH_CHILD_FILE")"
+if start_held_dispatch crash-running "$CRASH_HOME" "$CRASH_WORKSPACE"; then
   pass "wrapper-crash fixture leaves a live Codex child"
 else
   fail "wrapper-crash fixture leaves a live Codex child"
 fi
-kill -KILL "$CRASH_WRAPPER_PID" 2>/dev/null || true
-wait "$CRASH_WRAPPER_PID" 2>/dev/null || true
+CRASH_CHILD_PID="$HELD_CHILD_PID"
+CRASH_ID="$HELD_ID"
+CRASH_STATE="$HELD_STATE"
+kill -KILL "$HELD_WRAPPER_PID" 2>/dev/null || true
+wait "$HELD_WRAPPER_PID" 2>/dev/null || true
 
 rm -f "$TMP_ROOT/crash-next.argv"
 run_split_case_in_dir crash-next-fresh "$CRASH_WORKSPACE" env \
@@ -934,6 +1052,7 @@ run_split_case_in_dir crash-next-fresh "$CRASH_WORKSPACE" env \
   CODEX_STUB_LOG="$TMP_ROOT/crash-next.argv" "$DISPATCH" --prompt next
 expect_status 5 "next fresh dispatch refuses the highest running generation"
 expect_output "highest generation is still running" "fresh refusal names the running record"
+expect_output "--recover-stale" "fresh refusal points at the recovery flag"
 expect_missing_file "$TMP_ROOT/crash-next.argv" "fresh dispatch does not fall back past the running record"
 
 rm -f "$TMP_ROOT/crash-resume.argv"
@@ -943,10 +1062,261 @@ run_split_case_in_dir crash-next-resume "$CRASH_WORKSPACE" env \
 expect_status 5 "next resume refuses the highest running generation"
 expect_output "highest generation is still running" "resume refusal names the running record"
 expect_missing_file "$TMP_ROOT/crash-resume.argv" "resume does not fall back to the older ready record or --last"
-if [[ -n "$CRASH_CHILD_PID" ]]; then
-  kill -TERM "-$CRASH_CHILD_PID" 2>/dev/null || true
-  CRASH_CHILD_PID=""
+
+# Recovery refuses while the recorded Codex process is alive, tells the
+# operator how to stop it, and signals nothing itself.
+run_recover crash-recover-live "$CRASH_HOME" "$CRASH_WORKSPACE" --recover-stale
+expect_status 5 "--recover-stale refuses while the recorded Codex process is alive"
+expect_output "generation $CRASH_ID is not dead" "live refusal names the generation"
+expect_output "kill -TERM -- -$CRASH_CHILD_PID" "live refusal prints how to stop the recorded process group"
+expect_file_line "$CRASH_STATE/meta.tsv" $'state\trunning' "refused recovery leaves the record running"
+run_recover crash-recover-live-unverified "$CRASH_HOME" "$CRASH_WORKSPACE" --recover-stale-unverified
+expect_status 5 "--recover-stale-unverified cannot override a verified live process"
+expect_output "does not override a verified live process" "override refusal says why it does not apply"
+expect_file_line "$CRASH_STATE/meta.tsv" $'state\trunning' "refused override leaves the record running"
+if group_alive "$CRASH_CHILD_PID"; then
+  pass "refused recovery never signals the Codex process group"
+else
+  fail "refused recovery never signals the Codex process group"
 fi
+
+# Once the operator has stopped the group, the free lock and the empty
+# recorded process group prove the generation dead.
+kill -TERM -- "-$CRASH_CHILD_PID" 2>/dev/null || true
+expect_group_gone "$CRASH_CHILD_PID" "the printed stop command empties the recorded process group"
+run_recover crash-recover-dead "$CRASH_HOME" "$CRASH_WORKSPACE" --recover-stale
+expect_status 0 "--recover-stale succeeds once the lock is free and the process group is empty"
+expect_output "generation $CRASH_ID recorded as failed (was running)" "recovery reports the transition"
+expect_output "process group $CRASH_CHILD_PID has no members" "recovery states its evidence"
+expect_output "loop-journal recover --acknowledge $CRASH_ID" "recovery points at the journal's own acknowledgement"
+expect_stdout_exact "" "recovery prints nothing on stdout"
+expect_missing_file "$TMP_ROOT/crash-recover-dead.argv" "recovery never launches Codex"
+expect_file_line "$CRASH_STATE/meta.tsv" $'state\tfailed' "recovered generation is recorded failed"
+expect_first_line "$(dirname "$CRASH_STATE")/current" "" "current cache names no ready record after recovery"
+run_recover crash-recover-again "$CRASH_HOME" "$CRASH_WORKSPACE" --recover-stale
+expect_status 0 "a second --recover-stale is a no-op"
+expect_output "nothing to recover" "no-op recovery says so"
+
+# Resume after a crash stays an explicit exact-id action. The recovered
+# record carries the same session id as the older ready record, and plain
+# --resume still refuses to select it.
+if [[ -n "$CRASH_READY_STATE" ]] &&
+   LC_ALL=C grep -qx $'state\tready' "$CRASH_READY_STATE/meta.tsv" &&
+   LC_ALL=C grep -qx $'session_id\t'"$CRASH_SESSION" "$CRASH_READY_STATE/meta.tsv" &&
+   LC_ALL=C grep -qx $'session_id\t'"$CRASH_SESSION" "$CRASH_STATE/meta.tsv"; then
+  pass "recovered and older ready generations share one session id"
+else
+  fail "recovered and older ready generations share one session id"
+fi
+rm -f "$TMP_ROOT/crash-recovered-resume.argv"
+run_split_case_in_dir crash-recovered-resume "$CRASH_WORKSPACE" env \
+  HOME="$CRASH_HOME" CODEX_HOME="$CRASH_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/crash-recovered-resume.argv" "$DISPATCH" --prompt next --resume
+expect_status 5 "plain --resume after recovery still refuses"
+expect_output "no ready loop-owned record" "recovered --resume refusal is the ordinary failed-turn refusal"
+expect_missing_file "$TMP_ROOT/crash-recovered-resume.argv" \
+  "recovered --resume never selects the older ready record with the same session id"
+run_split_case_in_dir crash-recovered-exact "$CRASH_WORKSPACE" env \
+  HOME="$CRASH_HOME" CODEX_HOME="$CRASH_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/crash-recovered-exact.argv" \
+  "$DISPATCH" --prompt next --resume-unmanaged "$CRASH_SESSION"
+expect_status 0 "explicit exact-id resume proceeds after recovery"
+expect_argv_sequence "$TMP_ROOT/crash-recovered-exact.argv" \
+  "post-recovery resume binds the id the operator named" exec resume "$CRASH_SESSION"
+
+# A running record with no recorded process group (written before process
+# recording existed, or by a wrapper that died while starting the CLI) cannot
+# be verified. Only the explicit operator assertion recovers it.
+if make_dead_stale_fixture legacy-stale; then
+  printf '%s\n' "$HELD_ID" > "$HELD_ROOT/.lock"
+fi
+run_recover legacy-recover "$FIX_HOME" "$FIX_WORKSPACE" --recover-stale
+expect_status 5 "--recover-stale refuses a running record with no recorded process group"
+expect_output "cannot be verified dead: no Codex process group is recorded" \
+  "unverifiable refusal explains what is missing"
+expect_output "$HELD_ID/last-message[.]txt" "unverifiable refusal prints the process check for this generation"
+expect_output "--recover-stale-unverified" "unverifiable refusal names the operator assertion"
+expect_file_line "$HELD_STATE/meta.tsv" $'state\trunning' "unverifiable refusal leaves the record running"
+run_recover legacy-recover-unverified "$FIX_HOME" "$FIX_WORKSPACE" --recover-stale-unverified
+expect_status 0 "--recover-stale-unverified records an unverifiable generation failed"
+expect_output "NOT verified" "operator-asserted recovery is labelled unverified"
+expect_file_line "$HELD_STATE/meta.tsv" $'state\tfailed' "operator-asserted generation is recorded failed"
+run_split_case_in_dir legacy-next "$FIX_WORKSPACE" env \
+  HOME="$FIX_HOME" CODEX_HOME="$FIX_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/legacy-next.argv" "$DISPATCH" --prompt next
+expect_status 0 "fresh dispatch proceeds after recovery"
+
+# Live members of the recorded group that cannot be tied to the dispatch (an
+# unrelated process group stands in for a reused id) are never signalled and
+# are proof of nothing: the adapter refuses, and the operator decides.
+DECOY_PID=""
+DECOY_FILE="$TMP_ROOT/decoy.pid"
+python3 -c 'import os, sys, time
+os.setsid()
+with open(sys.argv[1], "w") as handle:
+    handle.write(f"{os.getpid()}\n")
+time.sleep(300)' "$DECOY_FILE" > /dev/null 2>&1 &
+DECOY_JOB=$!
+if make_dead_stale_fixture reused-id && wait_until test -s "$DECOY_FILE"; then
+  DECOY_PID="$(sed -n '1p' "$DECOY_FILE")"
+  LIVE_GROUPS="$LIVE_GROUPS $DECOY_PID"
+  printf '%s\twrapper_pid=4242\tchild_dispatch=%s\tchild_pgid=%s\tchild_start=%s\n' \
+    "$HELD_ID" "$HELD_ID" "$DECOY_PID" "ps:Thu Jan 1 00:00:00 1970" > "$HELD_ROOT/.lock"
+fi
+run_recover reused-recover "$FIX_HOME" "$FIX_WORKSPACE" --recover-stale
+expect_status 5 "--recover-stale refuses live group members it cannot tie to the dispatch"
+expect_output "process group $DECOY_PID has live members that cannot be tied" \
+  "untied refusal names the process group"
+expect_output "awk '\$2 == $DECOY_PID'" "untied refusal prints how to list the members"
+run_recover reused-recover-unverified "$FIX_HOME" "$FIX_WORKSPACE" --recover-stale-unverified
+expect_status 0 "operator assertion recovers past unrelated live members"
+expect_file_line "$HELD_STATE/meta.tsv" $'state\tfailed' "asserted generation with a reused id is recorded failed"
+if [[ -n "$DECOY_PID" ]] && group_alive "$DECOY_PID"; then
+  pass "recovery leaves the unrelated process group untouched"
+else
+  fail "recovery leaves the unrelated process group untouched"
+fi
+kill -KILL "$DECOY_JOB" 2>/dev/null || true
+wait "$DECOY_JOB" 2>/dev/null || true
+
+# `initializing` is written before any CLI exists, so it needs no process check.
+create_ready_fixture initializing
+if [[ -n "$FIX_STATE" ]]; then
+  sed $'s/^state\tready$/state\tinitializing/' "$FIX_STATE/meta.tsv" > "$TMP_ROOT/initializing-meta.tsv"
+  chmod 600 "$TMP_ROOT/initializing-meta.tsv"
+  mv "$TMP_ROOT/initializing-meta.tsv" "$FIX_STATE/meta.tsv"
+fi
+run_recover initializing-recover "$FIX_HOME" "$FIX_WORKSPACE" --recover-stale
+expect_status 0 "--recover-stale recovers an initializing record without a process check"
+expect_output "never reached running" "initializing recovery states why no process can exist"
+expect_file_line "$FIX_STATE/meta.tsv" $'state\tfailed' "initializing generation is recorded failed"
+
+# Recovery is a state-only action: nothing to do is success, it creates no
+# state, it is not a dispatch, and it accepts no dispatch arguments.
+NONE_HOME="$STATE_PARENT/recover-none-home"
+NONE_WORKSPACE="$STATE_PARENT/recover-none-workspace"
+mkdir -p "$NONE_HOME/.codex" "$NONE_WORKSPACE"
+run_recover recover-none "$NONE_HOME" "$NONE_WORKSPACE" --recover-stale
+expect_status 0 "--recover-stale in a never-dispatched workspace is a no-op"
+expect_output "nothing to recover (this workspace has no generations)" "never-dispatched no-op says so"
+expect_missing_file "$NONE_HOME/.config" "no-op recovery creates no state"
+run_split_case_in_dir recover-block-mode "$TOOLS_WORKSPACE" env \
+  HOME="$TOOLS_HOME" CODEX_HOME="$TOOLS_CODEX_HOME" PATH="$TEST_PATH" \
+  CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1 "$DISPATCH" --recover-stale
+expect_status 0 "recovery is not subject to the external-tools dispatch block"
+expect_no_output "external tools" "recovery prints no dispatch disclosure"
+run_split_case_in_dir recover-with-prompt "$WORKSPACE" env \
+  HOME="$HOME_DIR" CODEX_HOME="$CODEX_HOME_DIR" PATH="$TEST_PATH" \
+  "$DISPATCH" --recover-stale --prompt x
+expect_status 2 "--recover-stale with a dispatch argument is refused"
+expect_output "takes no other arguments" "recovery refusal says it never dispatches"
+
+# SIGTERM, SIGINT, and SIGHUP stop the Codex process group, record the
+# generation failed, and journal dispatch.end, so the common ways a wrapper is
+# stopped leave no stale record and no orphaned CLI.
+TERM_HOME="$STATE_PARENT/sig-term-home"
+TERM_WORKSPACE="$STATE_PARENT/sig-term-workspace"
+TERM_JOURNAL="$TMP_ROOT/sig-term.journal"
+mkdir -p "$TERM_HOME/.codex" "$TERM_WORKSPACE"
+if start_held_dispatch sig-term "$TERM_HOME" "$TERM_WORKSPACE" \
+     LOOP_JOURNAL="$JOURNAL_STUB" JOURNAL_STUB_LOG="$TERM_JOURNAL"; then
+  pass "signal fixture holds a live dispatch"
+else
+  fail "signal fixture holds a live dispatch"
+fi
+run_recover sig-term-recover-held "$TERM_HOME" "$TERM_WORKSPACE" --recover-stale
+expect_status 5 "--recover-stale refuses while a wrapper holds the workspace lock"
+expect_output "workspace lock is held by $HELD_ID (wrapper pid $HELD_WRAPPER_PID)" \
+  "lock refusal names the holder and the wrapper pid to signal"
+kill -TERM "$HELD_WRAPPER_PID" 2>/dev/null || true
+finish_held
+expect_status 143 "SIGTERM to the wrapper exits 128 plus the signal"
+expect_output "dispatch interrupted by SIGTERM" "SIGTERM is diagnosed as an interrupted dispatch"
+expect_group_gone "$HELD_CHILD_PID" "SIGTERM stops the Codex process group"
+expect_file_line "$HELD_STATE/meta.tsv" $'state\tfailed' "SIGTERM records the generation failed"
+expect_file_contains "$TERM_JOURNAL" \
+  "--event dispatch.end --field dispatch_id=$HELD_ID --field exit=143 --field session=$CRASH_SESSION" \
+  "SIGTERM journals dispatch.end with the signal exit and the session"
+run_split_case_in_dir sig-term-next "$TERM_WORKSPACE" env \
+  HOME="$TERM_HOME" CODEX_HOME="$TERM_HOME/.codex" PATH="$TEST_PATH" \
+  CODEX_STUB_LOG="$TMP_ROOT/sig-term-next.argv" "$DISPATCH" --prompt next
+expect_status 0 "next dispatch needs no recovery after a handled signal"
+
+for signal_case in INT:130 HUP:129; do
+  signal_name="${signal_case%%:*}"
+  signal_exit="${signal_case##*:}"
+  SIGNAL_CASE_HOME="$STATE_PARENT/sig-$signal_name-home"
+  SIGNAL_CASE_WORKSPACE="$STATE_PARENT/sig-$signal_name-workspace"
+  mkdir -p "$SIGNAL_CASE_HOME/.codex" "$SIGNAL_CASE_WORKSPACE"
+  start_held_dispatch "sig-$signal_name" "$SIGNAL_CASE_HOME" "$SIGNAL_CASE_WORKSPACE" || true
+  kill "-$signal_name" "$HELD_WRAPPER_PID" 2>/dev/null || true
+  finish_held
+  expect_status "$signal_exit" "SIG$signal_name to the wrapper exits 128 plus the signal"
+  expect_output "dispatch interrupted by SIG$signal_name" "SIG$signal_name is diagnosed as an interrupted dispatch"
+  expect_group_gone "$HELD_CHILD_PID" "SIG$signal_name stops the Codex process group"
+  expect_file_line "$HELD_STATE/meta.tsv" $'state\tfailed' "SIG$signal_name records the generation failed"
+done
+
+# A CLI that ignores SIGTERM is killed after the grace period.
+STUBBORN_HOME="$STATE_PARENT/sig-stubborn-home"
+STUBBORN_WORKSPACE="$STATE_PARENT/sig-stubborn-workspace"
+mkdir -p "$STUBBORN_HOME/.codex" "$STUBBORN_WORKSPACE"
+start_held_dispatch sig-stubborn "$STUBBORN_HOME" "$STUBBORN_WORKSPACE" CODEX_STUB_ACTION=stubborn || true
+kill -TERM "$HELD_WRAPPER_PID" 2>/dev/null || true
+finish_held
+expect_status 143 "SIGTERM still ends a dispatch whose CLI ignores SIGTERM"
+expect_group_gone "$HELD_CHILD_PID" "a process group that ignores SIGTERM is killed after the grace period"
+expect_file_line "$HELD_STATE/meta.tsv" $'state\tfailed' "the killed generation is recorded failed"
+
+# A disposition inherited as ignored is the launcher's choice (nohup): the
+# dispatch keeps running through SIGHUP and still stops cleanly on SIGTERM.
+NOHUP_HOME="$STATE_PARENT/sig-nohup-home"
+NOHUP_WORKSPACE="$STATE_PARENT/sig-nohup-workspace"
+mkdir -p "$NOHUP_HOME/.codex" "$NOHUP_WORKSPACE"
+LAUNCH_IGNORE=SIGHUP start_held_dispatch sig-nohup "$NOHUP_HOME" "$NOHUP_WORKSPACE" || true
+kill -HUP "$HELD_WRAPPER_PID" 2>/dev/null || true
+sleep 0.5
+if group_alive "$HELD_CHILD_PID" &&
+   LC_ALL=C grep -qx $'state\trunning' "$HELD_STATE/meta.tsv"; then
+  pass "an inherited ignored SIGHUP is left ignored"
+else
+  fail "an inherited ignored SIGHUP is left ignored"
+fi
+kill -TERM "$HELD_WRAPPER_PID" 2>/dev/null || true
+finish_held
+expect_status 143 "a dispatch that ignores SIGHUP still stops cleanly on SIGTERM"
+expect_group_gone "$HELD_CHILD_PID" "the nohup dispatch's process group is stopped"
+
+# A parent session that ends without signalling the wrapper shows up as a
+# closed output reader. That ends the dispatch like SIGPIPE instead of
+# leaving a running record behind a live CLI.
+PIPE_HOME="$STATE_PARENT/pipe-home"
+PIPE_WORKSPACE="$STATE_PARENT/pipe-workspace"
+PIPE_CHILD_FILE="$TMP_ROOT/pipe.child"
+PIPE_CHILD_PID=""
+PIPE_STATE=""
+mkdir -p "$PIPE_HOME/.codex" "$PIPE_WORKSPACE"
+CASE_OUTPUT="$TMP_ROOT/pipe.stdout"
+(
+  cd "$PIPE_WORKSPACE" || exit 1
+  exec env HOME="$PIPE_HOME" CODEX_HOME="$PIPE_HOME/.codex" PATH="$TEST_PATH" \
+    CODEX_STUB_LOG="$TMP_ROOT/pipe.argv" CODEX_STUB_ACTION=chatty \
+    CODEX_STUB_CHILD_PID="$PIPE_CHILD_FILE" "$DISPATCH" --prompt chatty
+) > "$CASE_OUTPUT" 2> >(sed -n '/^session id:/q')
+CASE_STATUS=$?
+if [[ -s "$PIPE_CHILD_FILE" ]]; then
+  PIPE_CHILD_PID="$(sed -n '1p' "$PIPE_CHILD_FILE")"
+  LIVE_GROUPS="$LIVE_GROUPS $PIPE_CHILD_PID"
+  PIPE_ROOTS=( "$PIPE_HOME"/.config/olddonkey-loop/codex/* )
+  PIPE_STATE="${PIPE_ROOTS[0]}/$(cut -f1 "${PIPE_ROOTS[0]}/.lock" | sed -n '1p')"
+fi
+expect_status 141 "a closed output reader ends the dispatch like SIGPIPE"
+if [[ -n "$PIPE_CHILD_PID" ]]; then
+  expect_group_gone "$PIPE_CHILD_PID" "a closed output reader stops the Codex process group"
+else
+  fail "a closed output reader stops the Codex process group"
+fi
+expect_file_line "$PIPE_STATE/meta.tsv" $'state\tfailed' "a closed output reader records the generation failed"
 
 
 if [[ $FAILED_CHECKS -gt 0 ]]; then

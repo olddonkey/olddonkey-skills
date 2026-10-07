@@ -6,6 +6,7 @@
 #                     [--model MODEL] [--effort LEVEL]
 #                     [--resume [SESSION_ID]|--resume-unmanaged SESSION_ID]
 #   codex-dispatch.sh --prompt "short inline prompt" [...]
+#   codex-dispatch.sh --recover-stale | --recover-stale-unverified
 #
 # Run from the ROOT of the target repository. Fresh turns pin the workspace
 # with `-C`; resumed turns cannot accept `-C`, so the adapter changes directory
@@ -24,6 +25,17 @@
 #
 # This adapter is strictly foreground. `--background` is rejected; background
 # the adapter at the harness level, where its exit remains authoritative.
+# SIGTERM, SIGINT, and SIGHUP stop the Codex process group, record the
+# generation as failed, and exit 128 plus the signal number.
+#
+# `--recover-stale` never dispatches. It is for a generation left `running` or
+# `initializing` by a wrapper that died without a handler (SIGKILL, host
+# crash): it records that generation as failed once the workspace lock is free
+# and the recorded Codex process group has no members, and refuses while that
+# group is alive. `--recover-stale-unverified` is the operator's assertion for
+# a generation whose process group cannot be checked; it is still refused while
+# the recorded Codex process is verifiably running. Neither takes other
+# arguments. Resume after recovery stays an explicit exact-id action.
 #
 # Model and effort have no adapter defaults. Explicit effort is forwarded as a
 # quoted TOML `model_reasoning_effort` override, including `ultra` and `max`.
@@ -46,6 +58,8 @@ PROMPT=""
 ACTION="fresh"
 RESUME_ID=""
 READ_ONLY=0
+RECOVER=""
+ARGUMENT_COUNT=$#
 ADAPTER_VERSION="2"
 
 # This is intentionally a source constant, not an environment toggle.
@@ -93,6 +107,8 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --read-only|--investigate) READ_ONLY=1; shift ;;
+    --recover-stale) RECOVER="recover-stale"; shift ;;
+    --recover-stale-unverified) RECOVER="recover-stale-unverified"; shift ;;
     --background)
       echo "error: --background is unsupported; background this foreground adapter at the harness level" >&2
       exit 2
@@ -121,16 +137,29 @@ if [[ -n "$PROMPT_FILE" ]]; then
   [[ -f "$PROMPT_FILE" ]] || { echo "prompt file not found: $PROMPT_FILE" >&2; exit 2; }
   PROMPT="$(cat "$PROMPT_FILE")"
 fi
-[[ -n "$PROMPT" ]] || { echo "need --prompt-file or --prompt" >&2; usage 2; }
 
-for REQUIRED in codex python3; do
+# Recovery is a state-only action: it launches no CLI, so it takes no dispatch
+# argument and needs neither a prompt nor the codex binary.
+REQUIRED_COMMANDS=(codex python3)
+if [[ -n "$RECOVER" ]]; then
+  if [[ $ARGUMENT_COUNT -ne 1 ]]; then
+    echo "error: --$RECOVER takes no other arguments; it records a dead generation as failed and never dispatches" >&2
+    exit 2
+  fi
+  ACTION="$RECOVER"
+  REQUIRED_COMMANDS=(python3)
+else
+  [[ -n "$PROMPT" ]] || { echo "need --prompt-file or --prompt" >&2; usage 2; }
+fi
+
+for REQUIRED in "${REQUIRED_COMMANDS[@]}"; do
   command -v "$REQUIRED" >/dev/null 2>&1 || {
     echo "error: required command not found: $REQUIRED" >&2
     exit 3
   }
 done
 
-if [[ "$ACTION" != "fresh" && $RESUME_RELEASE_ENABLED -ne 1 ]]; then
+if [[ "$ACTION" == resume* && $RESUME_RELEASE_ENABLED -ne 1 ]]; then
   echo "error: Codex resume is release-disabled until integration-test.sh --require codex passes without non-managed skips" >&2
   echo "iterate with a fresh dispatch and put the prior session context in the new prompt" >&2
   exit 2
@@ -199,6 +228,8 @@ EXTERNAL_TOOLS=""
 TOOL_SCAN_FAILED=0
 NEWLINE=$'\n'
 for TOOL_CONFIG in "$CONFIG" "$PROJECT_CONFIG"; do
+  # Recovery launches no CLI, so there is no exposure to disclose or block.
+  [[ -z "$RECOVER" ]] || break
   if TOOL_SCAN_OUTPUT="$(scan_config_tools "$TOOL_CONFIG")"; then
     [[ -z "$TOOL_SCAN_OUTPUT" ]] || \
       EXTERNAL_TOOLS="${EXTERNAL_TOOLS}${EXTERNAL_TOOLS:+$NEWLINE}$TOOL_SCAN_OUTPUT"
@@ -259,29 +290,38 @@ describe() { # $1=label $2=chosen value $3=config key
   fi
 }
 
-CODEX_BIN="$(command -v codex)"
-CODEX_VERSION="$("$CODEX_BIN" --version 2>/dev/null || echo '?')"
 STATE_ROOT="$HOME/.config/olddonkey-loop/codex"
+CODEX_BIN=""
 
-echo "codex exec dispatch summary:" >&2
-echo "workspace: $WORKSPACE" >&2
-echo "codex version: $CODEX_VERSION" >&2
-echo "adapter version: $ADAPTER_VERSION" >&2
-describe "model" "$MODEL" "model" >&2
-describe "effort" "$EFFORT" "model_reasoning_effort" >&2
-describe "tier" "" "service_tier" >&2
-echo "mode: $MODE_LABEL" >&2
-echo "sandbox (requested): $SANDBOX_MODE" >&2
-case "$ACTION" in
-  fresh) echo "resume: no (fresh dispatch)" >&2 ;;
-  resume) echo "resume: managed exact id${RESUME_ID:+ $RESUME_ID}" >&2 ;;
-  resume-unmanaged) echo "resume: unmanaged exact id $RESUME_ID (migration/adoption)" >&2 ;;
-esac
+if [[ -n "$RECOVER" ]]; then
+  echo "codex stale-generation recovery (no dispatch):" >&2
+  echo "workspace: $WORKSPACE" >&2
+  echo "adapter version: $ADAPTER_VERSION" >&2
+else
+  CODEX_BIN="$(command -v codex)"
+  CODEX_VERSION="$("$CODEX_BIN" --version 2>/dev/null || echo '?')"
+
+  echo "codex exec dispatch summary:" >&2
+  echo "workspace: $WORKSPACE" >&2
+  echo "codex version: $CODEX_VERSION" >&2
+  echo "adapter version: $ADAPTER_VERSION" >&2
+  describe "model" "$MODEL" "model" >&2
+  describe "effort" "$EFFORT" "model_reasoning_effort" >&2
+  describe "tier" "" "service_tier" >&2
+  echo "mode: $MODE_LABEL" >&2
+  echo "sandbox (requested): $SANDBOX_MODE" >&2
+  case "$ACTION" in
+    fresh) echo "resume: no (fresh dispatch)" >&2 ;;
+    resume) echo "resume: managed exact id${RESUME_ID:+ $RESUME_ID}" >&2 ;;
+    resume-unmanaged) echo "resume: unmanaged exact id $RESUME_ID (migration/adoption)" >&2 ;;
+  esac
+fi
 
 # The Python supervisor is the state-directory module. It owns secure
 # bootstrap, the non-blocking descriptor lock, authoritative record scans,
 # the single parameterized argv builder, process-group lifecycle, transcript
-# capture, banner verification, and atomic state transitions.
+# capture, banner verification, atomic state transitions, stop-signal
+# handling, and stale-generation recovery.
 exec python3 - \
   "$STATE_ROOT" "$WORKSPACE" "$SANDBOX_MODE" "$ACTION" "$RESUME_ID" \
   "$CODEX_BIN" "$MODEL" "$EFFORT" "$PROMPT" "$JOURNAL_HELPER" <<'PY'
@@ -338,10 +378,22 @@ META_KEYS = (
     "updated",
 )
 VALID_STATES = {"initializing", "running", "ready", "failed"}
+RECOVERING = action in {"recover-stale", "recover-stale-unverified"}
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+PID_RE = re.compile(r"^[1-9][0-9]{0,9}$")
+START_RE = re.compile(r"^(?:proc|ps):[A-Za-z0-9:. -]{1,96}$")
 
 
 class StateError(Exception):
     pass
+
+
+class Interrupted(BaseException):
+    """A stop signal delivered while waiting on the Codex child."""
+
+    def __init__(self, signum):
+        super().__init__(signum)
+        self.signum = signum
 
 
 def refuse(message, code=5):
@@ -630,20 +682,310 @@ def build_codex_argv(kind, mode, session_id, output_path):
     return argv
 
 
+def group_alive(pgid):
+    """True while any process is still a member of the process group."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def terminate_group(child):
+    """TERM the child's process group, then KILL whatever outlives the grace."""
     try:
         os.killpg(child.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
-        if child.poll() is not None:
+        # A reaped leader whose group still has members cannot have had its
+        # id reused, so the group id keeps naming this dispatch's processes.
+        if child.poll() is not None and not group_alive(child.pid):
             return
         time.sleep(0.05)
     try:
         os.killpg(child.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+
+
+def fail_generation(workspace_root, record):
+    """Move a non-terminal record to failed; a terminal record is left alone."""
+    if record["state"] in {"initializing", "running"}:
+        record["state"] = "failed"
+        write_meta(record)
+        repair_current(workspace_root, record)
+
+
+def stop_child(child):
+    """Abnormal-exit cleanup for a CLI this wrapper has not yet reaped."""
+    if child is None or child.returncode is not None:
+        return
+    terminate_group(child)
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+_PENDING_STOP = []
+_STOP_DEFERRED = True
+
+
+def handle_stop_signal(signum, _frame):
+    """Stop signals raise only inside interruptible(); elsewhere they wait."""
+    global _STOP_DEFERRED
+    if _STOP_DEFERRED:
+        if not _PENDING_STOP:
+            _PENDING_STOP.append(signum)
+        return
+    _STOP_DEFERRED = True
+    raise Interrupted(signum)
+
+
+def install_stop_handlers():
+    # A disposition inherited as ignored (nohup, a shell's background job) is
+    # the launcher's decision and is left alone.
+    for signum in STOP_SIGNALS:
+        if signal.getsignal(signum) != signal.SIG_IGN:
+            signal.signal(signum, handle_stop_signal)
+
+
+def interruptible(call):
+    """Run one blocking wait on the child with stop signals deliverable.
+
+    State transitions, the spawn, and journal writes run with stop signals
+    deferred, so an interrupt can never lose the child handle or tear a
+    record; the deferred signal is raised at the next wait.
+    """
+    global _STOP_DEFERRED
+    _STOP_DEFERRED = False
+    try:
+        if _PENDING_STOP:
+            raise Interrupted(_PENDING_STOP[0])
+        return call()
+    finally:
+        _STOP_DEFERRED = True
+
+
+def process_start(pid):
+    """Opaque start-time identity of a running pid; "" if unknown or a zombie."""
+    value = ""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            fields = handle.read().rsplit(b")", 1)[1].split()
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            boot = handle.read().strip()
+        if fields[0] != b"Z":
+            value = f"proc:{boot}:{int(fields[19])}"
+    except (OSError, IndexError, ValueError):
+        # No procfs (macOS, BSD). `lstart` is rendered local time, so the zone
+        # and locale are pinned; unpinned, it would change across a DST shift.
+        try:
+            listed = subprocess.run(
+                ["ps", "-o", "state=", "-o", "lstart=", "-p", str(pid)],
+                env=dict(os.environ, LC_ALL="C", TZ="UTC0"),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        words = listed.stdout.decode("ascii", "replace").split()
+        if listed.returncode == 0 and len(words) > 1 and not words[0].startswith("Z"):
+            value = "ps:" + " ".join(words[1:])
+    return value if START_RE.fullmatch(value) else ""
+
+
+def read_holder(lock_fd):
+    """Parse the lock file's holder line; malformed fields read as absent.
+
+    `<holder-id> TAB wrapper_pid=N [TAB child_dispatch=ID TAB child_pgid=N
+    [TAB child_start=S]]`. The first two fields name whoever holds the lock
+    now. The child fields name the last CLI this workspace spawned.
+    """
+    holder = {
+        "raw": "",
+        "dispatch_id": "",
+        "wrapper_pid": None,
+        "child_dispatch": "",
+        "child_pgid": None,
+        "child_start": "",
+    }
+    try:
+        text = os.pread(lock_fd, 1024, 0).decode("ascii", "replace")
+    except OSError:
+        return holder
+    line = text.split("\n", 1)[0]
+    holder["raw"] = " ".join(line.split())
+    fields = line.split("\t")
+    if not DISPATCH_RE.fullmatch(fields[0]):
+        return holder
+    holder["dispatch_id"] = fields[0]
+    values = dict(field.split("=", 1) for field in fields[1:] if "=" in field)
+    if PID_RE.fullmatch(values.get("wrapper_pid", "")):
+        holder["wrapper_pid"] = int(values["wrapper_pid"])
+    child_pgid = values.get("child_pgid", "")
+    # Group ids 0 and 1 would address this wrapper's own group or init.
+    if (
+        DISPATCH_RE.fullmatch(values.get("child_dispatch", ""))
+        and PID_RE.fullmatch(child_pgid)
+        and int(child_pgid) > 1
+    ):
+        holder["child_dispatch"] = values["child_dispatch"]
+        holder["child_pgid"] = int(child_pgid)
+        if START_RE.fullmatch(values.get("child_start", "")):
+            holder["child_start"] = values["child_start"]
+    return holder
+
+
+def write_holder(lock_fd, holder_id, child):
+    """Rewrite the holder line in place: the lock is on this inode."""
+    fields = [holder_id, f"wrapper_pid={os.getpid()}"]
+    if child["child_pgid"] is not None:
+        fields.append(f"child_dispatch={child['child_dispatch']}")
+        fields.append(f"child_pgid={child['child_pgid']}")
+        if child["child_start"]:
+            fields.append(f"child_start={child['child_start']}")
+    data = ("\t".join(fields) + "\n").encode("ascii")
+    # Write before truncating so a reader never finds the file empty; only
+    # the first line is ever parsed.
+    os.pwrite(lock_fd, data, 0)
+    os.ftruncate(lock_fd, len(data))
+    os.fsync(lock_fd)
+
+
+def lock_held_message(holder):
+    if not holder["dispatch_id"]:
+        return "workspace lock is held" + (f" by {holder['raw']}" if holder["raw"] else "")
+    message = f"workspace lock is held by {holder['dispatch_id']}"
+    if holder["wrapper_pid"] is not None:
+        message += (
+            f" (wrapper pid {holder['wrapper_pid']}); to cancel an in-flight dispatch"
+            " send that wrapper SIGTERM"
+        )
+    return message
+
+
+def stale_child_verdict(stale, last_child):
+    """Classify the CLI of a non-terminal generation whose wrapper is gone.
+
+    Returns (verdict, evidence, pgid). Only two findings prove the CLI dead:
+    the generation never reached `running`, or its recorded process group has
+    no members. A start-time match proves it alive. Anything else is
+    `unverified` and left to the operator; a start-time mismatch is never
+    taken as proof of death.
+    """
+    if stale["state"] == "initializing":
+        return "dead", "it never reached running, so no Codex process was started", None
+    if last_child["child_dispatch"] != stale["dispatch_id"]:
+        return (
+            "unverified",
+            "no Codex process group is recorded for it (it predates process "
+            "recording, or its wrapper died while starting the CLI)",
+            None,
+        )
+    pgid = last_child["child_pgid"]
+    if not group_alive(pgid):
+        return "dead", f"its recorded Codex process group {pgid} has no members", pgid
+    recorded = last_child["child_start"]
+    if recorded and process_start(pgid) == recorded:
+        return "alive", f"its Codex process (pid and process group {pgid}) is still running", pgid
+    return (
+        "unverified",
+        f"process group {pgid} has live members that cannot be tied to it (the "
+        "recorded Codex process itself is gone, or another process now has its id)",
+        pgid,
+    )
+
+
+def recover_stale(workspace_root, records, last_child):
+    """Record a dead non-terminal highest generation as failed.
+
+    Runs under the workspace lock, which is the proof that the wrapper that
+    owned the generation is gone. It never signals a process.
+    """
+    highest = records[-1] if records else None
+    if highest is None or highest["state"] not in {"initializing", "running"}:
+        found = (
+            "this workspace has no generations"
+            if highest is None
+            else f"highest generation {highest['dispatch_id']} is {highest['state']}"
+        )
+        print(f"recover-stale: nothing to recover ({found})", file=sys.stderr)
+        raise SystemExit(0)
+    stale_id = highest["dispatch_id"]
+    previous_state = highest["state"]
+    verdict, evidence, pgid = stale_child_verdict(highest, last_child)
+    listing = f"ps -axww -o pid=,pgid=,command= | awk '$2 == {pgid}'"
+    if verdict == "alive":
+        refuse(
+            f"generation {stale_id} is not dead: {evidence}\n"
+            "Stop it, then run --recover-stale again:\n"
+            f"  kill -TERM -- -{pgid}\n"
+            f"  {listing}    # members still listed after a few seconds? then:\n"
+            f"  kill -KILL -- -{pgid}\n"
+            "--recover-stale-unverified does not override a verified live process."
+        )
+    if verdict == "unverified" and action != "recover-stale-unverified":
+        if pgid is None:
+            check = (
+                "Look for a surviving `codex exec` of this generation:\n"
+                f"  ps -axww -o pid=,pgid=,command= | grep '{stale_id}/last-message[.]txt'\n"
+                "If that prints nothing, run --recover-stale-unverified to record the "
+                "generation as failed on your assertion."
+            )
+        else:
+            check = (
+                f"List them:\n  {listing}\n"
+                f"Leftovers of this dispatch: stop them (kill -TERM -- -{pgid}) and run "
+                "--recover-stale again.\n"
+                "Unrelated processes that reused the id: run --recover-stale-unverified "
+                "to record the generation as failed on your assertion."
+            )
+        refuse(f"generation {stale_id} cannot be verified dead: {evidence}\n{check}")
+
+    highest["state"] = "failed"
+    write_meta(highest)
+    repair_current(workspace_root, highest)
+    print(
+        f"recover-stale: generation {stale_id} recorded as failed (was {previous_state})",
+        file=sys.stderr,
+    )
+    print(
+        f"evidence: the workspace lock was free, so its wrapper is gone; {evidence}",
+        file=sys.stderr,
+    )
+    if verdict == "unverified":
+        print(
+            "warning: child liveness was NOT verified; recorded on operator "
+            "assertion (--recover-stale-unverified)",
+            file=sys.stderr,
+        )
+    print(f"session id: {highest['session_id'] or '<none captured>'}", file=sys.stderr)
+    ready = [item for item in records if item["state"] == "ready"]
+    if ready:
+        print(
+            f"newest ready generation: {ready[-1]['dispatch_id']} "
+            f"session {ready[-1]['session_id']}",
+            file=sys.stderr,
+        )
+    print(
+        "resume: plain --resume stays refused until a turn reaches ready; start a "
+        "fresh dispatch, or name the exact session with --resume-unmanaged <session id>",
+        file=sys.stderr,
+    )
+    print(
+        "journal: a loop run that recorded this dispatch still shows it open; "
+        f"`loop-journal recover --acknowledge {stale_id}` closes it",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
 
 
 def journal_helper_ok():
@@ -711,6 +1053,11 @@ try:
     # macOS's symlinked /tmp still receives the containment verdict.
     verify_containment()
     no_symlink_components(state_root)
+    workspace_key = hashlib.sha256(workspace.encode("utf-8")).hexdigest()
+    workspace_root = os.path.join(state_root, workspace_key)
+    if RECOVERING and not os.path.lexists(workspace_root):
+        # Recovery of a never-dispatched workspace creates no state.
+        recover_stale(workspace_root, [], None)
     config_root = os.path.dirname(os.path.dirname(state_root))
     loop_root = os.path.dirname(state_root)
     os.makedirs(config_root, mode=0o700, exist_ok=True)
@@ -719,8 +1066,6 @@ try:
     ensure_directory(state_root)
     verify_containment()
 
-    workspace_key = hashlib.sha256(workspace.encode("utf-8")).hexdigest()
-    workspace_root = os.path.join(state_root, workspace_key)
     ensure_directory(workspace_root)
 
     lock_path = os.path.join(workspace_root, ".lock")
@@ -733,23 +1078,28 @@ try:
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        try:
-            holder = os.read(lock_fd, 256).decode("utf-8", "replace").strip()
-        except OSError:
-            holder = ""
-        raise StateError(f"workspace lock is held{f' by {holder}' if holder else ''}")
+        raise StateError(lock_held_message(read_holder(lock_fd)))
 
+    # The lock is held until this process exits, so holding it proves that no
+    # earlier wrapper for this workspace is alive. The holder line's child
+    # fields are carried forward until the next spawn: they are how
+    # --recover-stale finds the process group of a generation whose wrapper
+    # died, even after later invocations have taken and released the lock.
+    last_child = read_holder(lock_fd)
     dispatch_id = f"{utc_now()}-{secrets.token_hex(4)}"
-    os.ftruncate(lock_fd, 0)
-    os.write(lock_fd, (dispatch_id + "\n").encode("ascii"))
-    os.fsync(lock_fd)
+    write_holder(lock_fd, dispatch_id, last_child)
 
     records = scan_records(workspace_root)
     highest = records[-1] if records else None
     repair_current(workspace_root, highest)
+    if RECOVERING:
+        recover_stale(workspace_root, records, last_child)
     if highest is not None and highest["state"] in {"initializing", "running"}:
         raise StateError(
-            f"highest generation is still {highest['state']}: {highest['dispatch_id']}"
+            f"highest generation is still {highest['state']}: {highest['dispatch_id']}; "
+            "the workspace lock was free, so its wrapper is gone. Run this adapter "
+            "with --recover-stale from the workspace root to check for a surviving "
+            "Codex process and record the generation as failed"
         )
 
     session_id = ""
@@ -766,6 +1116,8 @@ try:
     elif action != "fresh":
         raise StateError(f"unknown dispatch action: {action}")
 
+    # From here a record exists, so a stop signal must leave it terminal.
+    install_stop_handlers()
     generation = (highest["generation"] if highest else 0) + 1
     dispatch_directory = os.path.join(workspace_root, dispatch_id)
     os.mkdir(dispatch_directory, 0o700)
@@ -786,8 +1138,6 @@ try:
     create_regular(os.path.join(dispatch_directory, "transcript.log"))
     create_regular(os.path.join(dispatch_directory, "last-message.txt"))
     write_meta(record)
-    record["state"] = "running"
-    write_meta(record)
 
     last_message = os.path.join(dispatch_directory, "last-message.txt")
     transcript_path = os.path.join(dispatch_directory, "transcript.log")
@@ -800,7 +1150,16 @@ try:
     journal_dispatch_start(dispatch_id)
 
     end_exit = 5
+    child = None
     try:
+        # A stop signal that arrived during setup ends the dispatch here.
+        interruptible(lambda: None)
+        # `initializing` means no CLI was ever started. `running` is written
+        # immediately before the spawn and the child's process group
+        # immediately after it, so a `running` record without a recorded
+        # group is the only state in which a CLI may exist unrecorded.
+        record["state"] = "running"
+        write_meta(record)
         child = subprocess.Popen(
             argv,
             cwd=workspace,
@@ -810,6 +1169,14 @@ try:
             start_new_session=True,
             close_fds=True,
         )
+        # start_new_session makes the child the leader of its own session and
+        # process group, so its pid is also the group id. The group is
+        # recorded first; the start time may need a `ps` run and follows.
+        spawned = {"child_dispatch": dispatch_id, "child_pgid": child.pid, "child_start": ""}
+        write_holder(lock_fd, dispatch_id, spawned)
+        spawned["child_start"] = process_start(child.pid)
+        if spawned["child_start"]:
+            write_holder(lock_fd, dispatch_id, spawned)
         reported_sandbox = None
         reported_approval = None
         reported_session = None
@@ -819,7 +1186,7 @@ try:
         banner_error = None
         with open(transcript_path, "ab", buffering=0) as transcript:
             assert child.stdout is not None
-            for raw in iter(child.stdout.readline, b""):
+            for raw in iter(lambda: interruptible(child.stdout.readline), b""):
                 transcript.write(raw)
                 sys.stderr.buffer.write(raw)
                 sys.stderr.buffer.flush()
@@ -889,7 +1256,7 @@ try:
                     session_id = reported_session
                     record["session_id"] = session_id
                     write_meta(record)
-        child_status = child.wait()
+        child_status = interruptible(child.wait)
 
         print(
             f"sandbox (CLI reported): {reported_sandbox or '<not reported>'}",
@@ -950,6 +1317,40 @@ try:
             sys.stdout.buffer.write(handle.read())
             sys.stdout.buffer.flush()
         end_exit = 0
+    except Interrupted as stop:
+        end_exit = 128 + stop.signum
+        stop_child(child)
+        fail_generation(workspace_root, record)
+        print(f"run state: {dispatch_directory}", file=sys.stderr)
+        stopped = "before the CLI started" if child is None else "Codex process group stopped"
+        refuse(
+            f"dispatch interrupted by {signal.Signals(stop.signum).name}; {stopped}; "
+            f"generation {dispatch_id} recorded as failed",
+            end_exit,
+        )
+    except BrokenPipeError:
+        # The reader of this wrapper's output is gone, which is how a parent
+        # session that ended without signalling it appears. Reported like
+        # SIGPIPE; the streams are parked so interpreter exit cannot fail.
+        end_exit = 128 + signal.SIGPIPE
+        stop_child(child)
+        fail_generation(workspace_root, record)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        raise SystemExit(end_exit)
+    except StateError:
+        # The handler below records the failure; a CLI must not outlive it.
+        stop_child(child)
+        raise
+    except SystemExit:
+        raise
+    except BaseException:
+        # Nothing unexpected may leave a live CLI behind a non-terminal record.
+        end_exit = 1
+        stop_child(child)
+        fail_generation(workspace_root, record)
+        raise
     finally:
         journal_dispatch_end(dispatch_id, end_exit, session_id)
 except StateError as error:
