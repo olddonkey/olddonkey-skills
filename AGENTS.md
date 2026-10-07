@@ -70,9 +70,9 @@ run):
    and no `codex-dispatch` references anywhere under either
    `references/playbooks/` tree.
 4. `bash skills/implementation-loop/backends/codex/selftest.sh` — expect
-   `selftest: PASS (243 checks)`, then
+   `selftest: PASS (267 checks)`, then
    `bash skills/implementation-loop/tests/gate-selftest.sh` — expect
-   `selftest: PASS (207 checks)`. Their split total is 450. The Codex cases
+   `selftest: PASS (207 checks)`. Their split total is 474. The Codex cases
    use python3 for secure state, argv, and fixture validation; python3 3.11+ is
    part of the repo toolchain. The Codex suite also starts, signals, and kills
    real stub processes to cover stop signals and `--recover-stale`; it needs no
@@ -82,7 +82,7 @@ run):
 6. `bash skills/implementation-loop/backends/cursor/selftest.sh` — expect
    `selftest: PASS (142 checks)`.
    `bash skills/implementation-loop/backends/claude/selftest.sh` — expect
-   `selftest: PASS (303 checks)`.
+   `selftest: PASS (307 checks)`.
 7. `bash skills/implementation-loop/tests/journal-selftest.sh` — expect
    `selftest: PASS (621 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
    — expect `selftest: PASS (114 checks)`; and
@@ -95,9 +95,9 @@ run):
 8. `bash skills/implementation-loop/tests/contract-core.sh`,
    `bash skills/implementation-loop/tests/contract-negative.sh`, and
    `bash skills/implementation-loop/tests/shim-selftest.sh` — expect all green.
-   The contract-core per-backend counts are claude 61, codex 63, cursor 67,
-   and grok 63. Contract-negative expects
-   `contract-negative: PASS (42 checks; 21 broken adapters rejected)`.
+   The contract-core per-backend counts are claude 64, codex 66, cursor 70,
+   and grok 66. Contract-negative expects
+   `contract-negative: PASS (44 checks; 22 broken adapters rejected)`.
 9. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
    `scripts/loop-evidence` record card) — expect `selftest: PASS (157 checks)`.
 10. `bash skills/implementation-loop/tests/coordinator-selftest.sh` — expect
