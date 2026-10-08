@@ -85,9 +85,9 @@ run):
    and no `codex-dispatch` references anywhere under either
    `references/playbooks/` tree.
 4. `bash skills/implementation-loop/backends/codex/selftest.sh` — expect
-   `selftest: PASS (243 checks)`, then
+   `selftest: PASS (267 checks)`, then
    `bash skills/implementation-loop/tests/gate-selftest.sh` — expect
-   `selftest: PASS (207 checks)`. Their split total is 450. The Codex cases
+   `selftest: PASS (207 checks)`. Their split total is 474. The Codex cases
    use python3 for secure state, argv, and fixture validation; python3 3.11+ is
    part of the repo toolchain. The Codex suite also starts, signals, and kills
    real stub processes to cover stop signals and `--recover-stale`; it needs no
@@ -97,7 +97,7 @@ run):
 6. `bash skills/implementation-loop/backends/cursor/selftest.sh` — expect
    `selftest: PASS (142 checks)`.
    `bash skills/implementation-loop/backends/claude/selftest.sh` — expect
-   `selftest: PASS (303 checks)`.
+   `selftest: PASS (307 checks)`.
 7. `bash skills/implementation-loop/tests/journal-selftest.sh` — expect
    `selftest: PASS (621 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
    — expect `selftest: PASS (114 checks)`; and
@@ -110,9 +110,9 @@ run):
 8. `bash skills/implementation-loop/tests/contract-core.sh`,
    `bash skills/implementation-loop/tests/contract-negative.sh`, and
    `bash skills/implementation-loop/tests/shim-selftest.sh` — expect all green.
-   The contract-core per-backend counts are claude 61, codex 63, cursor 67,
-   and grok 63. Contract-negative expects
-   `contract-negative: PASS (42 checks; 21 broken adapters rejected)`.
+   The contract-core per-backend counts are claude 64, codex 66, cursor 70,
+   and grok 66. Contract-negative expects
+   `contract-negative: PASS (44 checks; 22 broken adapters rejected)`.
 9. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
    `scripts/loop-evidence` record card) — expect `selftest: PASS (157 checks)`.
 10. `bash skills/implementation-loop/tests/coordinator-selftest.sh` — expect
@@ -125,7 +125,7 @@ run):
    plus schema-2 records written through `loop-journal append --schema 2`) —
    expect `selftest: PASS (803 checks)`.
 12. `python3 skills/implementation-loop/tests/authority-review-selftest.py`
-   runs 20 offline review regression tests, including real Git writer/verifier
+   runs 33 offline review regression tests, including real Git writer/verifier
    agreement and full-fsync routing.
    `bash skills/implementation-loop/tests/authority-selftest.sh` (the 0a.2
    authority store: the real `scripts/loop-authority` under a scratch `HOME`,
@@ -133,7 +133,8 @@ run):
    Ed25519 keys from the host `ssh-keygen`, crash injection at every protocol
    cut, and the independent verifier; needs `ssh-keygen` with `-Y`, `git`,
    `ssh`, and `openssl`, and runs its cases in parallel) — expect
-   `selftest: PASS (1920 checks)`, including the real
+   `selftest: PASS (2020 checks)` (2016 baseline checks plus four deterministic
+   sample-retry controls), including the real
    crashes derived from every command's `CRASH_APPLICABLE` set. The
    "crash matrix coverage check" section tests missing, duplicate, and
    miscredited cuts independently of section order. For review-only work,
@@ -141,7 +142,7 @@ run):
    runs the changed review, frozen inventory/transport, named revocation and
    re-genesis scenarios, and coverage negative controls; it does not run the
    frame-byte matrix. `--review-only inventory` runs just the frozen inventory,
-   transport, and coverage controls — expect `selftest: PASS (83 checks)`.
+   transport, and coverage controls — expect `selftest: PASS (94 checks)`.
    The pty cases require a readable macOS
    `sysctl kern.bootsessionuuid` (sandbox denial is an environment failure,
    not a skipped or passed case). Then the crash matrix,
@@ -211,7 +212,7 @@ run):
    issued plan, once, re-proved by a fresh observation, so forged, altered,
    and replayed plans and caller-built bindings mint nothing -- abandonment
    that removes only the intent, missing intent-named directories, and the
-   revocation's quarantine child) — expect `selftest: PASS (548 checks)`.
+   revocation's quarantine child) — expect `selftest: PASS (552 checks)`.
    Then `PYTHONDONTWRITEBYTECODE=1 python3 skills/implementation-loop/tests/refs-review-selftest.py` (18 offline
    observation/CLI regression tests), then `bash skills/implementation-loop/tests/refs-selftest.sh` (0a.3: the
    closed reference map against a frozen oracle and the live 0a.1

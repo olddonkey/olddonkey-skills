@@ -74,6 +74,23 @@ The real coverage is in `backends/codex/selftest.sh`: “`--profile` is refused 
 the direct parser guard” and “`--profile` never reaches Codex argv.” The live
 matrix continues to exercise hostile valid user and project config layers.
 
+### File modes in the workspace
+
+The adapter runs under `umask 077`, so everything it creates for itself
+(`meta.tsv`, `prompt.txt`, `transcript.log`, `last-message.txt`, the lock
+file, and their directories) is 0600 or 0700 whatever mask the caller has. The
+CLI child does not inherit that mask. The adapter records the mask it was
+invoked with and starts `codex exec` under it, so a file or directory the
+implementer creates in the workspace gets the modes the engineer's own shell
+would give: 0644 and 0755 under 022, 0640 and 0750 under 027. The summary
+line `worktree umask:` discloses the mask handed to the child. Before this
+the child inherited the private mask and every new file landed as 0600 and
+every new directory as 0700; Git does not track those bits, so commits were
+unaffected, but the working tree differed from what the engineer would have
+produced. `backends/codex/selftest.sh` checks both masks and that the state
+stays private; the shared outcome is the `worktree-umask` rule in
+[dispatch-contract.md](../../references/dispatch-contract.md).
+
 ### Calibrated tuple
 
 The required matrix ran end to end on 2026-08-17 at source head
@@ -187,9 +204,10 @@ selects the highest ready loop-owned exact id, and `--resume ID` additionally
 asserts that id. It never selects unrelated interactive work. Reset the source
 constant to `0` if the adapter argv, state schema, or pinned config keys change,
 and leave it reset until `tests/integration-test.sh --require codex` recalibrates
-the changed tuple. Signal handling, the lock file's holder line, and
-`--recover-stale` changed none of the three: the argv builder, `meta.tsv`, the
-pinned `-c` keys, and the record `--resume` selects are as calibrated.
+the changed tuple. Signal handling, the lock file's holder line,
+`--recover-stale`, and the caller-umask pass-through to the CLI child changed
+none of the three: the argv builder, `meta.tsv`, the pinned `-c` keys, and the
+record `--resume` selects are as calibrated.
 
 The integration harness uses the shipped adapter while the release switch is
 enabled. It retains a narrow recalibration fallback: when the mandated reset is

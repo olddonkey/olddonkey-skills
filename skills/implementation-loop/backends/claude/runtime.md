@@ -50,7 +50,17 @@ A new symlink among them is still refused.
 In implement mode, `git diff --no-index --binary --no-renames` creates one raw
 `changes.patch` from `pristine/` to `frozen/`. The adapter checks it with
 `git apply -p2 --check --binary --whitespace=nowarn`, then applies it with
-`git apply -p2 --binary --whitespace=nowarn` under umask 022. The whitespace
+`git apply -p2 --binary --whitespace=nowarn` under the umask the adapter was
+invoked with. The adapter itself runs under `umask 077` so the copies and run
+state stay private, and Claude edits the work copy under that private mask,
+but a patch carries only Git's 100644 and 100755 modes, so a new file or
+directory reaches the real worktree as 0666 or 0777 masked by the caller's
+umask: 0644 and 0755 under 022, 0640 and 0750 under 027, exactly what a
+`git apply` from the engineer's shell would create. The summary line
+`worktree umask:` discloses that mask. An earlier version applied under a
+fixed 022, which gave a caller with a stricter mask looser files than its own
+shell would. The shared outcome is the `worktree-umask` rule in
+[dispatch-contract.md](../../references/dispatch-contract.md). The whitespace
 flag overrides a configured `apply.whitespace`, which would otherwise rewrite
 or refuse the agent's lines. There is no patch rewrite. It never
 stages or commits. An empty patch succeeds. Failures keep the state and

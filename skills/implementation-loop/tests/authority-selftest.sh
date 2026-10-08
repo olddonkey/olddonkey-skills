@@ -16,8 +16,9 @@
 #
 # --review-only runs the changed review, named scenario cuts, frozen
 # inventory/transport, and coverage controls. Its optional "inventory"
-# argument runs only the inventory/transport and coverage controls. The
-# default suite still includes every existing section and case.
+# argument runs only the inventory/transport and coverage controls, pinned
+# at selftest: PASS (94 checks). The default suite still includes every
+# existing section and case.
 #
 # --crash-matrix runs every frame-byte cut of genesis frame 1, of an
 # epoch-rotation frame, and of the active epoch's revocation frame (the
@@ -988,7 +989,7 @@ def g_transport(argv):
             "git.ls-remote": prefix + frozen_transport[kind] + ["-C", scratch, "ls-remote", url, ANCHOR_REF],
             "git.fetch-anchor": prefix + frozen_transport[kind] + [
                 "-C", scratch, "fetch", "--no-tags", "--no-write-fetch-head", url,
-                "+refs/olddonkey-loop/*:refs/readback/*"],
+                "+refs/olddonkey-loop/anchor:refs/readback/anchor"],
             "git.push-anchor": prefix + frozen_transport[kind] + [
                 "-C", scratch, "push", url, "refs/olddonkey-loop/*:refs/olddonkey-loop/*"],
         }
@@ -1015,7 +1016,7 @@ def g_transport(argv):
         emit(f"transport: the verifier's fetch argv for a {kind} remote is the frozen one",
              plan.get("fetch") == prefix + frozen_transport[kind] + [
                  "-C", "<temp>/anchor.git", "fetch", "--no-tags", "--no-write-fetch-head", url,
-                 "+refs/olddonkey-loop/*:refs/readback/*"], plan.get("fetch"))
+                 "+refs/olddonkey-loop/anchor:refs/readback/anchor"], plan.get("fetch"))
         emit(f"transport: the verifier's ls-remote, init and cat-file argv are the frozen ones ({kind})",
              plan.get("ls-remote") == prefix + frozen_transport[kind] + [
                  "-C", "<temp>/anchor.git", "ls-remote", url, ANCHOR_REF]
@@ -1057,6 +1058,38 @@ def g_transport(argv):
         emit(f"scratch config: {label} is {'accepted' if good else 'refused'}", (not ok) if good else ok, code)
     ok, code = refused(lambda: tools.run("git.fetch", scratch="x"), "unlisted")
     emit("tools: a command outside the closed table is refused", ok, code)
+    # Frozen argv alone cannot prove commit binding: the pattern contains no
+    # <commit>. Exercise the authorized sink with real Git and a local remote.
+    remote = os.path.join(home, "transport-push.git")
+    git("init", "--bare", "-q", remote)
+    tools._PINNED.clear()
+    url = "file://" + remote
+    tools.pin_remote(tools.parse_remote(url, allow_test=True))
+    scratch = tools.new_scratch_repo()
+    blob = tools.run("git.hash-object", scratch=scratch, stdin=b"transport binding\n").stdout.decode().strip()
+    tree = tools.run("git.mktree", scratch=scratch, stdin=f"100644 blob {blob}\tanchor.json\n".encode()).stdout.decode().strip()
+    commits = [tools.run("git.commit-tree", scratch=scratch, tree=tree, parent=None,
+                        message=f"anchor {'a' * 32} g1 s{seq}", seq=seq).stdout.decode().strip()
+               for seq in (1, 2)]
+    tools.run("git.update-anchor", scratch=scratch, commit=commits[1])
+    store = m["store"]
+    token = store.begin("authority-genesis", PRINCIPAL)
+    try:
+        for label, params in (("missing", {"scratch": scratch, "remote": url}),
+                              ("malformed", {"scratch": scratch, "remote": url, "commit": "bad"})):
+            ok, code = refused(lambda params=params: tools.build_argv("git.push-anchor", params), "params")
+            emit(f"transport: {label} push commit is refused", ok, code)
+        ok, code = refused(lambda: store._run_sink(token, "git.push-anchor", scratch=scratch,
+                                                  remote=url, commit=commits[0]), "anchor-scratch")
+        emit("transport: the pattern push sink checks the commit its permit covers", ok, code)
+        emit("transport: the refused sink publishes no remote ref",
+             not git("--git-dir", remote, "for-each-ref").stdout)
+        tools.run("git.update-anchor", scratch=scratch, commit=commits[0])
+        result = store._run_sink(token, "git.push-anchor", scratch=scratch, remote=url, commit=commits[0])
+        emit("transport: the same sink accepts the bound commit with real Git", result.returncode == 0,
+             result.stderr.decode())
+    finally:
+        store.spend(token)
 
 
 def g_starttoken(argv):
@@ -1126,8 +1159,14 @@ def g_seam(argv):
     emit("seam: every applicable verify-only revocation cut has its scenario",
          set(VERIFY_ONLY_REVOCATION_POINTS) == FROZEN_CRASH_POINTS["revoke"] -
          {"fs-create-marker-after-temp-fsync", "fs-create-marker-after-rename"})
-    emit("seam: every named re-genesis cut has normal and bad-signature scenarios",
-         set(REGENESIS_CUTS) - {"frame-byte-first", "frame-byte-last"} == FROZEN_CRASH_POINTS["regenesis"])
+    emit("seam: every re-genesis transaction cut has normal and bad-signature scenarios",
+         set(REGENESIS_CUTS) - {"frame-byte-first", "frame-byte-last"} ==
+         FROZEN_CRASH_POINTS["regenesis"] - FROZEN_MARKER_POINTS)
+    emit("seam: every recovery-prelude marker cut has rotate and re-genesis scenarios",
+         set(MARKER_PRELUDE_CUTS) == FROZEN_MARKER_POINTS and all(
+             set(MARKER_PRELUDE_CUTS) <= FROZEN_CRASH_POINTS[c] for c in ("rotate", "regenesis")))
+    emit("seam: review_named_points exercises exactly the independently frozen command/point inventory",
+         {c: set(p) for c, p in review_named_points().items()} == FROZEN_CRASH_POINTS)
     os.environ["LOOP_AUTHORITY_CRASH_AT"] = "frame-byte-500"
     store.configure_crash("revoke")
     ok, code = refused(lambda: store.check_frame_byte(500), "crash-point")
@@ -1322,6 +1361,62 @@ def restore_home(case, saved):
         subprocess.run(["chmod", "-R", "u+w", case.home], check=False)
         shutil.rmtree(case.home)
     shutil.copytree(saved, case.home, symlinks=True)
+
+
+SAMPLE_ATTEMPTS = 8
+
+
+def sampled_torn_crash(requested, run, tries=SAMPLE_ATTEMPTS):
+    """run(n, attempt) returns a fresh (case, result, intent) for byte n.
+    Credit only a real crash whose own intent frame has at least n + 2
+    bytes. Discard shorter runs without classifying or recovering them;
+    aim the next cut at their own last torn byte. No per-attempt checks.
+    Unlike matrix numeric ids, default samples may retarget after a miss.
+    """
+    n, lengths = requested, []
+    for attempt in range(tries):
+        case, result, intent = run(n, attempt)
+        if result.rc == 137 and intent is not None:
+            length = len(frame_of_intent(intent))
+            if length >= n + 2:
+                return case, result, intent, n
+        elif result.rc == 11 and intent is None and MATRIX_PRINCIPAL_READ.fullmatch(result.out.strip()):
+            continue
+        else:
+            outside = MATRIX_OUTSIDE.search(result.out) if result.rc == 4 and intent is None else None
+            if outside is None or int(outside.group(1)) != n or int(outside.group(2)) > n:
+                raise RuntimeError(f"{case.label}: sampled frame-byte-{n} exited {result.rc}: {result}")
+            # The seam refuses before publishing intent when n is outside
+            # the frame; its diagnostic gives that run's actual frame size.
+            length = int(outside.group(2))
+        lengths.append(length)
+        n = max(1, min(n, length - 2))
+    raise RuntimeError(f"sampled frame-byte-{requested}: retry bound exhausted after {tries} runs; "
+                       f"no sample credited (discarded frame lengths: {lengths})")
+
+
+def sampled_case_crash(base, args, n, intent_kind="intent"):
+    """Fork pristine HOME for every attempt; discarded runs never mutate
+    the base or get recovered (an unterminated run could replay a push)."""
+    def run(cut, attempt):
+        case = base.fork(f"{base.label}-sample-{n}-{attempt}")
+        result = case.ceremony(*args, env={"LOOP_AUTHORITY_CRASH_AT": f"frame-byte-{cut}"})
+        if intent_kind == "regenesis":
+            path = case.auth("regenesis.intent")
+            intent = json.loads(case.read(path)) if os.path.exists(path) else None
+        else:
+            intent = case.intent()
+        return case, result, intent
+    return sampled_torn_crash(n, run)
+
+
+def sampled_genesis_crash(label, n):
+    def run(cut, attempt):
+        case = Case(f"{label}-sample-{attempt}")
+        result = case.ceremony("genesis", "--remote", case.url,
+                               env={"LOOP_AUTHORITY_CRASH_AT": f"frame-byte-{cut}"})
+        return case, result, case.genesis_intent()
+    return sampled_torn_crash(n, run)
 
 
 def last_byte_crash(case, args, probe, intent_of, tries=8):
@@ -1608,14 +1703,13 @@ def j_byte_cuts(checks):
     header = frame_bytes.index(b"\n") + 1
     for item in inproc("tailcuts", probe.home, probe.url):
         checks(*item)
-    # size - 3, not size - 2: a torn cut even if this run's frame is a byte
-    # shorter than the probe's (the length follows pid and start-time digits)
+    # Seven planned samples; the helper credits only an actual torn prefix,
+    # retargeting discarded runs without adding checks or changing this count.
     samples = sorted({1, 2, header - 1, header, header + 1, size // 2, size - 3})
     base_log = case.read(case.log_path())
     for n in samples:
         before_tip = case.tip()
-        crashed(case, f"frame-byte-{n}", "revoke", "--epoch", "1")
-        intent = case.intent()
+        case, _result, intent, n = sampled_case_crash(case, ("revoke", "--epoch", "1"), n)
         written = case.read(case.log_path())[len(base_log):]
         checks(f"A1.6 frame-byte-{n}: exactly the first {n} bytes of the intent's frame are on disk",
                written == frame_of_intent(intent)[:n] and case.tip() == before_tip)
@@ -1954,8 +2048,8 @@ def j_active_revocation(point):
             last_byte_crash(case, ("revoke", "--epoch", "1"), probe_size, case.intent)
         elif point.startswith("frame-byte-"):
             size = probe_size()
-            crashed(case, f"frame-byte-{1 if point == 'frame-byte-first' else size // 2}", "revoke",
-                    "--epoch", "1")
+            case, _result, _intent, _n = sampled_case_crash(
+                case, ("revoke", "--epoch", "1"), 1 if point == "frame-byte-first" else size // 2)
         else:
             crashed(case, point, "revoke", "--epoch", "1")
         intent = case.intent()
@@ -2033,15 +2127,19 @@ FROZEN_CRASH_POINTS = {
     "genesis": FROZEN_FRAME_POINTS | FROZEN_PRIMITIVE_POINTS | FROZEN_INTENT_POINTS |
         {"after-store-dir", "genesis-step-1", "genesis-step-2", "genesis-step-3", "genesis-step-4",
          "genesis-step-5", "genesis-step-6a", "genesis-step-6b"},
-    "rotate": FROZEN_FRAME_POINTS | FROZEN_PRIMITIVE_POINTS | FROZEN_INTENT_POINTS | {"after-store-dir"},
+    "rotate": FROZEN_FRAME_POINTS | FROZEN_PRIMITIVE_POINTS | FROZEN_INTENT_POINTS |
+        FROZEN_MARKER_POINTS | {"after-store-dir"},
     "revoke": FROZEN_FRAME_POINTS | FROZEN_PRIMITIVE_POINTS | FROZEN_INTENT_POINTS | FROZEN_MARKER_POINTS,
-    "regenesis": FROZEN_PRIMITIVE_POINTS | FROZEN_INTENT_POINTS |
+    "regenesis": FROZEN_PRIMITIVE_POINTS | FROZEN_INTENT_POINTS | FROZEN_MARKER_POINTS |
         {"regenesis-step-1", "regenesis-step-2", "regenesis-step-3", "regenesis-step-4", "regenesis-step-5",
          "after-frame-fsync", "after-push", "after-readback", "archive-after-rename", "archive-after-readonly"},
     "recover": FROZEN_PRIMITIVE_POINTS | FROZEN_MARKER_POINTS |
         {"after-push", "after-readback", "after-intent-remove", "recovery-after-delimiter",
          "archive-after-rename", "archive-after-readonly"},
 }
+# These cuts run before a re-genesis transaction exists. They require an
+# absent remote anchor and no previously published quarantine marker.
+MARKER_PRELUDE_CUTS = ("fs-create-marker-after-temp-fsync", "fs-create-marker-after-rename")
 REVOCATION_POINTS = ("after-intent-fsync", "after-frame-fsync", "after-push", "after-readback",
                      "after-intent-remove", "fs-create-after-temp-fsync", "fs-create-after-rename",
                      "fs-replace-after-temp-fsync", "fs-replace-after-rename",
@@ -2083,17 +2181,19 @@ def regenesis_crash(case, point):
         return json.loads(case.read(path)) if os.path.exists(path) else None
 
     if point == "frame-byte-last":
-        return last_byte_crash(case, ("regenesis",), probe_size, intent_of)[0]
+        last_byte_crash(case, ("regenesis",), probe_size, intent_of)
+        return case
     if point == "frame-byte-first":
-        point = "frame-byte-1"
-    return crashed(case, point, "regenesis")
+        return sampled_case_crash(case, ("regenesis",), 1, "regenesis")[0]
+    crashed(case, point, "regenesis")
+    return case
 
 
 def j_regenesis(point):
     def job(checks):
         case = quarantined_case(f"regen-{point}")
         old = case.active()
-        regenesis_crash(case, point)
+        case = regenesis_crash(case, point)
         status = case.status()
         checks(f"re-genesis, crash {point}: nothing authorizes at the cut",
                status.json.get("authorizing_state") is False or point == "regenesis-step-5", status)
@@ -2147,7 +2247,7 @@ def j_regenesis(point):
 def j_regenesis_bad_sig(point):
     def job(checks):
         case = quarantined_case(f"regen-badsig-{point}")
-        regenesis_crash(case, point)
+        case = regenesis_crash(case, point)
         path = case.auth("regenesis.intent")
         if os.path.exists(path):
             intent = json.loads(case.read(path))
@@ -2270,6 +2370,8 @@ def s_epochs_regenesis():
     jobs += [(f"active revocation {p}", j_active_revocation(p)) for p in
              REVOCATION_POINTS + ("frame-byte-first", "frame-byte-mid", "frame-byte-last")]
     jobs += [(f"verify-only revocation {p}", j_verify_only_revocation(p)) for p in VERIFY_ONLY_REVOCATION_POINTS]
+    jobs += [(f"marker prelude {c}/{p}", j_review_crash(c, p))
+             for c in ("rotate", "regenesis") for p in MARKER_PRELUDE_CUTS]
     jobs += [(f"re-genesis {p}", j_regenesis(p)) for p in REGENESIS_CUTS]
     jobs += [(f"re-genesis bad signature {p}", j_regenesis_bad_sig(p)) for p in REGENESIS_CUTS]
     jobs += [("re-genesis links", j_regenesis_links), ("re-genesis test flag", j_regenesis_test_flag),
@@ -2392,6 +2494,9 @@ def s_ceremonies_staging():
 # --- genesis at every cut (A2.3, A2.4) ------------------------------------------------
 
 def gcrash(label, point):
+    byte = re.fullmatch(r"frame-byte-([1-9][0-9]*)", point)
+    if byte:
+        return sampled_genesis_crash(label, int(byte.group(1)))[0]
     case = Case(label)
     crashed(case, point, "genesis", "--remote", case.url)
     return case
@@ -2453,8 +2558,7 @@ def j_genesis_abandon(point):
 def j_genesis_torn_samples(checks):
     size, header = genesis_frame_size("g-size")
     for n in sorted({1, 2, header - 1, header, header + 1, size // 2, size - 3}):
-        case = gcrash(f"g-torn-{n}", f"frame-byte-{n}")
-        intent = case.genesis_intent()
+        case, _result, intent, n = sampled_genesis_crash(f"g-torn-{n}", n)
         checks(f"genesis frame-byte-{n}: exactly the first {n} bytes of frame 1 are on disk",
                case.read(case.log_path(intent["store_id"])) == frame_of_intent(intent)[:n])
         expect_row(checks, case, f"genesis frame-byte-{n} (torn, ref absent)", "genesis-pending", 6)
@@ -2678,6 +2782,8 @@ def j_unreachable_cuts(checks):
                          ("after-push", "valid with the ref")):
         if point == "last-byte":
             case, result, _intent = genesis_last_byte("unreach-unterminated")
+        elif point == "frame-byte-100":
+            case, result, _intent, _n = sampled_genesis_crash(f"unreach-{label}", 100)
         else:
             case = Case(f"unreach-{label}")
             result = case.ceremony("genesis", "--remote", case.url, env={"LOOP_AUTHORITY_CRASH_AT": point})
@@ -4344,6 +4450,70 @@ def s_matrix_coverage_selftest():
         ok, detail, evidence = matrix_cut(slot, "rotation", "last", sizes["rotation"], b"", None, lambda intent: None)
         emit(f"crash matrix retry: {label}", not ok and evidence is None and slot.calls == calls
              and detail.startswith("the crashed ceremony exited"), (slot.calls, detail))
+    s_sample_retry_selftest()
+
+
+def s_sample_retry_selftest():
+    # No process, pid, filesystem or production classifier: feed actual frame
+    # bytes through the same intent reader that real default samples use.
+    class ScriptedSample:
+        label = "scripted-sample"
+
+        def __init__(self, lengths):
+            self.lengths, self.cuts = lengths, []
+
+        def run(self, n, attempt):
+            self.cuts.append(n)
+            length = self.lengths[attempt % len(self.lengths)]
+            if n >= length:
+                return self, Res(4, f"error: crash-point: frame-byte-{n} is not strictly inside a "
+                                f"{length}-byte frame\n", ""), None
+            frame = b"x" * (length - 1) + b"\n"
+            intent = {"frame_b64": base64.b64encode(frame).decode()}
+            # Returning this attempt id lets the test prove no discarded run
+            # is ever returned to the caller's torn/classification checks.
+            return attempt, Res(137, "", ""), intent
+
+    slot = ScriptedSample([30])  # Probe length 32; planned size - 3 is byte 29.
+    case, result, intent, n = sampled_torn_crash(32 - 3, slot.run)
+    emit("default sample retry: a frame two bytes shorter than the probe is discarded as unterminated, "
+         "then only a torn retry is credited", case == 1 and slot.cuts == [29, 28]
+         and result.rc == 137 and len(frame_of_intent(intent)) >= n + 2 and n == 28, slot.cuts)
+
+    slot = ScriptedSample([8])  # Short enough that the seam refuses before intent.
+    case, result, intent, n = sampled_torn_crash(32 - 3, slot.run)
+    emit("default sample retry: an outside-frame refusal is discarded, then retargeted to that run's length",
+         case == 1 and slot.cuts == [29, 6] and result.rc == 137
+         and len(frame_of_intent(intent)) >= n + 2 and n == 6, slot.cuts)
+
+    cuts = []
+    def always_unterminated(n, attempt):
+        cuts.append(n)
+        return attempt, Res(137, "", ""), {"frame_b64": base64.b64encode(b"x" * n + b"\n").decode()}
+    detail = ""
+    try:
+        sampled_torn_crash(29, always_unterminated)
+    except RuntimeError as error:
+        detail = str(error)
+    emit("default sample retry: exhausting the small bound fails explicitly, with no sample credited",
+         len(cuts) == SAMPLE_ATTEMPTS and f"retry bound exhausted after {SAMPLE_ATTEMPTS} runs" in detail
+         and "no sample credited" in detail, (cuts, detail))
+
+    refused = []
+    for result in (Res(1, "Traceback: synthetic failure", ""),
+                   Res(4, "error: unrelated refusal", ""),
+                   Res(4, "error: frame-byte-28 is not strictly inside a 10-byte frame", "")):
+        calls = []
+        def bad_run(n, attempt):
+            calls.append(n)
+            return ScriptedSample([]), result, None
+        try:
+            sampled_torn_crash(29, bad_run)
+            refused.append(False)
+        except RuntimeError:
+            refused.append(calls == [29])
+    emit("default sample retry: unexpected exits and mismatched seam refusals fail immediately, never credited",
+         all(refused), refused)
 
 
 def review_named_points():
@@ -4351,7 +4521,10 @@ def review_named_points():
     # Adding a registered point without implementing it must fail the suite.
     sys.path.insert(0, LIB)
     from loopauth.store import CRASH_APPLICABLE
-    return {command: tuple(sorted(points)) for command, points in CRASH_APPLICABLE.items()}
+    observed = {command: set(points) for command, points in CRASH_APPLICABLE.items()}
+    if observed != FROZEN_CRASH_POINTS:
+        raise AssertionError("registered review crash points differ from the frozen inventory")
+    return {command: tuple(sorted(points)) for command, points in FROZEN_CRASH_POINTS.items()}
 
 
 def j_review_crash(command, point):
@@ -4360,6 +4533,10 @@ def j_review_crash(command, point):
         if command == "genesis":
             case = Case(label)
             result = case.genesis(env={"LOOP_AUTHORITY_CRASH_AT": point})
+        elif command in ("rotate", "regenesis") and point in MARKER_PRELUDE_CUTS:
+            case = committed_case(label)
+            git("--git-dir", case.remote, "update-ref", "-d", ANCHOR_REF)
+            result = case.ceremony(command, env={"LOOP_AUTHORITY_CRASH_AT": point})
         elif command == "regenesis":
             case = quarantined_case(label)
             result = case.ceremony("regenesis", env={"LOOP_AUTHORITY_CRASH_AT": point})
@@ -4401,6 +4578,60 @@ def j_review_crash(command, point):
                and first.json.get("state") == second.json.get("state")
                and second.json.get("state") in ("committed", "quarantined", "none"), (first, second))
         case.agree(checks, label + ": writer and verifier agree after recovery", second.json.get("state"))
+    return job
+
+
+def j_review_prefix_siblings(kind):
+    def job(checks):
+        case = committed_case("review-prefix-" + kind)
+        original, other = case.tip(), None
+        if kind == "case-variant":
+            siblings = {"refs/olddonkey-loop/ANCHOR": original}
+        elif kind == "fifty":
+            siblings = {f"refs/olddonkey-loop/s{i:02}": original for i in range(50)}
+        else:
+            blob = git("--git-dir", case.remote, "hash-object", "-w", "--stdin", stdin=b"unrelated\n").stdout.decode().strip()
+            tree = git("--git-dir", case.remote, "mktree", stdin=f"100644 blob {blob}\tother\n".encode()).stdout.decode().strip()
+            other = git("--git-dir", case.remote, "commit-tree", tree, "-m", "unrelated",
+                        extra={"GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                               "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}).stdout.decode().strip()
+            siblings = {"refs/olddonkey-loop/other": other}
+        git("--git-dir", case.remote, "pack-refs", "--all")
+        path = os.path.join(case.remote, "packed-refs")
+        with open(path) as handle:
+            lines = [line for line in handle.read().splitlines() if line and not line.startswith(("#", "^"))]
+        lines += [f"{oid} {ref}" for ref, oid in siblings.items()]
+        lines.sort(key=lambda line: line.split(" ", 1)[1].encode())
+        with open(path, "w") as handle:
+            handle.write("# pack-refs with: peeled fully-peeled sorted \n" + "\n".join(lines) + "\n")
+        bins, trace = os.path.join(case.dir, "bins"), os.path.join(case.dir, "fetches.jsonl")
+        os.mkdir(bins)
+        wrapper = os.path.join(bins, "git")
+        with open(wrapper, "w") as handle:
+            handle.write("#!" + sys.executable + "\nimport json, os, subprocess, sys\nREAL=" + repr(GIT)
+                         + "\na=sys.argv[1:]\nif 'fetch' in a:\n"
+                         "    done=subprocess.run([REAL]+a)\n    root=a[a.index('-C')+1]\n"
+                         "    refs=subprocess.check_output([REAL,'-C',root,'for-each-ref','--format=%(refname)']).decode().splitlines()\n"
+                         + "    other=" + repr(other) + "\n"
+                         "    missing=other is None or subprocess.run([REAL,'-C',root,'cat-file','-e',other],capture_output=True).returncode != 0\n"
+                         + "    with open(" + repr(trace) + ", 'a') as f: f.write(json.dumps([refs,missing])+'\\n')\n"
+                         "    sys.exit(done.returncode)\nos.execv(REAL,[REAL]+a)\n")
+        os.chmod(wrapper, 0o700)
+        env = {"LOOP_AUTHORITY_TEST_BIN_DIR": bins}
+        for args in (None, ("rotate",), ("revoke", "--epoch", "1")):
+            if args:
+                result = case.ceremony(*args)
+                checks(f"prefix {kind}: {args[0]} succeeds", result.rc == 0, result)
+            w, v = case.agree(checks, f"prefix {kind}: committed {args}", "committed", env=env)
+            checks(f"prefix {kind}: both verifiers succeed {args}", w.rc == v.rc == 0, (w, v))
+            present = dict(line.split(" ", 1)[::-1] for line in git("--git-dir", case.remote,
+                           "for-each-ref", "--format=%(objectname) %(refname)", "refs/olddonkey-loop/").stdout.decode().splitlines())
+            checks(f"prefix {kind}: siblings stay untouched {args}",
+                   {ref: present.get(ref) for ref in siblings} == siblings, present)
+        with open(trace) as handle:
+            samples = [json.loads(line) for line in handle]
+        checks(f"prefix {kind}: both readers fetch only the anchor, no sibling refs or unrelated objects",
+               len(samples) >= 6 and all(refs == ["refs/readback/anchor"] and missing for refs, missing in samples), samples)
     return job
 
 
@@ -4549,6 +4780,8 @@ def j_review_surrogates(checks):
 def s_review_regressions():
     jobs = [(f"review crash {command}/{point}", j_review_crash(command, point))
             for command, points in review_named_points().items() for point in points]
+    jobs += [(f"review prefix siblings {kind}", j_review_prefix_siblings(kind))
+             for kind in ("case-variant", "fifty", "unrelated")]
     jobs += [("review stray ref", j_review_stray_refs),
              ("review rotate and revoke with stray", j_review_rotate_revoke_stray),
              ("review stray-only genesis", j_review_stray_only_genesis),
@@ -4571,6 +4804,8 @@ def s_review_point_inventory():
 def s_review_scenarios():
     jobs = [(f"active revocation {p}", j_active_revocation(p)) for p in REVOCATION_POINTS]
     jobs += [(f"verify-only revocation {p}", j_verify_only_revocation(p)) for p in VERIFY_ONLY_REVOCATION_POINTS]
+    jobs += [(f"marker prelude {c}/{p}", j_review_crash(c, p))
+             for c in ("rotate", "regenesis") for p in MARKER_PRELUDE_CUTS]
     jobs += [(f"re-genesis {p}", j_regenesis(p)) for p in REGENESIS_CUTS if not p.startswith("frame-byte-")]
     jobs += [(f"re-genesis bad signature {p}", j_regenesis_bad_sig(p)) for p in REGENESIS_CUTS if not p.startswith("frame-byte-")]
     parallel(jobs)

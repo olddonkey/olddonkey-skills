@@ -140,7 +140,7 @@ if [[ -n "$SELECTED_BACKEND" ]] && ! LC_ALL=C awk -F '\t' -v name="$SELECTED_BAC
   exit 2
 fi
 
-VALID_RULES="help,prompt-file,prompt-inline,prompt-precedence,prompt-required,dash-prompt,missing-values,repeated-flags,unknown-flags,readonly-alias,background,exit-status,signal-status,env-namespace,summary-fields,journal-missing,journal-start-refusal,journal-events,journal-unattributed,journal-readonly-mode,final-message"
+VALID_RULES="help,prompt-file,prompt-inline,prompt-precedence,prompt-required,dash-prompt,missing-values,repeated-flags,unknown-flags,readonly-alias,background,exit-status,signal-status,env-namespace,summary-fields,journal-missing,journal-start-refusal,journal-events,journal-unattributed,journal-readonly-mode,final-message,worktree-umask"
 if [[ -n "$ONLY_RULES" ]]; then
   OLD_IFS="$IFS"
   IFS=,
@@ -223,6 +223,22 @@ expect_observed_not() { # $1=case $2=field $3=forbidden $4=description
 
 expect_missing_path() { # $1=path $2=description
   if [[ -e "$1" ]]; then fail "$2 (unexpected path: $1)"; else pass "$2"; fi
+}
+
+expect_path_mode() { # $1=path $2=octal mode $3=description
+  local actual
+  if actual="$(python3 - "$1" <<'PY'
+import os, stat, sys
+info = os.lstat(sys.argv[1])
+if stat.S_ISLNK(info.st_mode):
+    raise SystemExit(1)
+print(format(stat.S_IMODE(info.st_mode), "o"))
+PY
+)" && [[ "$actual" == "$2" ]]; then
+    pass "$3"
+  else
+    fail "$3 (mode of $1 is '${actual:-absent or a symlink}', expected $2)"
+  fi
 }
 
 case_home() { # $1=case
@@ -672,6 +688,27 @@ run_backend() {
     if [[ $CASE_STATUS -eq 0 ]]; then
       expect_final_message
     fi
+  fi
+
+  if rule_enabled worktree-umask; then
+    CURRENT_RULE="worktree-umask"
+    # This suite runs private, but the adapter is called under 027 here and
+    # must deliver the implementer's new file and directory to the real
+    # worktree with that mask, not with its own private one.
+    umask 027
+    run_case worktree-umask --prompt worktree-umask
+    umask 077
+    expect_status 0 "an implement dispatch under caller umask 027 succeeds"
+    local delivered
+    delivered="$(case_workspace worktree-umask)"
+    if [[ "$BACKEND" == "grok" ]]; then
+      # grok delivers its authoritative snapshot, not the workspace it ran in.
+      delivered="$(env LC_ALL=C sed -n 's/^authoritative path: //p' "$CASE_OUTPUT" | tail -1)"
+    fi
+    expect_path_mode "$delivered/implementer-file.txt" 640 \
+      "a file the implementer created reaches the delivered worktree as 0640 under caller umask 027"
+    expect_path_mode "$delivered/implementer-dir" 750 \
+      "a directory the implementer created reaches the delivered worktree as 0750 under caller umask 027"
   fi
 }
 

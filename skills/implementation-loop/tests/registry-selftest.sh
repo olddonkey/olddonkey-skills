@@ -39,6 +39,7 @@
 # challenge stubbed (this suite tests the registry and tokens, not the
 # operator-TTY ceremony, which authority-selftest.sh drives through a pty).
 # HOME is a scratch directory; the remote is a file:// bare repository.
+# Expected result: selftest: PASS (471 checks).
 
 set -uo pipefail
 
@@ -305,14 +306,14 @@ COMMANDS = {
                                 "-m", "<message>"), "scratch"),
     "git.fetch-anchor": ("git", ("<git-prefix>", "<transport>", "-C", "<scratch>", "fetch", "--no-tags",
                                  "--no-write-fetch-head", "<remote>",
-                                 "+refs/olddonkey-loop/*:refs/readback/*"), "scratch"),
+                                 "+refs/olddonkey-loop/anchor:refs/readback/anchor"), "scratch"),
     "git.ls-remote": ("git", ("<git-prefix>", "<transport>", "-C", "<scratch>", "ls-remote", "<remote>",
                               "refs/olddonkey-loop/anchor"), "read"),
     "git.cat-file": ("git", ("<git-prefix>", "-C", "<scratch>", "cat-file", "<cat-mode>", "<oid>"), "read"),
     "git.update-anchor": ("git", ("<git-prefix>", "-C", "<scratch>", "update-ref",
                                   "refs/olddonkey-loop/anchor", "<commit>"), "scratch"),
     "git.anchor-refs": ("git", ("<git-prefix>", "-C", "<scratch>", "for-each-ref",
-                                "--format=%(objectname) %(refname)", "refs/olddonkey-loop/"), "read"),
+                                "--format=%(objectname) %(refname) %(symref)", "refs/olddonkey-loop/"), "read"),
     "git.push-anchor": ("git", ("<git-prefix>", "<transport>", "-C", "<scratch>", "push", "<remote>",
                                 "refs/olddonkey-loop/*:refs/olddonkey-loop/*"), "sink"),
     "ssh-keygen.generate": ("ssh-keygen", ("-q", "-t", "ed25519", "-N", "", "-C", "<comment>", "-f",
@@ -1453,6 +1454,25 @@ def main_tokens():
     emit("tools: the only push that can be built carries the transport options and no --force",
          "protocol.allow=never" in argv and "--force" not in argv and not any(a.startswith("+") for a in argv)
          and argv[-1] == "refs/olddonkey-loop/*:refs/olddonkey-loop/*", argv)
+    # commit is absent from the pattern argv, but is required, validated,
+    # authorized and checked against the real scratch refs at the sink.
+    for label, params in (("missing", {"scratch": scratch, "remote": url}),
+                           ("malformed", {"scratch": scratch, "remote": url, "commit": "bad"})):
+        ok, code = refused(lambda params=params: tools.build_argv("git.push-anchor", params), "params")
+        emit(f"tools: a {label} push commit cannot be built", ok, code)
+    m["anchor"].fetch(scratch, url)
+    m["anchor"].prepare_push(scratch, tip)
+    push_token = store.begin("epoch-rotation", PRINCIPAL)
+    try:
+        ok, code = refused(lambda: store._run_sink(push_token, "git.push-anchor", scratch=scratch,
+                                                 remote=url, commit="0" * 40), "anchor-scratch")
+        emit("tools: the authorized pattern push checks its permit's commit against real scratch refs",
+             ok and push_token.permit is None, code)
+        result = store._run_sink(push_token, "git.push-anchor", scratch=scratch, remote=url, commit=tip)
+        emit("tools: the same real sink accepts the exactly bound commit", result.returncode == 0,
+             result.stderr.decode())
+    finally:
+        store.spend(push_token)
     ok, code = refused(lambda: tools.run("ssh-keygen.fingerprint", pub=os.path.join(key_dir, "root.pub")), "refused")
     emit("tools: a parameter under the authority directory is refused without a token", ok, code)
     unchanged("tools refusals")

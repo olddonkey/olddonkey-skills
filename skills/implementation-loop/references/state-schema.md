@@ -1021,15 +1021,41 @@ created before that failure may remain.
 This is ordering evidence from code and tests, not a simulated power-loss proof.
 Transport timeouts and malformed remote-ref replies stay pending; only verified
 content/chain contradictions quarantine. Local tool timeouts are environment
-failures (exit 9). Writer and verifier select only the exact advertised
-`refs/olddonkey-loop/anchor` name; both fetch with
-`+refs/olddonkey-loop/*:refs/readback/*`. The writer stages the bound commit
-as the sole ref under `refs/olddonkey-loop/` in its scratch repository, then
-pushes `refs/olddonkey-loop/*:refs/olddonkey-loop/*` without force. These pattern
-refspecs do not tail-match `refs/heads/refs/olddonkey-loop/anchor`. An advertised
-anchor whose successful fetch leaves a missing or malformed readback ref is
-pending (exit 5); an absent advertised anchor is classified by the existing
-absent-anchor recovery rows.
+failures (exit 9).
+
+**Remote ref selection.** Every writer `anchor.fetch` call and every verifier
+fetch first runs `ls-remote` and accepts only the exact advertised name
+`refs/olddonkey-loop/anchor`. If it is absent, return absent without fetching;
+the existing absent-anchor recovery rows classify that observation. Otherwise
+fetch only `+refs/olddonkey-loop/anchor:refs/readback/anchor`, and require the
+fetched id to equal the advertised id. Disagreement is "the remote anchor moved
+while it was read", pending (exit 5). Each caller also checks its own expected
+id. Git selects the exact source when present; the name gate prevents fetching
+the tail-matching `refs/heads/refs/olddonkey-loop/anchor` when the exact name
+was not advertised. Siblings under the prefix are never fetched. A failed fetch,
+or a missing, malformed or unreadable readback ref (including a directory), is
+pending, never exit 9. A reused writer scratch cannot return an old readback tip
+after an absent advertisement or failed fetch; the verifier uses a fresh repo.
+
+The remote read is not atomic. If the exact anchor is deleted between
+`ls-remote` and `fetch` while a tail-matching ref points at the same commit,
+both sides report the state observed by `ls-remote` (committed), because the
+fetched id equals the advertised one. This fallback cannot accept any commit
+other than the advertised anchor commit.
+
+After a push, an absent exact anchor at readback is pending (exit 5); a present
+fetched id different from the pushed commit remains a readback refusal (exit 4).
+
+The writer stages the bound commit in scratch, then pushes
+`refs/olddonkey-loop/*:refs/olddonkey-loop/*` without force. The pattern avoids
+Git's ambiguous exact destination when the tail-matching stray exists. Inside
+the `git.push-anchor` sink, after consuming the permit and immediately before
+the push, `git.anchor-refs` must show exactly one direct ref under the prefix:
+`anchor`, resolving to the permit's required, validated `commit`. Extra loose,
+packed, symbolic or case-variant refs, a symbolic anchor, and a changed commit
+are refused without pushing. The sink also inspects loose namespace entries,
+since Git's ref listing omits dangling symbolic refs. No scratch mutation runs
+between that check and the push on this code path.
 
 ### Test seams (`LOOP_AUTHORITY_TEST=1` only)
 
@@ -1043,7 +1069,7 @@ absent-anchor recovery rows.
 `fs-create-intent-after-temp-fsync`, `fs-create-intent-after-rename`
 (genesis, rotation, revocation, and re-genesis intents),
 `fs-create-marker-after-temp-fsync`, `fs-create-marker-after-rename`
-(revocation and recovery quarantine markers), `fs-replace-after-temp-fsync`,
+(rotation, revocation, re-genesis and recovery quarantine markers), `fs-replace-after-temp-fsync`,
 `fs-replace-after-rename`, `archive-after-rename`, and
 `archive-after-readonly`), whose only effect is `os._exit(137)`; and `LOOP_AUTHORITY_TEST_BIN_DIR` (wrapper fixtures searched
 before the binary allowlist; refused for every mutation of a production

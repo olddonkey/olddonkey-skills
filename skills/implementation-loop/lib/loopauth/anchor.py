@@ -118,6 +118,8 @@ def build_objects(scratch: str, anchor_json: bytes, parent: str | None) -> str:
             fetched = fetch(scratch, remote.url)  # type: ignore[union-attr]
         except Unreachable as error:
             _fail("anchor-parent-pending", f"cannot fetch the parent commit: {error}")
+        if fetched is None:
+            _fail("anchor-parent-pending", "cannot fetch the parent commit: the remote anchor is absent")
         if fetched != parent:
             _fail("anchor-parent-pending", "the remote tip is not the expected parent")
     blob = _oid_output(_git("git.hash-object", scratch=scratch, stdin=anchor_json),
@@ -146,7 +148,7 @@ def prepare_push(scratch: str, commit: str) -> None:
     if result.returncode != 0:
         _fail("anchor-scratch", "cannot stage the scratch anchor ref")
     refs = _git("git.anchor-refs", scratch=scratch)
-    expected = f"{commit} {tools.ANCHOR_REF}\n".encode("ascii")
+    expected = f"{commit} {tools.ANCHOR_REF} \n".encode("ascii")
     if refs.returncode != 0 or refs.stdout != expected:
         _fail("anchor-scratch", "scratch anchor namespace must contain only the bound anchor ref")
 
@@ -245,9 +247,13 @@ def ls_remote(scratch: str, remote: str) -> str | None:
     return matches[0] if matches else None
 
 
-def fetch(scratch: str, remote: str) -> str:
-    """Fetch the anchor ref into refs/readback/anchor; returns the fetched
-    commit id. Raises Unreachable when the fetch fails."""
+def fetch(scratch: str, remote: str) -> str | None:
+    """Read only the exact advertised anchor, or None if absent. Every
+    caller gets the name gate and advertised/fetched equality check, even
+    when scratch is reused. Transport and readback failures are pending."""
+    advertised = ls_remote(scratch, remote)
+    if advertised is None:
+        return None
     try:
         result = _git("git.fetch-anchor", scratch=scratch, remote=remote)
     except tools.ToolError as error:
@@ -259,32 +265,36 @@ def fetch(scratch: str, remote: str) -> str:
     path = os.path.join(scratch, *tools.READBACK_REF.split("/"))
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        return _packed_ref(scratch)
-    try:
-        data = os.read(fd, 256)
-    finally:
-        os.close(fd)
-    oid = data.decode("ascii", "replace").strip()
+        try:
+            data = os.read(fd, 256)
+        finally:
+            os.close(fd)
+        oid = data.decode("ascii", "replace").strip()
+    except FileNotFoundError:
+        oid = _packed_ref(scratch)
+    except OSError as error:
+        raise Unreachable("fetched ref is unreadable") from error
     if not tools.OID_RE.fullmatch(oid):
         raise Unreachable("fetched ref is malformed")
+    if oid != advertised:
+        raise Unreachable("the remote anchor moved while it was read")
     return oid
 
 
 def _packed_ref(scratch: str) -> str:
     try:
         fd = os.open(os.path.join(scratch, "packed-refs"), os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            data = b""
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            os.close(fd)
     except OSError as error:
-        raise Unreachable("fetched ref is missing") from error
-    try:
-        data = b""
-        while True:
-            chunk = os.read(fd, 65536)
-            if not chunk:
-                break
-            data += chunk
-    finally:
-        os.close(fd)
+        raise Unreachable("fetched ref is missing or unreadable") from error
     for line in data.decode("ascii", "replace").split("\n"):
         oid, _sp, ref = line.partition(" ")
         if ref == tools.READBACK_REF and tools.OID_RE.fullmatch(oid):

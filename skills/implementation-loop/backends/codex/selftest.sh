@@ -307,6 +307,7 @@ write_lines "$CODEX_STUB" \
   'if [[ "${1:-}" == "--version" ]]; then printf "codex-selftest 0.0.0\n"; exit 0; fi' \
   ': "${CODEX_STUB_LOG:?CODEX_STUB_LOG is required}"' \
   'printf "%s\0" "$@" > "$CODEX_STUB_LOG"' \
+  'if [[ -n "${CODEX_STUB_UMASK_LOG:-}" ]]; then umask > "$CODEX_STUB_UMASK_LOG"; mkdir implementer-dir; printf "created\n" > implementer-file.txt; printf "nested\n" > implementer-dir/nested.txt; fi' \
   'if [[ -n "${CODEX_STUB_STDIN_LOG:-}" ]]; then' \
   '  if python3 -c '\''import os; a=os.fstat(0); b=os.stat("/dev/null"); raise SystemExit(0 if (a.st_dev,a.st_ino)==(b.st_dev,b.st_ino) else 1)'\''; then printf "devnull\n" > "$CODEX_STUB_STDIN_LOG"; else printf "open\n" > "$CODEX_STUB_STDIN_LOG"; fi' \
   'fi' \
@@ -587,6 +588,42 @@ if [[ "$FRESH_CURRENT" == "$(basename "$FRESH_STATE")" ]]; then
 else
   fail "current cache points at the authoritative ready record"
 fi
+
+# The adapter keeps its own state private, but the CLI child must start with
+# the caller's umask: what the implementer creates in the workspace gets the
+# modes the engineer's own shell would give. Checked under 022 and 027, each
+# in its own home and workspace so later generation assertions are untouched.
+for umask_case in 022:644:755 027:640:750; do
+  caller_mask="${umask_case%%:*}"
+  umask_modes="${umask_case#*:}"
+  expected_file_mode="${umask_modes%%:*}"
+  expected_dir_mode="${umask_modes##*:}"
+  UMASK_HOME="$STATE_PARENT/umask-$caller_mask-home"
+  UMASK_WORKSPACE="$STATE_PARENT/umask-$caller_mask-workspace"
+  UMASK_REPORT="$TMP_ROOT/umask-$caller_mask.reported"
+  mkdir -p "$UMASK_HOME/.codex" "$UMASK_WORKSPACE"
+  run_split_case_in_dir "umask-$caller_mask" "$UMASK_WORKSPACE" \
+    bash -c 'umask "$1" && shift && exec "$@"' _ "$caller_mask" \
+    env HOME="$UMASK_HOME" CODEX_HOME="$UMASK_HOME/.codex" PATH="$TEST_PATH" \
+    CODEX_STUB_LOG="$TMP_ROOT/umask-$caller_mask.argv" CODEX_STUB_UMASK_LOG="$UMASK_REPORT" \
+    "$DISPATCH" --prompt 'create a file in the workspace'
+  expect_status 0 "dispatch under caller umask $caller_mask succeeds"
+  expect_output "worktree umask: 0$caller_mask (caller's; the CLI child inherits it)" \
+    "summary discloses caller umask $caller_mask as the worktree umask"
+  expect_first_line "$UMASK_REPORT" "0$caller_mask" \
+    "the CLI child starts with caller umask $caller_mask, not the adapter's 077"
+  expect_file_mode "$UMASK_WORKSPACE/implementer-file.txt" "$expected_file_mode" \
+    "a file the implementer created under caller umask $caller_mask is mode 0$expected_file_mode"
+  expect_file_mode "$UMASK_WORKSPACE/implementer-dir" "$expected_dir_mode" \
+    "a directory the implementer created under caller umask $caller_mask is mode 0$expected_dir_mode"
+  UMASK_STATE="$(latest_run_state "$CASE_STDERR")"
+  expect_file_mode "$(dirname "$UMASK_STATE")" 700 "workspace state root stays 0700 under caller umask $caller_mask"
+  expect_file_mode "$(dirname "$UMASK_STATE")/.lock" 600 "workspace lock stays 0600 under caller umask $caller_mask"
+  expect_file_mode "$UMASK_STATE" 700 "dispatch state directory stays 0700 under caller umask $caller_mask"
+  for state_file in prompt.txt transcript.log last-message.txt meta.tsv; do
+    expect_file_mode "$UMASK_STATE/$state_file" 600 "$state_file stays 0600 under caller umask $caller_mask"
+  done
+done
 
 # Read-only is the same builder with a different mode, not a second argv path.
 READONLY_LOG="$TMP_ROOT/readonly.argv"
