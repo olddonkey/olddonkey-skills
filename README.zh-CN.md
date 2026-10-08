@@ -120,7 +120,7 @@ Codex 侧依赖链：`engineering-mode` → `implementation-loop` → 已登录�
 
 ## implementation-loop
 
-新增的[循环协调器](./skills/implementation-loop/references/coordinator.md)可让 judge agent 起草单元规格，记录工程师对规格的批准，并诊断审查现有工作树 diff。本单元不会运行实现者、门禁、提交或发布。
+[循环协调器](./skills/implementation-loop/references/coordinator.md)可让 judge agent 起草单元规格，记录工程师对规格的批准，运行全新的实现与评审轮次，在允许时做本地提交，并对评审过的快照跑门禁。它在工程师做决定前停下，不会发布。
 
 **agent 驱动循环把实现交给 Codex、grok 或 cursor-agent；协调器也可调用 Claude Code 后端模块。**
 

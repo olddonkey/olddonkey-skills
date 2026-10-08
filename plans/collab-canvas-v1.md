@@ -744,6 +744,8 @@ working tree.
 
 See §8. Unit 3 is not dispatched unless it passes.
 
+**Passed on 2026-10-05.** Five clean controls passed clean and had their seeded defect named; the record, the protocol changes the stage needed, and what it does not show are in `docs/collab-canvas-falsifier-a.md`.
+
 ### Unit 3 — coordinator: `run`, up to the engineer
 
 Nothing in this unit pushes, opens a PR, or ends a unit as done.
@@ -1033,6 +1035,99 @@ Review of the implementation changed these. `references/coordinator.md` is the o
 - Exit 1 is an internal error with the traceback in `last-error.txt`; exit 130 is a signal during a dispatch.
 - `read-context` reads without the lock when the store has none, and exits 5 for a context file with unsafe permissions.
 - The selftest runs its cases four at a time (`COORD_SELFTEST_JOBS`) and prints them in declaration order. It must run from a checkout outside `/tmp`: the codex adapter refuses a state root under a sandbox-writable root.
+
+### Stage A1, as run
+
+`docs/collab-canvas-falsifier-a.md` is the record. What differed from §8:
+
+- The candidate list was extended in merge order to #73. Of eighteen candidates, three exceeded the prompt cap, five had follow-up fixes or deviations from their own plan section, four feature units could not be matched to an independently drafted spec, and three were removed after the judge found a true defect in the clean diff. The five controls are #56, #60, #71, #72 and #73.
+- Each intent carried a note telling the spec author to specify behaviour and not code, and from the extension on a 7000-byte limit. Each drafted spec was then compared with the merged change requirement by requirement, and amended to strike what the change does not meet, before the engineer approved it.
+- The engineer certified controls from those comparison tables, not by reading each diff.
+
+### Unit 3, as specified for implementation
+
+- The spec prompt changes with this unit, as the engineer decided after A1: it always tells the judge to specify behaviour and what tests must prove, the stated limit is 8000 bytes, and the coordinator rejects a reply over 10000. A second attempt after an invalid reply is told which fixed reason made the first unusable. The Environment block no longer says the implementer has a read-only `.git`, which was false for cursor and claude.
+- Small true findings from the judge keep blocking. The cost is looked at again after stage A2.
+- `run` requires the `dispatch-mode` dial to be `implement`, and approved bytes that are UTF-8 and begin with a `Unit:` line. §7 lists neither.
+- `run` moves its journal cursor to the end of the segment before its first write. A gate run by hand while the unit waited in `spec-ready` is attributed to the coordinator's run and would otherwise block the unit at its first write.
+- §7's "under another run" cannot be a refusal: reconciliation acts first, and a run ended from outside makes the unit `abandoned`, while a context that does not name the open run quarantines.
+- An implementer that changes nothing parks as `empty-diff` with no review.
+- A later round's implement prompt carries the previous round's verdict only, as JSON lines, not every finding so far.
+- The calibration is read again at `pass`; `pr` and `merge` take the commit path, and nothing is pushed.
+- The commit and the gate each run under their own time cap (`caps.commit_seconds`, `caps.gate_seconds`) in their own process group, recorded where `abandon` looks. A gate killed by its cap parks as `gate-timeout`; the record is not consulted.
+- The gate is judged in a fixed order: the cap, then the record (exactly one `gate.result` with the expected purpose, policy, unit and round, and a verdict that agrees with its exit), then red, then the binding to the reviewed tree.
+- On a signal or a time cap the coordinator stops the whole process tree of what it started, taken from the process table before the first signal, because the codex adapter starts its CLI in a session of its own. A codex dispatch stopped this way leaves the codex adapter's own state marked running, and that adapter documents no repair; fixing that is outside this plan.
+- Everything the coordinator starts gets `/dev/null` as stdin.
+
+### Unit 3, as built
+
+Four Codex rounds on one thread (2026-10-05 to 2026-10-06). Round 1 was
+checked by reading every hunk, a full host run, 46 mutants, a real-CLI run,
+and an independent reviewer whose scripted scenarios found the defects
+below; each later round was re-checked the same way, with the scenarios
+re-run against the final tree. Where the behaviour differs from the
+specification above, the specification was wrong:
+
+- **The gate's exit status must agree with its record.** The specification
+  said to decide from the record and never from the exit status. A test
+  suite can append a green `unit-final` record through the shipped journal
+  helper and kill `run-gate.sh`; with the old rule the unit reached
+  `awaiting-engineer` on a red suite. `run-gate.sh` exits with exactly the
+  value it records, so the observed exit must equal `gate_exit`, and a
+  process ended by a signal never matches.
+- **Closing writes move the cursor first.** Every path into the terminal
+  writes moves the journal cursor to the end of the segment, as `abandon`
+  does. Before that, a hook or a gate command that had written an event made
+  a parked unit quarantine the repository.
+- **The run segment keeps one writer.** A commit hook that writes to the
+  journal blocks as `journal-write` before the gate starts; a gate command
+  that writes a second event blocks as `gate-record`. Documented as a limit
+  rather than tolerated.
+- **Signals.** Held from before the first durable trace of a step until the
+  child's pid and group are recorded (a signal inside `Popen` had orphaned
+  the child in 10 of 40 trials, and `abandon` then succeeded); a second
+  signal neither restarts nor shortens a stop; a signal the coordinator
+  inherited as ignored stays ignored, so `nohup` works. With no readable
+  process table the created group is still stopped, a read-only dispatch
+  keeps its unit 2 result, and a step that can write to the checkout ends
+  `unknown-outcome`. `abandon` refuses a begun step whose process was never
+  recorded without `--dispatches-terminated`.
+- **One last look after the gate.** Branch, HEAD and tree id are checked
+  once more after a bound green gate; a child the gate left behind had
+  edited the tree after `run-gate.sh` measured it.
+- **Clean means clean.** Every clean-tree decision lists untracked files and
+  submodule changes explicitly; `status.showUntrackedFiles=no` had let an
+  untracked file into the commit and the review prompt.
+- **Bounded ignored-file listing.** At most 50 paths, then a count and the
+  name of `ignored-files.txt` in the unit directory; 4000 new ignored files
+  had parked a 132-byte diff as `too-large`. `check-diff`, which has no
+  manifest, still says only that ignored files were not compared.
+- **Caller's umask** for the commit and the gate (the implement dispatch is
+  started with it too; the codex and claude adapters set their own). Child
+  output shown to the engineer is the last 2000 bytes, JSON-escaped, with
+  the full file named. Specs and verdicts also reject U+2028/9, tag
+  characters and supplemental variation selectors, interlinear annotation,
+  invisible operators and private-use characters; ZWJ, ZWNJ, the direction
+  marks, the soft hyphen, U+FE0F, U+061C and U+180E stay allowed, as unit 2
+  decided.
+
+What was measured and deliberately left, now stated in `coordinator.md`: a
+process that detaches before the stop or is forked during it; the
+calibration store and journal protected from an implementer only by the
+adapter's sandbox; ignored files compared by size and mtime. Two more
+findings from this review were fixed on main while the unit was in
+review: the codex adapter's record left `running` after an interrupted
+dispatch (stop-signal handling and `--recover-stale`, PR #81), and the
+codex and claude adapters running the implementer's writes under umask
+077 (PR #85).
+
+The coordinator selftest pins 1745 checks where `ps` is readable and 1641
+where it is denied; the unreadable-table path is exercised everywhere with a
+test-local failing `ps`. The suite grew from 237 to about 300 cases and from
+roughly two and a half minutes to seven at four jobs; fixture reuse is the
+lever if that becomes a cost. A real `run` (codex implementer, claude judge,
+passthrough gate on this repository's evidence suite) reached
+`awaiting-engineer` on the first attempt in each of three rounds.
 
 ## 12. Review record
 

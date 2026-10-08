@@ -8,6 +8,9 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib, json, os, pathlib, re, shlex, shutil, signal, subprocess, sys, tempfile, threading, time
 
+try: PS_AVAILABLE = subprocess.run(['ps','-axo','pid=,ppid=,pgid=,stat='],capture_output=True).returncode==0
+except OSError: PS_AVAILABLE = False
+
 TESTS = pathlib.Path(sys.argv[1]); SOURCE = TESTS.parent
 CHECKS = 0; FAILURES = 0
 FILTER = os.environ.get('COORD_SELFTEST_FILTER')
@@ -29,6 +32,12 @@ def check(condition, name, detail=''):
         print(f'not ok {CHECKS} - {name} {detail}', file=sys.stderr)
 
 def group_gone(pgid):
+    if PS_AVAILABLE:
+        try: result=subprocess.run(['ps','-axo','pgid=,stat='],capture_output=True,text=True)
+        except OSError: result=None
+        if result is not None and result.returncode==0:
+            return not any((parts:=line.split()) and len(parts)==2 and parts[0]==str(pgid) and not parts[1].startswith('Z')
+                           for line in result.stdout.splitlines())
     try: os.killpg(pgid,0)
     except ProcessLookupError: return True
     except PermissionError: return False
@@ -40,6 +49,13 @@ def wait_group_gone(pgid, seconds=45):
         if group_gone(pgid): return True
         time.sleep(0.05)
     return group_gone(pgid)
+
+def wait_for(predicate,seconds=30):
+    deadline=time.monotonic()+seconds
+    while time.monotonic()<deadline:
+        if predicate():return True
+        time.sleep(0.05)
+    return bool(predicate())
 
 class Case:
     def __init__(self, judge='claude', implementer=None, grok=False, name='case'):
@@ -92,6 +108,15 @@ class Case:
                     'agents':{'judge':{'backend':judge,'model':('model-high' if judge=='cursor' else 'model')},
                               'implementer':{'backend':self.implementer,'model':'model'}},
                     'caps':{'rounds':3,'prompt_bytes':120000,'ignored_files':5000}}
+        self.cfg['gate']={'argv':['python3',str(self.bin/'gate-test')],'mode':'strict','runner_unsupported':False}
+        (self.bin/'gate-test').write_text('#!/usr/bin/env python3\nimport sys\nprint("Ran 1 test in 0.001s\\n\\nOK")\n')
+        (self.bin/'gate-test').chmod(0o755)
+        self.actions=self.root/'actions'; self.actions.mkdir()
+        self.env['COORD_ACTIONS']=str(self.actions)
+        self.env['COORD_WORKSPACE']=str(self.ws)
+        self.env['COORD_CALIBRATION']=str(self.tree/'scripts'/'loop-calibration')
+        self.env['COORD_CAL_STORE']=str(self.home/'.config'/'olddonkey-loop'/'calibration'/
+                                         (hashlib.sha256(str(self.ws.resolve()).encode()).hexdigest()+'.tsv'))
         self.write_config()
         self.unit_path = self.root / 'unit.json'
         self.make_unit()
@@ -149,6 +174,18 @@ class Case:
             (self.root/f'response-{i}.txt').write_text(text,encoding='utf-8')
         self.env['COORD_SEQUENCE']=str(self.root)
         self.counter.unlink(missing_ok=True)
+    def action(self,n,**values): (self.actions/f'action-{n}.json').write_text(json.dumps(values))
+    def ready(self):
+        result=self.run(['spec','--unit-file',str(self.unit_path)],0,'run setup: spec')
+        if result.returncode: return False
+        return self.run(['approve-spec','--unit','unit-one','--digest',self.state()['spec']['digest']],0,'run setup: approval').returncode==0
+    def run_unit(self,status=0,name='run: unit'):
+        return self.run(['run','--unit','unit-one'],status,name)
+    def calibrate(self,key,value):
+        result=subprocess.run([str(self.tree/'scripts'/'loop-calibration'),'set','--key',key,'--value',value,
+                               '--set-by','console' if key=='stop' else 'import-confirmed'],
+                              cwd=self.ws,env=self.env,capture_output=True,text=True)
+        check(result.returncode==0,'calibration: '+key+'='+value,result.stderr)
     def verdict(self,kind='pass',summary='Looked at the diff.',findings=None):
         if findings is None: findings=[] if kind=='pass' else [{'file':'tracked.txt','line':1,'what':'wrong','expected':'right'}]
         return json.dumps({'verdict':kind,'summary':summary,'findings':findings,'notes':[]},ensure_ascii=False)
@@ -163,10 +200,14 @@ esac
 n=1
 if [[ -f "$COORD_COUNTER" ]]; then n=$(( $(cat "$COORD_COUNTER") + 1 )); fi
 echo "$n" > "$COORD_COUNTER"
+echo "$BASHPID" > "$COORD_OBSERVED/cli-$n.pid"
 source_file="$COORD_RESPONSE"
 if [[ -n "${COORD_SEQUENCE:-}" && -f "$COORD_SEQUENCE/response-$n.txt" ]]; then source_file="$COORD_SEQUENCE/response-$n.txt"; fi
 cp "$source_file" "$COORD_OBSERVED/message-$n.txt"
 env > "$COORD_OBSERVED/env-$n.txt"
+if [[ "${COORD_CHECK_STDIN:-}" == 1 ]]; then
+  python3 -c 'import os,stat,sys; a=os.fstat(0); b=os.stat("/dev/null"); open(sys.argv[1],"w").write(str(stat.S_ISCHR(a.st_mode) and a.st_rdev==b.st_rdev))' "$COORD_OBSERVED/stdin-$n.txt"
+fi
 printf '%s\0' "$@" > "$COORD_OBSERVED/argv-$n.bin"
 last="${!#}"
 if [[ "$name" == grok ]]; then
@@ -177,6 +218,63 @@ if [[ "$name" == grok ]]; then
   done
 fi
 printf '%s' "$last" > "$COORD_OBSERVED/prompt-$n.txt"
+implement=0
+case "$name" in
+  codex) implement=1 ;;
+  cursor-agent) implement=1 ;;
+esac
+prev=''
+for arg in "$@"; do
+  [[ "$name" != codex || "$prev" != -s || "$arg" != read-only ]] || implement=0
+  [[ "$name" != cursor-agent || "$prev" != --mode || "$arg" != plan ]] || implement=0
+  [[ "$name" != claude || "$arg" != Edit ]] || implement=1
+  prev="$arg"
+done
+printf '%s' "$implement" > "$COORD_OBSERVED/implement-$n.txt"
+if [[ -f "$COORD_ACTIONS/action-$n.json" ]]; then
+python3 - "$COORD_ACTIONS/action-$n.json" "$implement" <<'P'
+import base64,json,os,pathlib,signal,subprocess,sys,time
+path=pathlib.Path(sys.argv[1])
+if sys.argv[2]=='1' and os.environ.get('COORD_RECORD_MASK'):
+    blocked=signal.pthread_sigmask(signal.SIG_BLOCK,[])
+    pathlib.Path(os.environ['COORD_OBSERVED'],'implement-signal-mask.json').write_text(json.dumps(sorted(int(x) for x in blocked)))
+if path.exists():
+    action=json.loads(path.read_text())
+    if sys.argv[2]=='1':
+        if action.get('branch_move'):
+            subprocess.run(['git','switch','-qc','other-branch'],check=True)
+        for name,value in action.get('write',{}).items():
+            target=pathlib.Path(name); target.parent.mkdir(parents=True,exist_ok=True)
+            target.write_bytes(base64.b64decode(value['base64']) if isinstance(value,dict) else value.encode())
+        for name,target in action.get('symlink',{}).items():
+            p=pathlib.Path(name); p.unlink(missing_ok=True); p.symlink_to(target)
+        for name,mode in action.get('chmod',{}).items(): pathlib.Path(name).chmod(mode)
+        if action.get('head_move'):
+            subprocess.run(['git','add','-A'],check=True)
+            subprocess.run(['git','commit','-qm','unexpected'],check=True)
+        if action.get('py'):
+            exec(action['py'])
+        if action.get('inject_gate'):
+            helper=os.environ['COORD_JOURNAL_HELPER']
+            fields=['policy=strict','purpose=unit-final','binding=dirty','verdict=green','gate_exit=0',
+                    'pre_head='+os.environ['COORD_BASE'],'post_head='+os.environ['COORD_BASE'],
+                    'pre_tree='+os.environ['COORD_TREE'],'post_tree='+os.environ['COORD_TREE']]
+            subprocess.run([helper,'append','--event','gate.result',*[v for field in fields for v in ('--field',field)]],check=True)
+    if action.get('spawn_writer'):
+        code="import pathlib,sys,time; p=pathlib.Path(sys.argv[1]);\nwhile True:\n with p.open('a') as f: f.write('.'); f.flush()\n time.sleep(0.05)"
+        child=subprocess.Popen([sys.executable,'-c',code,action['spawn_writer']],start_new_session=True,
+                               stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        pathlib.Path(os.environ['COORD_OBSERVED'],f'writer-{os.environ.get("LOOP_ROUND","1")}.pid').write_text(str(child.pid))
+    if action.get('sleep'): time.sleep(action['sleep'])
+    if action.get('calibrate'):
+        key,value=action['calibrate']
+        subprocess.run([os.environ['COORD_CALIBRATION'],'set','--workspace',os.environ['COORD_WORKSPACE'],'--key',key,'--value',value,
+                        '--set-by','console' if key=='stop' else 'import-confirmed'],check=True)
+    if action.get('corrupt_calibration'):
+        pathlib.Path(os.environ['COORD_CAL_STORE']).write_text('bad calibration\n')
+    sys.exit(action.get('exit',0))
+P
+fi
 if [[ -n "${COORD_TAMPER_PROMPT:-}" ]]; then
   find "$HOME/.config/olddonkey-loop/coordinator" -name '*.prompt' -type f -exec sh -c 'printf x >> "$1"' sh '{}' \;
 fi
@@ -195,10 +293,11 @@ if [[ -n "${COORD_SLEEP:-}" ]]; then sleep "$COORD_SLEEP"; fi
 if [[ -n "${COORD_FAIL:-}" ]]; then exit "$COORD_FAIL"; fi
 case "$name" in
   claude)
-    python3 - "$source_file" <<'P'
+    python3 - "$source_file" "$implement" <<'P'
 import json,sys
 message=open(sys.argv[1],encoding='utf-8').read()
-print(json.dumps({'type':'system','subtype':'init','tools':['Read','Glob','Grep'],'mcp_servers':[],'session_id':'session-test-123'}))
+tools=['Bash','Read','Edit','Write','Glob','Grep'] if sys.argv[2]=='1' else ['Read','Glob','Grep']
+print(json.dumps({'type':'system','subtype':'init','tools':tools,'mcp_servers':[],'session_id':'session-test-123'}))
 print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':message,'session_id':'session-test-123'}))
 P
     ;;
@@ -206,7 +305,8 @@ P
     output=''; prev=''
     for arg in "$@"; do [[ "$prev" != -o ]] || output="$arg"; prev="$arg"; done
     cp "$source_file" "$output"
-    echo '--------'; echo 'approval: never'; echo 'sandbox: read-only [workdir, /tmp, TMPDIR]'; echo 'session id: 019c0000-0000-7000-8000-000000000123'; echo '--------'
+    sandbox=read-only; [[ "$implement" == 0 ]] || sandbox=workspace-write
+    echo '--------'; echo 'approval: never'; echo "sandbox: $sandbox [workdir, /tmp, TMPDIR]"; echo 'session id: 019c0000-0000-7000-8000-000000000123'; echo '--------'
     ;;
   cursor-agent)
     python3 - "$source_file" <<'P'
@@ -236,6 +336,8 @@ args=sys.argv[1:]
 mode=MODE
 event=args[args.index('--event')+1] if '--event' in args else None
 if mode=='drop-end' and event=='dispatch.end': sys.exit(0)
+if mode=='drop-gate' and event=='gate.result': sys.exit(0)
+if mode=='fail-gate' and event=='gate.result': sys.exit(7)
 if mode=='drop-own' and event=='unit.begin': sys.exit(0)
 if mode=='drop-terminal-own' and event=='unit.end': sys.exit(0)
 if mode=='fail-unit-end' and event=='unit.end': sys.exit(7)
@@ -246,19 +348,50 @@ elif mode=='end-unit' and event=='dispatch.end':
 else: env=os.environ
 if mode=='start-mode' and event=='dispatch.start':
     args=['mode=implement' if x=='mode=read-only' else x for x in args]
+if mode=='implement-start-mode' and event=='dispatch.start':
+    args=['mode=read-only' if x=='mode=implement' else x for x in args]
+if mode=='implement-start-round' and event=='dispatch.start':
+    env=dict(env,LOOP_ROUND='2')
+if mode=='implement-end-round' and event=='dispatch.end':
+    env=dict(env,LOOP_ROUND='2')
+if mode=='implement-start-backend' and event=='dispatch.start':
+    args=['backend=claude' if x=='backend=codex' else x for x in args]
+if mode=='implement-end-unit' and event=='dispatch.end':
+    env=dict(env,LOOP_UNIT='other-unit')
 if mode=='start-backend' and event=='dispatch.start':
     args=['backend=codex' if x=='backend=claude' else x for x in args]
 if mode=='end-exit' and event=='dispatch.end':
     args=['exit=1' if x=='exit=0' else x for x in args]
+if event=='gate.result':
+    changes={'gate-purpose':('purpose=unit-final','purpose=focused'),
+             'gate-policy':('policy=strict','policy=passthrough'),
+             'gate-disagree':('verdict=green','verdict=red'),
+             'gate-binding-label':('binding=dirty','binding=clean')}
+    if mode in changes:
+        old,new=changes[mode]
+        args=[new if x==old else x for x in args]
+    if mode.startswith('gate-binding-'):
+        field=mode[len('gate-binding-'):].replace('-','_')
+        args=[field+'='+'0'*40 if x.startswith(field+'=') else x for x in args]
+    if mode=='gate-unit': env=dict(env,LOOP_UNIT='other-unit')
+    if mode=='gate-round': env=dict(env,LOOP_ROUND='2')
 if mode=='torn-before-own' and event=='unit.begin':
     home=pathlib.Path.home()
     for segment in home.glob('.config/olddonkey-loop/journal/*/runs/*.jsonl'):
         with segment.open('ab') as stream: stream.write(b'{torn')
-result=subprocess.run([str(real),*args],env=env)
+if mode=='unattributed-gate' and event=='gate.result':
+    key=__import__('hashlib').sha256(os.path.realpath(os.getcwd()).encode()).hexdigest()
+    context=pathlib.Path.home()/'.config'/'olddonkey-loop'/'journal'/key/'context'
+    aside=context.with_name('context.gate-aside'); context.rename(aside)
+    try: result=subprocess.run([str(real),*args],env=env)
+    finally: aside.rename(context)
+else: result=subprocess.run([str(real),*args],env=env)
 if mode=='duplicate-pair' and event in ('dispatch.start','dispatch.end') and result.returncode==0:
     subprocess.run([str(real),*args],env=env)
 if mode=='two-own' and event=='unit.begin' and result.returncode==0:
     subprocess.run([str(real),*args],env=env)
+if mode=='kill-after-gate' and event=='gate.result' and result.returncode==0:
+    os.kill(int(os.environ['COORD_KILL_PID']),__import__('signal').SIGKILL)
 if mode=='wrong-type-own' and event=='unit.begin' and result.returncode==0:
     key=__import__('hashlib').sha256(os.path.realpath(os.getcwd()).encode()).hexdigest()
     segment=next((pathlib.Path.home()/'.config'/'olddonkey-loop'/'journal'/key/'runs').glob('*.jsonl'))
@@ -546,6 +679,10 @@ def config_and_usage(c):
                ('prompt cap',lambda x:x.setdefault('caps',{}).update(prompt_bytes=200000)),
                ('dispatch duration low',lambda x:x.setdefault('caps',{}).update(dispatch_seconds=0)),
                ('dispatch duration high',lambda x:x.setdefault('caps',{}).update(dispatch_seconds=14401)),
+               ('commit duration low',lambda x:x.setdefault('caps',{}).update(commit_seconds=0)),
+               ('commit duration high',lambda x:x.setdefault('caps',{}).update(commit_seconds=3601)),
+               ('gate duration low',lambda x:x.setdefault('caps',{}).update(gate_seconds=0)),
+               ('gate duration high',lambda x:x.setdefault('caps',{}).update(gate_seconds=14401)),
                ('cursor effort',lambda x:x['agents']['judge'].update(backend='cursor',model='model',effort='high')),
                ('claude effort',lambda x:x['agents']['judge'].update(backend='claude',effort='ultra')),
                ('surrogate model',lambda x:x['agents']['judge'].update(model='\ud800'))]
@@ -1024,6 +1161,7 @@ def init_and_missing(c):
     result=c.run(['init'],0,'init: repeat succeeds without lock')
     after={str(p.relative_to(c.cdir)):hashlib.sha256(p.read_bytes()).hexdigest() for p in c.cdir.rglob('*') if p.is_file()}
     check(before==after and f'KEY={hashlib.sha256(str(c.ws.resolve()).encode()).hexdigest()}' in result.stdout,'init: repeated call changes no files and prints key')
+    check('"commit_seconds":300' in result.stdout and '"gate_seconds":3600' in result.stdout,'init: new cap defaults shown')
     check((c.cdir.stat().st_mode & 0o777)==0o700,'init: CDIR mode 0700')
     shutil.rmtree(c.cdir)
     c.run(['spec','--unit-file',str(c.unit_path)],5,'init: missing CDIR names init')
@@ -1684,6 +1822,7 @@ def ignored_path_races(c):
     probe=r'''import json,os,pathlib,sys,types
 script=pathlib.Path(sys.argv[1]); source=pathlib.Path(sys.argv[2]).read_text()
 namespace={}
+sys.argv=['coordinator-probe',str(script),'0022']
 exec(compile(source,'<coordinator functions>','exec'),namespace)
 raw=b'ignored-\xff'; name=os.fsdecode(raw)
 created=False; original_lstat=pathlib.Path.lstat
@@ -1889,8 +2028,9 @@ def function_probe(c, body):
     runner='''import json,pathlib,sys
 namespace={}
 source=pathlib.Path(sys.argv[2]).read_text()
-exec(compile(source,'<coordinator functions>','exec'),namespace)
 base=pathlib.Path(sys.argv[3]).read_text()
+sys.argv=['coordinator-probe',sys.argv[1],'0022']
+exec(compile(source,'<coordinator functions>','exec'),namespace)
 '''+body
     return subprocess.run(['python3','-c',runner,str(c.coordinator.parent),str(source_file),str(spec_file)],
                           cwd=c.ws,env=c.env,capture_output=True,text=True)
@@ -1934,32 +2074,62 @@ with_case(heading_line_probe,name='heading-line-probe')
 def unicode_control_probe(c):
     body=r'''allowed=[('ZWJ emoji','👩\u200d💻'),('Persian ZWNJ','فارسی\u200cنویسی'),
          ('left-to-right mark','x\u200ey'),('right-to-left mark','x\u200fy'),
-         ('soft hyphen','x\u00ady')]
+         ('soft hyphen','x\u00ady'),('variation selector','x\uFE0Fy'),
+         ('Arabic letter mark','x\u061Cy'),('Mongolian vowel separator','x\u180Ey')]
 blocked=[('right-to-left override','\u202e'),('left-to-right isolate','\u2066'),
-         ('zero-width space','\u200b'),('word joiner','\u2060'),('BOM','\ufeff')]
+         ('zero-width space','\u200b'),('word joiner','\u2060'),('BOM','\ufeff'),
+         ('line separator','\u2028'),('paragraph separator','\u2029'),
+         ('Unicode tag','\U000E0061'),('supplemental variation selector','\U000E0100'),
+         ('interlinear annotation','\uFFF9'),('invisible operator','\u2062'),
+         ('invisible function application','\u2061'),('private use','\uE000')]
 for name,value in allowed+blocked:
     message=base.replace('Change tracked.txt.','Change tracked.txt. '+value)
     detail,kind=namespace['spec_parts'](message)
     verdict_doc={'verdict':'iterate','summary':'review','findings':[
         {'file':'path '+value+'.txt','line':1,'what':'issue','expected':'fix'}],'notes':[]}
-    try:
-        parsed=namespace['verdict'](json.dumps(verdict_doc,ensure_ascii=True))
-        verdict_ok=parsed['findings'][0]['file']==verdict_doc['findings'][0]['file']
-    except (ValueError,TypeError,RecursionError):
-        verdict_ok=False
+    verdict_results=[]
+    for place in ('file','summary','what','expected','notes'):
+        probe=json.loads(json.dumps(verdict_doc,ensure_ascii=True))
+        if place=='summary': probe['summary']='review '+value
+        elif place=='notes': probe['notes']=['note '+value]
+        else: probe['findings'][0][place]='text '+value
+        try:
+            namespace['verdict'](json.dumps(probe,ensure_ascii=True)); verdict_results.append(True)
+        except (ValueError,TypeError,RecursionError): verdict_results.append(False)
     should_accept=(name,value) in allowed
-    correct=(kind is None and verdict_ok and not namespace['has_controls']('path '+value+'.txt')) if should_accept else (
-        kind=='invalid' and detail=='control or format character' and not verdict_ok)
+    correct=(kind is None and all(verdict_results) and not namespace['has_controls']('path '+value+'.txt')) if should_accept else (
+        kind=='invalid' and detail=='control or format character' and not any(verdict_results))
     print(json.dumps({'name':name,'correct':correct,'kind':kind,'detail':detail if kind=='invalid' else None},ensure_ascii=True))
 '''
     run=function_probe(c,body)
     check(run.returncode==0,'Unicode control probe: spec and verdict run',f'observed exit {run.returncode}: {run.stderr}')
     if run.returncode==0:
         rows=[json.loads(line) for line in run.stdout.splitlines()]
-        check(len(rows)==10,'Unicode control probe: all 10 characters exercised')
+        check(len(rows)==21,'Unicode control probe: all 21 characters exercised')
         for row in rows:
             check(row['correct'],'Unicode control probe: '+row['name'],repr(row))
 with_case(unicode_control_probe,name='unicode-control-probe')
+
+def run_unicode_spec(c,kind):
+    tag='\U000E0061'
+    if kind=='judge':
+        c.set_response(c.valid_spec().replace('Change tracked.txt.','Change tracked.txt. '+tag))
+        result=c.run(['spec','--unit-file',str(c.unit_path)],6,'unicode spec: tag reply rejected twice')
+        if result.returncode==6:
+            check(c.state()['reason']=='spec-invalid' and c.counter.read_text().strip()=='2',
+                  'unicode spec: no hidden instruction reaches approval')
+    else:
+        if not c.ready():return
+        path=c.cdir/'units'/'unit-one'/'spec.txt'
+        data=path.read_text().replace('Change tracked.txt.','Change tracked.txt. '+tag).encode()
+        path.write_bytes(data)
+        c.run(['approve-spec','--unit','unit-one','--digest',hashlib.sha256(data).hexdigest()],0,
+              'unicode spec: engineer can approve bytes')
+        result=c.run_unit(3,'unicode spec: run refuses approved tag')
+        check('control or format character' in result.stderr and c.state()['state']=='spec-ready',
+              'unicode spec: approved unsafe bytes held before dispatch')
+for kind in ('judge','approved'):
+    with_case(lambda c,k=kind:run_unicode_spec(c,k),name='run-unicode-spec-'+kind)
 
 def accepted_prose_spec(c):
     message=c.valid_spec().replace('Change tracked.txt.',
@@ -2016,6 +2186,1356 @@ def detached_corrupt_segment(c,kind):
 for corruption in ('middle','wrong-run'):
     with_case(lambda c,k=corruption:detached_corrupt_segment(c,k),name='detached-corrupt-'+corruption)
 
+def run_happy(c,stop):
+    c.calibrate('stop',stop)
+    if not c.ready(): return
+    c.action(2,write={'tracked.txt':'after\n'})
+    c.set_response(c.verdict(summary='Reviewed actual changes.'))
+    prior=c.state(); expected_path='worktree' if stop=='worktree' else 'commit'
+    result=c.run_unit(0,f'run happy: {c.implementer} {stop}')
+    if result.returncode:return
+    report=json.loads(result.stdout); state=c.state(); events=c.events()
+    check(state['state']=='awaiting-engineer' and state['step']['phase']=='finished' and state['run']==prior['run'],f'run happy: waiting {c.implementer} {stop}')
+    check(report['path']==expected_path and state['path']==expected_path and report['stop_point']==stop and state['stop_point']==stop,f'run happy: stop path {c.implementer} {stop}')
+    check(report['verdict']['summary']=='Reviewed actual changes.' and state['verdict']==report['verdict'] and report['ignored']==state['ignored'],f'run happy: verdict and ignored {c.implementer} {stop}')
+    check(report['tree']==state['tree'] and report['gate_log']==state['gate_log'] and pathlib.Path(report['gate_log']).exists(),f'run happy: tree and log {c.implementer} {stop}')
+    check(sum(e['event']=='round.begin' and e['round']==1 for e in events)==1 and sum(e['event']=='review.recorded' and e['round']==1 for e in events)==1,f'run happy: one round and review {c.implementer} {stop}')
+    starts=[e for e in events if e['event']=='dispatch.start' and e.get('mode')=='implement']
+    ends=[e for e in events if e['event']=='dispatch.end' and e.get('round')==1]
+    check(len(starts)==1 and starts[0]['backend']==c.implementer and starts[0]['round']==1 and len(ends)==2,f'run happy: implement pair {c.implementer} {stop}')
+    gate=[e for e in events if e['event']=='gate.result']
+    check(len(gate)==1 and gate[0]['unit']=='unit-one' and gate[0]['round']==1 and gate[0]['purpose']=='unit-final' and gate[0]['policy']=='strict' and gate[0]['verdict']=='green' and gate[0]['gate_exit']==0,f'run happy: gate record {c.implementer} {stop}')
+    check(bool(report['commit'])==(expected_path=='commit') and report['commit']==state.get('commit') and not any(e['event']=='run.end' for e in events),f'run happy: commit and open run {c.implementer} {stop}')
+    check(c.git('status','--porcelain').stdout==(b'' if expected_path=='commit' else b' M tracked.txt\n'),f'run happy: work state {c.implementer} {stop}')
+    check((c.observed/'implement-2.txt').read_text()=='1' and (c.ws/'tracked.txt').read_text()=='after\n',f'run happy: real adapter patch {c.implementer} {stop}')
+    check((c.cdir/'units'/'unit-one'/'implement-1.prompt').read_bytes()==(c.cdir/'units'/'unit-one'/'approved-spec.txt').read_bytes() and
+          (c.cdir/'units'/'unit-one'/'implement-1.final-message.txt').read_text()==c.verdict(summary='Reviewed actual changes.'),
+          f'run happy: exact spec prompt and stored final message {c.implementer} {stop}')
+    listed=json.loads(c.run(['status','--json'],0,'run happy: status').stdout)['units'][0]
+    check(all(listed[key]==state.get(key) for key in ('verdict','tree','round','gate_policy','gate_log','ignored','stop_point','path','commit')),f'run happy: status fields {c.implementer} {stop}')
+    c.run_unit(3,'run happy: second run refused')
+    c.make_unit('unit-two')
+    c.run(['spec','--unit-file',str(c.unit_path)],3,'run happy: second spec refused')
+    if expected_path=='commit':
+        message=c.git('log','-1','--format=%B').stdout.decode()
+        check('Unit-Id: unit-one' in message and prior['spec']['digest'] in message and state['tree'] in message and state['run'] in message,f'run happy: commit trailers {c.implementer} {stop}')
+        check((c.cdir/'units'/'unit-one'/'commit-message.txt').read_text().strip()==message.strip(),f'run happy: commit message file matches commit {c.implementer} {stop}')
+        check(c.git('rev-parse','HEAD^').stdout.decode().strip()==c.base,f'run happy: single base parent {c.implementer} {stop}')
+    c.run(['abandon','--unit','unit-one'],0,'run happy: abandon waiting')
+    check(c.state()['state']=='abandoned' and c.git('branch','--show-current').stdout.decode().strip()=='canvas/unit-one',f'run happy: abandon retains work {c.implementer} {stop}')
+    check(any(e['event']=='run.end' and e['status']=='abandoned' for e in c.events()),f'run happy: abandoned run recorded {c.implementer} {stop}')
+
+for backend,judge in (('codex','claude'),('cursor','codex'),('claude','codex')):
+    for stop in ('worktree','commit'):
+        with_case(lambda c,s=stop:run_happy(c,s),judge=judge,implementer=backend,name='run-happy-'+backend+'-'+stop)
+for stop in ('pr','merge'):
+    with_case(lambda c,s=stop:run_happy(c,s),name='run-happy-codex-'+stop)
+
+def run_refusals(c):
+    setup=c.run(['spec','--unit-file',str(c.unit_path)],0,'run refusal: setup spec')
+    if setup.returncode:return
+    def refusal(name,needle):
+        before_state=(c.cdir/'units'/'unit-one'/'state.json').read_bytes()
+        segment=c.journal_dir/'runs'/(c.state()['run']+'.jsonl')
+        before_journal=segment.read_bytes()
+        before_tree=(c.git('rev-parse','HEAD').stdout,c.git('status','--porcelain').stdout,c.git('branch','--show-current').stdout)
+        result=c.run_unit(3,'run refusal: '+name)
+        check(needle in result.stderr and len(result.stderr.splitlines())==1,'run refusal: one precise line '+name,result.stderr)
+        after_tree=(c.git('rev-parse','HEAD').stdout,c.git('status','--porcelain').stdout,c.git('branch','--show-current').stdout)
+        check(before_state==(c.cdir/'units'/'unit-one'/'state.json').read_bytes() and before_journal==segment.read_bytes() and before_tree==after_tree,'run refusal: no state/journal/tree change '+name)
+    refusal('unapproved','not approved')
+    c.run(['approve-spec','--unit','unit-one','--digest',c.state()['spec']['digest']],0,'run refusal: approve')
+    approved=c.cdir/'units'/'unit-one'/'approved-spec.txt'; original=approved.read_bytes()
+    approved.write_bytes(b'changed'); refusal('changed approved bytes','digest mismatch')
+    approved.write_bytes(original)
+    spec_path=c.cdir/'units'/'unit-one'/'spec.txt'
+    for name,content,needle in [('non-UTF-8',b'Unit: bad\n\xff','not UTF-8'),('no Unit line',b'Bad first line\n','no Unit: name')]:
+        spec_path.write_bytes(content)
+        c.run(['approve-spec','--unit','unit-one','--digest',hashlib.sha256(content).hexdigest()],0,'run refusal: approve '+name)
+        refusal(name,needle)
+    spec_path.write_bytes(original)
+    c.run(['approve-spec','--unit','unit-one','--digest',hashlib.sha256(original).hexdigest()],0,'run refusal: restore approval')
+    c.git('switch','-q',c.base_branch); refusal('wrong branch','unit branch'); c.git('switch','-q','canvas/unit-one')
+    (c.ws/'tracked.txt').write_text('dirty\n'); refusal('tracked dirty','working tree is dirty'); (c.ws/'tracked.txt').write_text('before\n')
+    (c.ws/'new.txt').write_text('untracked\n'); refusal('untracked dirty','working tree is dirty'); (c.ws/'new.txt').unlink()
+    gate=dict(c.cfg.pop('gate')); c.write_config(); refusal('no gate block','gate matrix'); c.cfg['gate']=dict(gate); c.write_config()
+    for dial_value,mode,unsupported in [('strict','passthrough',True),('strict','passthrough',False),
+                                         ('baseline','passthrough',False),('skip','strict',False),
+                                         ('skip','passthrough',True),('skip','passthrough',False)]:
+        c.calibrate('gate',dial_value)
+        c.cfg['gate']['mode']=mode; c.cfg['gate']['runner_unsupported']=unsupported; c.write_config()
+        refusal(f'gate {dial_value}/{mode}/{unsupported}','gate matrix')
+    c.calibrate('gate','baseline'); c.cfg['gate']=dict(gate); c.write_config()
+    c.calibrate('dispatch-mode','read-only'); refusal('read-only dial','dispatch-mode')
+    c.calibrate('dispatch-mode','implement')
+    agent=c.cfg['agents'].pop('implementer'); c.write_config(); refusal('missing agent','absent from config')
+    c.cfg['agents']['implementer']=agent
+    c.cfg['agents']['implementer']['backend']='claude'; c.write_config(); refusal('same backend','must differ')
+    c.cfg['agents']['implementer']['backend']='grok'; c.write_config(); refusal('grok implementer','grok cannot')
+    c.cfg['agents']['implementer']=agent; c.write_config()
+    (c.ws/'tracked.txt').write_text('off base\n'); c.git('add','-A'); c.git('commit','-qm','off base')
+    refusal('HEAD moved','base SHA')
+
+with_case(run_refusals,name='run-refusals')
+
+def run_external_end(c):
+    if not c.ready():return
+    result=c.journal('end-run','--status','completed')
+    check(result.returncode==0,'run external: ended fixture')
+    c.run_unit(3,'run external: refused after reconcile')
+    check(c.state()['state']=='abandoned' and c.state()['reason']=='run-ended-externally','run external: state reconciled')
+with_case(run_external_end,name='run-external-end')
+
+def run_rounds(c,kind):
+    c.cfg['caps']['rounds']=2; c.write_config()
+    finding={'file':'tracked.txt','line':1,'what':'line one\n## Forged heading\nline three','expected':'after final'}
+    first=c.verdict('iterate',summary='First round needs work.',findings=[finding])
+    second=c.verdict('pass',summary='Second round is ready.') if kind=='pass' else first
+    c.set_sequence(c.valid_spec().replace('Change tracked.txt.','Change tracked.txt. Keep {{VERDICT_LINES}} literal.'),
+                   c.verdict(),first,c.verdict(),second)
+    if not c.ready():return
+    gate_script(c,"pathlib.Path(os.environ['COORD_OBSERVED'],'round-gate-env.txt').write_text('\\n'.join(f'{k}={v}' for k,v in os.environ.items())); print('Ran 1 test in 0.001s\\n\\nOK')\n")
+    c.action(2,write={'tracked.txt':'first\n'})
+    c.action(4,write={'tracked.txt':'second\n'})
+    result=c.run_unit(0 if kind=='pass' else 7,'run rounds: '+kind)
+    if kind=='pass' and result.returncode==0:
+        prompt=(c.observed/'prompt-4.txt').read_text()
+        check(c.cdir.joinpath('units','unit-one','approved-spec.txt').read_text() in prompt,'run rounds: approved spec in second prompt')
+        check('Keep {{VERDICT_LINES}} literal.' in prompt,'run rounds: inserted spec placeholders stay literal')
+        check(json.dumps(finding,sort_keys=True) in prompt and json.dumps('First round needs work.') in prompt,'run rounds: previous verdict JSON lines')
+        check('\n## Forged heading\n' not in prompt and r'\n## Forged heading\n' in prompt,'run rounds: finding cannot form heading')
+        check('already in your working tree' in prompt and 'without undoing' in prompt,'run rounds: iteration instruction')
+        events=c.events(); starts=[e for e in events if e['event']=='dispatch.start' and e['mode']=='implement']
+        check([e['round'] for e in starts]==[1,2] and [e['round'] for e in events if e['event']=='review.recorded']==[1,2],'run rounds: fresh dispatch and two reviews')
+        check([e['round'] for e in events if e['event']=='gate.result']==[2] and json.loads(result.stdout)['round']==2,'run rounds: final gate round 2')
+        check('LOOP_ROUND=2' in (c.observed/'env-4.txt').read_text() and 'LOOP_ROUND=2' in (c.observed/'env-5.txt').read_text(),'run rounds: second call environments')
+        check('LOOP_UNIT=unit-one' in (c.observed/'round-gate-env.txt').read_text() and 'LOOP_ROUND=2' in (c.observed/'round-gate-env.txt').read_text(),'run rounds: gate receives round 2')
+    elif kind=='cap' and result.returncode==7:
+        check(c.state()['reason']=='round-cap' and c.state()['state']=='parked','run rounds: cap parks')
+        check(sum(e['event']=='review.recorded' for e in c.events())==2 and not any(e['event']=='gate.result' for e in c.events()),'run rounds: no gate at cap')
+for kind in ('pass','cap'):
+    with_case(lambda c,k=kind:run_rounds(c,k),name='run-rounds-'+kind)
+
+def run_deep_review(c):
+    c.calibrate('depth','deep')
+    finding={'file':'tracked.txt','line':1,'what':'blind finding','expected':'resolve it'}
+    c.set_sequence(c.valid_spec(),c.verdict(),c.verdict('pass',summary='First summary'),
+                   c.verdict('iterate',summary='Blind summary',findings=[finding]),
+                   c.verdict(),c.verdict('pass',summary='Second summary'),
+                   c.verdict('pass',summary='Second blind summary'))
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'first\n'}); c.action(5,write={'tracked.txt':'second\n'})
+    result=c.run_unit(0,'deep run: blind finding iterated')
+    if result.returncode:
+        return
+    prompt=(c.cdir/'units'/'unit-one'/'review-blind-1-1.prompt').read_text()
+    iterate=(c.cdir/'units'/'unit-one'/'implement-2.prompt').read_text()
+    check('## Spec' not in prompt and (c.cdir/'units'/'unit-one'/'review-blind-2-1.prompt').exists(),
+          'deep run: blind reviews dispatched in both passing-primary rounds')
+    check(json.dumps('First summary') in iterate and 'Blind summary' not in iterate and
+          json.dumps(finding,sort_keys=True) in iterate,
+          'deep run: first summary and blind finding sent to round 2')
+    events=c.events()
+    check([(e['round'],e['verdict']) for e in events if e['event']=='review.recorded']==[(1,'iterate'),(2,'pass')] and
+          json.loads(result.stdout)['round']==2,
+          'deep run: combined verdicts recorded by round')
+with_case(run_deep_review,name='run-deep-review')
+
+def run_empty(c):
+    (c.ws/'.gitignore').write_text('ignored.txt\n'); c.git('add','.gitignore'); c.git('commit','-qm','ignore fixture')
+    if not c.ready():return
+    c.action(2,write={'ignored.txt':'hidden\n'})
+    result=c.run_unit(7,'run empty: no tracked change')
+    if result.returncode==7:
+        check(c.state()['reason']=='empty-diff' and 'ignored.txt' in result.stdout,'run empty: reason and ignored report')
+        check(not any(e['event']=='review.recorded' for e in c.events()) and not (c.observed/'prompt-3.txt').exists(),'run empty: no review dispatch')
+with_case(run_empty,name='run-empty')
+
+def run_implement_fault(c,kind):
+    if not c.ready():return
+    if kind=='exit': c.action(2,write={'tracked.txt':'partial\n'},exit=7)
+    elif kind=='head': c.action(2,write={'tracked.txt':'moved\n'},head_move=True)
+    else: c.action(2,branch_move=True)
+    result=c.run_unit(7 if kind=='exit' else 6,'run implement: '+kind)
+    if kind=='exit':
+        check(c.state()['reason']=='implement-dispatch-failed' and (c.ws/'tracked.txt').read_text()=='partial\n','run implement: failed adapter left change')
+        check('adapter exit' in result.stderr,'run implement: failure detail')
+    else:
+        moved=(c.git('rev-parse','HEAD').stdout.decode().strip()!=c.base) if kind=='head' else (c.git('branch','--show-current').stdout.decode().strip()=='other-branch')
+        check(c.state()['reason']=='head-moved' and moved,'run implement: '+kind+' movement blocked')
+for kind in ('exit','head','branch'):
+    with_case(lambda c,k=kind:run_implement_fault(c,k),name='run-implement-'+kind)
+
+def run_terminal_rerun(c,kind):
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    if kind=='parked': c.action(2,write={'tracked.txt':'partial\n'},exit=7)
+    if kind=='blocked': c.action(2,write={'tracked.txt':'moved\n'},head_move=True)
+    c.run_unit(0 if kind=='awaiting-engineer' else 7 if kind=='parked' else 6,
+               'rerun refusal: create '+kind)
+    state=(c.cdir/'units'/'unit-one'/'state.json').read_bytes()
+    segment=c.journal_dir/'runs'/(c.state()['run']+'.jsonl'); journal=segment.read_bytes()
+    result=c.run_unit(3,'rerun refusal: '+kind)
+    check('not spec-ready' in result.stderr and state==(c.cdir/'units'/'unit-one'/'state.json').read_bytes() and
+          journal==segment.read_bytes(),'rerun refusal: one-line refusal preserves state '+kind)
+for kind in ('awaiting-engineer','parked','blocked'):
+    with_case(lambda c,k=kind:run_terminal_rerun(c,k),name='run-terminal-rerun-'+kind)
+
+def run_review_input(c,kind):
+    if kind=='ignored':
+        (c.ws/'.gitignore').write_text('*.ignored\n'); c.git('add','.gitignore'); c.git('commit','-qm','ignore fixture')
+        (c.ws/'changed.ignored').write_text('old')
+        (c.ws/'untouched.ignored').write_text('same')
+    if kind=='mode':
+        (c.ws/'tracked.txt').write_bytes(b'binary\0base')
+        c.git('add','tracked.txt'); c.git('commit','-qm','binary base')
+    if not c.ready():return
+    c.set_response(c.verdict())
+    if kind=='binary': c.action(2,write={'tracked.txt':{'base64':'YWZ0ZXIA'}})
+    elif kind=='mode': c.action(2,chmod={'tracked.txt':0o755})
+    elif kind=='symlink': c.action(2,symlink={'tracked.txt':'target.txt'})
+    else: c.action(2,write={'tracked.txt':'after\n','new.ignored':'new','changed.ignored':'changed'})
+    result=c.run_unit(7 if kind=='binary' else 0,'run review: '+kind)
+    if kind=='binary':
+        check(c.state()['reason']=='binary-change' and 'tracked.txt' in result.stdout,'run review: binary parks with path')
+        check(not any(e['event']=='review.recorded' for e in c.events()),'run review: binary has no review')
+    elif result.returncode==0:
+        prompt=(c.observed/'prompt-3.txt').read_text()
+        if kind=='mode': check('old mode' in prompt or 'new mode' in prompt,'run review: mode-only diff shown')
+        elif kind=='symlink': check('target content was not followed' in prompt and 'target.txt' in prompt,'run review: symlink link data shown')
+        else: check('new.ignored' in prompt and 'changed.ignored' in prompt and 'untouched.ignored' not in prompt,'run review: ignored manifest compared')
+for kind in ('binary','mode','symlink','ignored'):
+    with_case(lambda c,k=kind:run_review_input(c,k),name='run-review-'+kind)
+
+def run_ignored_bound(c,kind):
+    (c.ws/'.gitignore').write_text('*.ignored\n'); c.git('add','.gitignore'); c.git('commit','-qm','ignore fixture')
+    if not c.ready():return
+    c.set_response(c.verdict())
+    c.action(2,write={'tracked.txt':'after\n'})
+    count={'sixty':60,'flood':4000,'none':0}[kind]
+    if kind=='sixty':
+        c.action(2,write={'tracked.txt':'after\n'},
+                 py="from pathlib import Path\nfor i in range(60): Path(f'path-{i:04d}.ignored').write_text('x')")
+    if kind=='flood':
+        for i in range(count): (c.ws/f'path-{i:04d}.ignored').write_text('x')
+    result=c.run_unit(0,'ignored bound: '+kind+' reaches review')
+    if result.returncode:
+        return
+    report=json.loads(result.stdout)['ignored']; prompt=(c.observed/'prompt-3.txt').read_text()
+    path=c.cdir/'units'/'unit-one'/'ignored-files.txt'
+    if kind=='none':
+        check('(none)' in report and not path.exists(),'ignored bound: no file for empty list')
+    else:
+        check(path.exists() and len(path.read_text().splitlines())==count,
+              'ignored bound: complete private list '+kind)
+        check('"path-0000.ignored"' in prompt and '"path-0049.ignored"' in prompt and
+              '"path-0050.ignored"' not in prompt and '"path-0050.ignored"' not in report,
+              'ignored bound: first 50 only in prompt and report '+kind)
+        check(f'(and {count-50} more; full list in the unit directory: ignored-files.txt)' in prompt and
+              f'(and {count-50} more; full list in the unit directory: ignored-files.txt)' in report and
+              c.state()['ignored']==report,
+              'ignored bound: count and state agree '+kind)
+for kind in ('sixty','flood','none'):
+    with_case(lambda c,k=kind:run_ignored_bound(c,k),name='run-ignored-bound-'+kind)
+
+def ignored_report_removes_file(c):
+    body=r'''import pathlib
+name='ignored-test.txt'; pathlib.Path(name).write_text('x')
+namespace['git_ok']=lambda *args: name.encode()+b'\0'
+first=namespace['ignored_report']({'tracked':True,'files':{}},'unit-one')
+path=namespace['unit_dir']('unit-one')/'ignored-files.txt'
+assert path.exists() and 'ignored-test.txt' in first
+namespace['git_ok']=lambda *args: b''
+second=namespace['ignored_report']({'tracked':True,'files':{}},'unit-one')
+assert not path.exists() and second.endswith('(none)')
+'''
+    result=function_probe(c,body)
+    check(result.returncode==0,'ignored report: complete file removed after list becomes empty',result.stderr)
+with_case(ignored_report_removes_file,name='run-ignored-removal')
+
+def check_diff_ignored_uncompared(c):
+    (c.ws/'.gitignore').write_text('*.ignored\n'); c.git('add','.gitignore'); c.git('commit','-qm','ignore fixture')
+    base=c.git('rev-parse','HEAD').stdout.decode().strip()
+    for n in range(60): (c.ws/f'path-{n:04d}.ignored').write_text('x')
+    (c.ws/'tracked.txt').write_text('after\n')
+    spec=c.root/'diagnostic-spec.txt'; spec.write_text(c.valid_spec())
+    c.set_response(c.verdict())
+    result=c.run(['check-diff','--unit-file',str(c.unit_path),'--spec',str(spec),
+                  '--spec-digest',hashlib.sha256(spec.read_bytes()).hexdigest(),'--base',base],0,
+                 'check-diff ignored files: review succeeds')
+    if result.returncode:
+        return
+    report=json.loads(result.stdout)['ignored']; prompt=(c.observed/'prompt-1.txt').read_text()
+    path=c.cdir/'units'/'unit-one'/'ignored-files.txt'
+    check(report=='Ignored files were not compared.' and
+          'Ignored files were not compared.' in prompt and 'Current ignored files:' not in prompt and
+          'path-0000.ignored' not in prompt and not path.exists(),
+          'check-diff ignored files: no comparison, listing, or private file')
+with_case(check_diff_ignored_uncompared,name='check-diff-ignored-uncompared')
+
+def run_review_failure(c,kind):
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'})
+    if kind=='dispatch': c.action(3,exit=7)
+    if kind=='verdict': c.set_response('invalid verdict')
+    if kind=='too-large':
+        c.cfg['caps']['prompt_bytes']=1000; c.write_config()
+    result=c.run_unit(7 if kind!='verdict' else 6,'run review failure: '+kind)
+    check(c.state()['reason']=={'dispatch':'review-dispatch-failed','verdict':'verdict-unparseable','too-large':'too-large'}[kind],'run review failure: reason '+kind)
+for kind in ('dispatch','verdict','too-large'):
+    with_case(lambda c,k=kind:run_review_failure(c,k),name='run-review-failure-'+kind)
+
+def wrap_tree_counter(c,mutation):
+    helper=c.tree.parent/'engineering-mode'/'scripts'/'tree-oid.sh'
+    real=helper.with_suffix('.real'); helper.rename(real)
+    count=c.root/'tree-count'
+    wrapper='''#!/usr/bin/env python3
+import pathlib,subprocess,sys
+count=pathlib.Path(COUNT); n=int(count.read_text())+1 if count.exists() else 1; count.write_text(str(n))
+if n==TARGET:
+    ACTION
+result=subprocess.run([str(pathlib.Path(__file__).with_suffix('.real'))],capture_output=True)
+sys.stdout.buffer.write(result.stdout); sys.stderr.buffer.write(result.stderr)
+sys.exit(result.returncode)
+'''.replace('COUNT',repr(str(count))).replace('TARGET',str(mutation['call'])).replace('ACTION',mutation['code'])
+    helper.write_text(wrapper); helper.chmod(0o755)
+    return count
+
+def run_snapshot_fault(c,kind):
+    if kind=='hook-timeout' and not PS_AVAILABLE:
+        check(True,'run snapshot: hook timeout skipped; sandbox denies ps')
+        return
+    c.calibrate('stop','commit')
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'})
+    c.set_response(c.verdict())
+    if kind=='tree-changed':
+        wrap_tree_counter(c,{'call':2,'code':"pathlib.Path('tracked.txt').write_text('raced\\n')"})
+    else:
+        hook=c.root/'gitadmin'/'hooks'/'pre-commit'; hook.parent.mkdir(parents=True,exist_ok=True)
+        body={'hook-fail':'echo hook refused >&2\nexit 1\n',
+              'hook-content':"printf 'hook\\n' > tracked.txt\ngit add tracked.txt\n",
+              'hook-untracked':"printf 'extra\\n' > extra.txt\n",
+              'hook-timeout':'sleep 5\n'}[kind]
+        hook.write_text('#!/bin/sh\n'+body); hook.chmod(0o755)
+        if kind=='hook-timeout': c.cfg['caps']['commit_seconds']=1; c.write_config()
+    expected=7 if kind=='hook-fail' else 6
+    result=c.run_unit(expected,'run snapshot: '+kind)
+    reason={'tree-changed':'tree-changed','hook-fail':'commit-failed','hook-content':'commit-tree-mismatch',
+            'hook-untracked':'tree-dirty-after-commit','hook-timeout':'commit-timeout'}[kind]
+    if result.returncode==expected:
+        check(c.state()['reason']==reason,'run snapshot: exact reason '+kind)
+        if kind=='tree-changed': check(c.git('rev-parse','HEAD').stdout.decode().strip()==c.base,'run snapshot: raced tree not committed')
+        if kind=='hook-fail':
+            check('hook refused' in result.stderr and c.git('diff','--cached','--name-only').stdout.strip()==b'tracked.txt','run snapshot: hook stderr and index retained')
+        if kind=='hook-timeout':
+            pgid=c.state()['last_dispatch']['pgid']
+            check(wait_group_gone(pgid,10),'run snapshot: timeout process group stopped')
+for kind in ('tree-changed','hook-fail','hook-content','hook-untracked','hook-timeout'):
+    with_case(lambda c,k=kind:run_snapshot_fault(c,k),name='run-snapshot-'+kind)
+
+def run_stage_or_tree_fault(c,kind):
+    c.calibrate('stop','commit')
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    if kind=='stage':
+        real=shutil.which('git'); wrapper=c.bin/'git'
+        wrapper.write_text('#!/bin/sh\nif [ "${1:-}" = add ] && [ "${2:-}" = -A ] && [ -z "${GIT_INDEX_FILE:-}" ]; then exit 1; fi\nexec '+shlex.quote(real)+' "$@"\n')
+        wrapper.chmod(0o755)
+    elif kind=='parent-moved':
+        real=shutil.which('git'); wrapper=c.bin/'git'
+        wrapper.write_text('''#!/bin/sh
+if [ "${1:-}" = commit ] && [ "${2:-}" = -F ]; then
+  REAL_GIT "$@" || exit $?
+  tree="$(REAL_GIT rev-parse 'HEAD^{tree}')"
+  base="$(REAL_GIT rev-parse 'HEAD^')"
+  parent="$(printf 'side\\n' | REAL_GIT commit-tree "$base^{tree}" -p "$base")"
+  replacement="$(printf 'replacement\\n' | REAL_GIT commit-tree "$tree" -p "$parent")"
+  REAL_GIT update-ref HEAD "$replacement"
+  exit $?
+fi
+exec REAL_GIT "$@"
+'''.replace('REAL_GIT',shlex.quote(real)))
+        wrapper.chmod(0o755)
+    else:
+        helper=c.tree.parent/'engineering-mode'/'scripts'/'tree-oid.sh'
+        helper.write_text('#!/bin/sh\nexit 3\n'); helper.chmod(0o755)
+    result=c.run_unit(6,'run stage or tree fault: '+kind)
+    if result.returncode==6:
+        expected_reason='stage-failed' if kind=='stage' else 'head-moved' if kind=='parent-moved' else 'tree-unbindable'
+        check(c.state()['reason']==expected_reason,'run stage or tree fault: reason '+kind)
+        if kind=='parent-moved':
+            check(c.git('rev-parse','HEAD^{tree}').stdout.decode().strip()==c.state()['tree'] and
+                  c.git('rev-parse','HEAD^').stdout.decode().strip()!=c.base,'run stage or tree fault: same tree, wrong parent')
+        else: check(c.state().get('commit') is None,'run stage or tree fault: no commit '+kind)
+for kind in ('stage','tree-unbindable','parent-moved'):
+    with_case(lambda c,k=kind:run_stage_or_tree_fault(c,k),name='run-stage-tree-'+kind)
+
+def hook_journal_event(c,ending):
+    hook=c.root/'gitadmin'/'hooks'/'pre-commit'; hook.parent.mkdir(parents=True,exist_ok=True)
+    journal=c.tree/'scripts'/'loop-journal'
+    hook.write_text('#!/bin/sh\n"'+str(journal)+'" append --event round.begin --field unit=unit-one --field round=1\n'+ending)
+    hook.chmod(0o755)
+
+def run_commit_event(c,kind):
+    if kind=='timeout' and not PS_AVAILABLE:
+        check(True,'commit journal event timeout: skipped; sandbox denies ps')
+        return
+    c.calibrate('stop','commit')
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    if kind=='success':
+        hook=c.root/'gitadmin'/'hooks'/'pre-commit'; hook.parent.mkdir(parents=True,exist_ok=True)
+        gate=c.tree/'scripts'/'run-gate.sh'
+        hook.write_text('#!/bin/sh\n"'+str(gate)+'" --purpose focused --log "'+str(c.root/'hook.log')+'" -- true >/dev/null 2>&1\n')
+        hook.chmod(0o755)
+    else:
+        hook_journal_event(c,{'failure':'echo hook failed >&2\nexit 1\n','timeout':'sleep 20\n'}[kind])
+    if kind=='timeout': c.cfg['caps']['commit_seconds']=3; c.write_config()
+    expected=7 if kind=='failure' else 6
+    result=c.run_unit(expected,'commit journal event: '+kind)
+    if result.returncode==expected:
+        reason={'success':'journal-write','failure':'commit-failed','timeout':'commit-timeout'}[kind]
+        check(c.state()['reason']==reason and not (c.cdir/'quarantine.json').exists(),
+              'commit journal event: reason without quarantine '+kind)
+        hook_event=(any(e['event']=='gate.result' and e.get('purpose')=='focused' for e in c.events()) if kind=='success' else
+                    sum(e['event']=='round.begin' and e.get('round')==1 for e in c.events())==2)
+        check(hook_event,
+              'commit journal event: hook event recorded '+kind)
+        if kind=='success':
+            commit=c.git('rev-parse','HEAD').stdout.decode().strip()
+            check(commit!=c.base and c.state()['commit']==commit and not (c.cdir/'units'/'unit-one'/'gate.log').exists(),
+                  'commit journal event: committed work retained and gate never started')
+        if kind=='timeout': check(wait_group_gone(c.state()['last_dispatch']['pgid'],10),'commit journal event: timed-out group stopped')
+for kind in ('success','failure','timeout'):
+    with_case(lambda c,k=kind:run_commit_event(c,k),name='run-commit-event-'+kind)
+
+def run_gate_event_timeout(c):
+    if not PS_AVAILABLE:
+        check(True,'gate journal event timeout: skipped; sandbox denies ps')
+        return
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    c.cfg['caps']['gate_seconds']=3; c.write_config()
+    c.env['COORD_JOURNAL_HELPER']=str(c.tree/'scripts'/'loop-journal')
+    gate_script(c,"import subprocess\nsubprocess.run([os.environ['COORD_JOURNAL_HELPER'],'append','--event','round.begin','--field','unit=unit-one','--field','round=1'],check=True)\npathlib.Path(os.environ['COORD_OBSERVED'],'gate-extra-written').touch()\ntime.sleep(20)\n")
+    result=c.run_unit(7,'gate journal event: timeout parks')
+    if result.returncode==7:
+        check(c.state()['reason']=='gate-timeout' and not (c.cdir/'quarantine.json').exists() and
+              (c.observed/'gate-extra-written').exists(),'gate journal event: own reason without quarantine')
+        check(wait_group_gone(c.state()['last_dispatch']['pgid'],10),'gate journal event: timed-out group stopped')
+with_case(run_gate_event_timeout,name='run-gate-event-timeout')
+
+def run_rejected_calibration(c):
+    if not c.ready():return
+    c.env['COORD_CAL_STORE']=str(c.env['COORD_CAL_STORE'])
+    path=pathlib.Path(c.env['COORD_CAL_STORE']); path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text('invalid calibration\n'); path.chmod(0o600)
+    before=c.state()
+    c.run_unit(5,'run calibration: rejected store exits 5')
+    check(c.state()==before,'run calibration: rejected store did not change state')
+with_case(run_rejected_calibration,name='run-rejected-calibration')
+
+def run_hidden_untracked(c,kind):
+    c.git('config','status.showUntrackedFiles','no')
+    if kind=='run' and not c.ready():return
+    scratch=c.ws/'private-notes.txt'; scratch.write_text('engineer scratch\n')
+    check(c.git('status','--porcelain').stdout==b'' and
+          b'private-notes.txt' in c.git('status','--porcelain','--untracked-files=all').stdout,
+          'hidden untracked: configuration hides fixture '+kind)
+    if kind=='spec':
+        result=c.run(['spec','--unit-file',str(c.unit_path)],3,'hidden untracked: spec refuses')
+        check('working tree is dirty' in result.stderr and not (c.cdir/'units').exists(),
+              'hidden untracked: spec changed no unit')
+    else:
+        state=(c.cdir/'units'/'unit-one'/'state.json').read_bytes()
+        segment=c.journal_dir/'runs'/(c.state()['run']+'.jsonl'); journal=segment.read_bytes()
+        result=c.run_unit(3,'hidden untracked: run refuses')
+        check('working tree is dirty' in result.stderr and state==(c.cdir/'units'/'unit-one'/'state.json').read_bytes() and journal==segment.read_bytes(),
+              'hidden untracked: run changed no state or journal')
+for kind in ('spec','run'):
+    with_case(lambda c,k=kind:run_hidden_untracked(c,k),name='run-hidden-untracked-'+kind)
+
+def run_abandon_unrecorded(c,step):
+    if not c.ready():return
+    path=c.cdir/'units'/'unit-one'/'state.json'; state=c.state()
+    state['state']='running'; state['step']={'name':step,'phase':'begun','target':None}
+    state['last_dispatch']={'pid':None,'pgid':None,'backend':None,'dispatch_id':None,'step':step}
+    path.write_text(json.dumps(state))
+    segment=c.journal_dir/'runs'/(state['run']+'.jsonl'); before=segment.read_bytes()
+    for n in (1,2):
+        result=c.run(['abandon','--unit','unit-one'],3,f'abandon unrecorded: {step} refusal {n}')
+        check('--dispatches-terminated' in result.stderr and step in result.stderr and segment.read_bytes()==before,
+              f'abandon unrecorded: {step} requires assertion before write {n}')
+    result=c.run(['abandon','--unit','unit-one','--dispatches-terminated'],0,f'abandon unrecorded: {step} attested')
+    if result.returncode==0: check(c.state()['state']=='abandoned','abandon unrecorded: closed '+step)
+for step in ('gate','implement-1'):
+    with_case(lambda c,s=step:run_abandon_unrecorded(c,s),name='run-abandon-unrecorded-'+step)
+
+def gate_script(c,body):
+    path=c.bin/'gate-test'
+    path.write_text('#!/usr/bin/env python3\nimport os,pathlib,sys,time\n'+body)
+    path.chmod(0o755)
+
+def run_gate_policy(c,kind):
+    if kind=='strict': c.calibrate('gate','strict')
+    else:
+        c.cfg['gate']['mode']='passthrough'; c.cfg['gate']['runner_unsupported']=True; c.write_config()
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    result=c.run_unit(0,'run gate policy: '+kind)
+    if result.returncode==0:
+        report=json.loads(result.stdout); event=next(e for e in c.events() if e['event']=='gate.result')
+        check(report['gate_policy']==kind and event['policy']==kind,'run gate policy: selected '+kind)
+        if kind=='passthrough': check(report['gate_limit']=='exit code only' and c.state()['gate_limit']=='exit code only','run gate policy: limitation reported')
+        if kind=='passthrough':
+            status=json.loads(c.run(['status','--json'],0,'run gate policy: status').stdout)['units'][0]
+            check(status['gate_limit']=='exit code only','run gate policy: status limitation')
+for kind in ('strict','passthrough'):
+    with_case(lambda c,k=kind:run_gate_policy(c,k),name='run-gate-policy-'+kind)
+
+def run_gate_fault(c,kind):
+    if kind=='timeout' and not PS_AVAILABLE:
+        check(True,'run gate timeout: skipped; sandbox denies ps')
+        return
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    if kind=='red': gate_script(c,"print('Ran 1 test in 0.001s\\n\\nFAILED (failures=1)'); sys.exit(1)\n")
+    elif kind=='changed': gate_script(c,"pathlib.Path('tracked.txt').write_text('gate changed\\n'); print('Ran 1 test in 0.001s\\n\\nOK')\n")
+    elif kind=='unavailable': wrap_tree_counter(c,{'call':3,'code':'sys.exit(3)'})
+    elif kind=='pre-capture':
+        path=c.tree/'scripts'/'run-gate.sh'; real=path.with_suffix('.real'); path.rename(real)
+        path.write_text('#!/bin/sh\nprintf "late\\n" > tracked.txt\nexec "'+str(real)+'" "$@"\n'); path.chmod(0o755)
+    elif kind in ('drop-gate','fail-gate','unattributed-gate','gate-unit','gate-round','gate-purpose','gate-policy','gate-disagree'):
+        c.wrap_journal(kind)
+    elif kind.startswith('binding-'):
+        c.wrap_journal('gate-'+kind)
+    elif kind=='extra-event':
+        c.env['COORD_JOURNAL_HELPER']=str(c.tree/'scripts'/'loop-journal')
+        gate_script(c,"import subprocess\nsubprocess.run([os.environ['COORD_JOURNAL_HELPER'],'append','--event','round.begin','--field','unit=unit-one','--field','round=1'],check=True)\nprint('Ran 1 test in 0.001s\\n\\nOK')\n")
+    elif kind=='stale':
+        c.wrap_journal('fail-gate')
+        c.env['COORD_JOURNAL_HELPER']=str(c.tree/'scripts'/'loop-journal.real')
+        c.env['COORD_BASE']=c.base
+        c.env['COORD_TREE']=c.git('rev-parse','HEAD^{tree}').stdout.decode().strip()
+        c.action(2,write={'tracked.txt':'after\n'},inject_gate=True)
+    elif kind=='usage':
+        path=c.tree/'scripts'/'run-gate.sh'; path.write_text('#!/bin/sh\nexit 2\n'); path.chmod(0o755)
+    elif kind=='timeout':
+        c.cfg['caps']['gate_seconds']=1; c.write_config()
+        gate_script(c,"pathlib.Path(os.environ['COORD_OBSERVED'],'gate-started').touch(); time.sleep(5)\n")
+    expected=7 if kind in ('red','timeout') else 6
+    result=c.run_unit(expected,'run gate fault: '+kind)
+    reason='gate-red' if kind=='red' else 'gate-timeout' if kind=='timeout' else 'gate-binding' if kind in ('changed','unavailable','pre-capture') or kind.startswith('binding-') else 'gate-record'
+    if result.returncode==expected:
+        check(c.state()['reason']==reason,'run gate fault: reason '+kind)
+        if kind=='red': check(c.state()['gate_log'] in result.stdout and pathlib.Path(c.state()['gate_log']).exists(),'run gate fault: red log printed')
+        if kind=='timeout': check((c.observed/'gate-started').exists() and wait_group_gone(c.state()['last_dispatch']['pgid'],10),'run gate fault: timeout stopped process')
+        if kind=='stale':
+            events=c.events(); check(sum(e['event']=='gate.result' for e in events)==1 and events[-1]['event']=='run.end','run gate fault: old green did not rescue missing event')
+        if kind=='unattributed-gate': check((c.journal_dir/'unattributed.jsonl').exists(),'run gate fault: unattributed event captured')
+for kind in ('red','changed','unavailable','pre-capture','drop-gate','fail-gate','unattributed-gate',
+             'gate-unit','gate-round','gate-purpose','gate-policy','gate-disagree',
+             'binding-pre-head','binding-post-head','binding-pre-tree','binding-post-tree','binding-label',
+             'extra-event','stale','usage','timeout'):
+    with_case(lambda c,k=kind:run_gate_fault(c,k),name='run-gate-fault-'+kind)
+
+def run_nested_gate_event(c):
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    helper=c.tree/'scripts'/'run-gate.sh'; inner=c.root/'nested-gate.log'
+    gate_script(c,"import subprocess\nsubprocess.run(["+repr(str(helper))+",'--purpose','focused','--log',"+
+                repr(str(inner))+",'--','true'],check=True,capture_output=True)\nprint('Ran 1 test in 0.001s\\n\\nOK')\n")
+    result=c.run_unit(6,'nested gate: extra focused event blocks')
+    if result.returncode==6:
+        events=[e for e in c.events() if e['event']=='gate.result']
+        check(c.state()['reason']=='gate-record' and [e['purpose'] for e in events]==['focused','unit-final'] and
+              not (c.cdir/'quarantine.json').exists(),'nested gate: one writer rule enforced without quarantine')
+with_case(run_nested_gate_event,name='run-nested-gate-event')
+
+def run_gate_exit_mismatch(c):
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    path=c.tree/'scripts'/'run-gate.sh'; real=path.with_suffix('.real'); path.rename(real)
+    path.write_text('#!/bin/sh\n"'+str(real)+'" "$@"\nexit 13\n'); path.chmod(0o755)
+    result=c.run_unit(6,'run gate: wrapper exit 13 conflicts with green record')
+    if result.returncode==6:
+        check(c.state()['reason']=='gate-record' and next(e for e in c.events() if e['event']=='gate.result')['gate_exit']==0,
+              'run gate: record and observed exit must agree')
+with_case(run_gate_exit_mismatch,name='run-gate-exit-mismatch')
+
+def run_gate_exit_contract(c,kind,stop='worktree'):
+    if stop=='commit': c.calibrate('stop','commit')
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    if kind=='forged':
+        c.env['COORD_JOURNAL_HELPER']=str(c.tree/'scripts'/'loop-journal')
+        c.env['COORD_TREE_HELPER']=str(c.tree.parent/'engineering-mode'/'scripts'/'tree-oid.sh')
+        gate_script(c,"""import subprocess,signal
+head=subprocess.run(['git','rev-parse','HEAD'],capture_output=True,text=True,check=True).stdout.strip()
+head_tree=subprocess.run(['git','rev-parse','HEAD^{tree}'],capture_output=True,text=True,check=True).stdout.strip()
+tree=subprocess.run([os.environ['COORD_TREE_HELPER']],capture_output=True,text=True,check=True).stdout.strip()
+fields=['policy=strict','purpose=unit-final','binding='+('clean' if tree==head_tree else 'dirty'),
+        'verdict=green','gate_exit=0','pre_head='+head,'post_head='+head,'pre_tree='+tree,'post_tree='+tree]
+subprocess.run([os.environ['COORD_JOURNAL_HELPER'],'append','--event','gate.result',
+                *[v for field in fields for v in ('--field',field)]],check=True)
+print('Ran 1 test in 0.001s\\n\\nFAILED (failures=1)',flush=True)
+os.kill(os.getppid(),signal.SIGKILL)
+sys.exit(1)
+""")
+    elif kind=='red-wrapper-zero':
+        gate_script(c,"print('Ran 1 test in 0.001s\\n\\nFAILED (failures=1)'); sys.exit(1)\n")
+        path=c.tree/'scripts'/'run-gate.sh'; real=path.with_suffix('.real'); path.rename(real)
+        path.write_text('#!/bin/sh\n"'+str(real)+'" "$@"\nexit 0\n'); path.chmod(0o755)
+    elif kind=='unexecutable':
+        (c.tree/'scripts'/'run-gate.sh').chmod(0o644)
+    result=c.run_unit(6,f'gate exit contract: {kind} {stop}')
+    if result.returncode==6:
+        check(c.state()['reason']=='gate-record' and not (c.cdir/'quarantine.json').exists(),
+              f'gate exit contract: gate-record {kind} {stop}')
+        if kind=='forged':
+            check('FAILED' in (c.cdir/'units'/'unit-one'/'gate.log').read_text() and
+                  any(e['event']=='gate.result' and e.get('verdict')=='green' for e in c.events()),
+                  f'gate exit contract: forged green record and red log {stop}')
+        if kind=='unexecutable':
+            check('Permission denied' in result.stderr and c.state().get('detail') and '\\n' not in result.stderr,
+                  'gate exit contract: start error reported safely')
+for kind,stop in (('forged','worktree'),('forged','commit'),('red-wrapper-zero','worktree'),('unexecutable','worktree')):
+    with_case(lambda c,k=kind,s=stop:run_gate_exit_contract(c,k,s),name='run-gate-exit-'+kind+'-'+stop)
+
+def run_gate_cap_after_event(c):
+    if not PS_AVAILABLE:
+        check(True,'run gate cap after event: skipped; sandbox denies ps')
+        return
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    c.cfg['caps']['gate_seconds']=9; c.write_config()
+    marker=c.observed/'gate-event-written'
+    path=c.tree/'scripts'/'run-gate.sh'; real=path.with_suffix('.real'); path.rename(real)
+    path.write_text('#!/bin/sh\n"'+str(real)+'" "$@"\nprintf x > "'+str(marker)+'"\nsleep 20\n'); path.chmod(0o755)
+    result=c.run_unit(7,'run gate cap: green event still times out')
+    if result.returncode==7:
+        check(marker.exists() and c.state()['reason']=='gate-timeout','run gate cap: event ignored after deadline')
+        check(any(e['event']=='gate.result' and e.get('verdict')=='green' for e in c.events()),'run gate cap: green event really present')
+        check(wait_group_gone(c.state()['last_dispatch']['pgid'],10),'run gate cap: process group stopped')
+with_case(run_gate_cap_after_event,name='run-gate-cap-after-event')
+
+def run_waiting_gate_event(c):
+    if not c.ready():return
+    appended=c.journal('append','--event','gate.result','--field','policy=strict','--field','purpose=unit-final',
+                       '--field','binding=dirty','--field','verdict=green','--field','gate_exit=0')
+    check(appended.returncode==0,'run old event: manual gate appended')
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    result=c.run_unit(0,'run old event: new work succeeds')
+    if result.returncode==0: check(sum(e['event']=='gate.result' for e in c.events())==2,'run old event: old and new records coexist')
+with_case(run_waiting_gate_event,name='run-waiting-gate-event')
+
+def run_calibration_after_review(c,kind):
+    c.calibrate('gate','baseline')
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    if kind=='stop': c.action(3,calibrate=['stop','commit'])
+    elif kind=='matrix': c.action(3,calibrate=['gate','skip'])
+    else: c.action(3,corrupt_calibration=True)
+    result=c.run_unit(0 if kind=='stop' else 6,'run calibration reread: '+kind)
+    if kind=='stop' and result.returncode==0:
+        check(json.loads(result.stdout)['path']=='commit' and c.state()['stop_point']=='commit','run calibration reread: new stop applied')
+    elif result.returncode==6:
+        check(c.state()['reason']==('gate-matrix' if kind=='matrix' else 'calibration'),'run calibration reread: block reason '+kind)
+for kind in ('stop','matrix','bad-store'):
+    with_case(lambda c,k=kind:run_calibration_after_review(c,k),name='run-calibration-'+kind)
+
+def run_implement_prompt_cap(c):
+    c.set_response(c.valid_spec().replace('Change tracked.txt.','X'*2000))
+    if not c.ready():return
+    c.cfg['caps']['prompt_bytes']=1000; c.write_config()
+    result=c.run_unit(7,'run implement cap: over limit parks')
+    if result.returncode==7:
+        check(c.state()['reason']=='too-large' and not (c.observed/'prompt-2.txt').exists(),'run implement cap: nothing sent')
+with_case(run_implement_prompt_cap,name='run-implement-cap')
+
+def run_dispatch_fault(c,kind):
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    if kind=='start':
+        path=c.tree/'backends'/'codex'/'dispatch.sh'; path.unlink()
+    elif kind=='state-dir': c.wrap_index_missing()
+    elif kind=='final-message':
+        path=c.tree/'backends'/'codex'/'dispatch.sh'; real=path.with_suffix('.real'); path.rename(real)
+        path.write_text('#!/bin/sh\n"'+str(real)+'" "$@"\nrc=$?\nfind "'+str(c.home/'.config'/'olddonkey-loop'/'codex')+'" -name last-message.txt -delete\nexit $rc\n'); path.chmod(0o755)
+    elif kind=='mode':
+        c.wrap_journal('implement-start-mode')
+    elif kind=='round': c.wrap_journal('implement-start-round')
+    elif kind=='end-round': c.wrap_journal('implement-end-round')
+    elif kind=='backend': c.wrap_journal('implement-start-backend')
+    elif kind=='end-unit': c.wrap_journal('implement-end-unit')
+    elif kind=='end-exit': c.wrap_journal('end-exit')
+    result=c.run_unit(7 if kind=='start' else 6,'run dispatch fault: '+kind)
+    check(c.state()['reason']==('implement-dispatch-failed' if kind=='start' else 'dispatch-identity' if kind in ('mode','round','end-round','backend','end-unit','end-exit') else kind),'run dispatch fault: reason '+kind)
+for kind in ('start','state-dir','final-message','mode','round','end-round','backend','end-unit','end-exit'):
+    with_case(lambda c,k=kind:run_dispatch_fault(c,k),name='run-dispatch-fault-'+kind)
+
+def run_spec_prompt(c):
+    oversized=c.valid_spec().replace('Change tracked.txt.','X'*10001)
+    c.set_sequence(oversized,oversized)
+    result=c.run(['spec','--unit-file',str(c.unit_path)],6,'run spec prompt: over 10000 rejected')
+    check('over 10000 bytes' in result.stderr,'run spec prompt: exact new size detail')
+    prompt=(c.observed/'prompt-1.txt').read_text()
+    check('Specify what the change must do and what its tests must prove.' in prompt and
+          'Where two behaviours are defensible' in prompt and 'Stay under 8000 bytes.' in prompt,
+          'run spec prompt: new drafting rules')
+    c.make_unit('whitespace-unit')
+    c.set_response(c.valid_spec()+' '*10001)
+    result=c.run(['spec','--unit-file',str(c.unit_path)],6,'run spec prompt: oversized whitespace rejected')
+    check('over 10000 bytes' in result.stderr,'run spec prompt: raw reply bytes counted')
+    c.make_unit('retry-unit')
+    injected='BAD RESPONSE SECRET SHOULD NOT ECHO'
+    c.set_sequence(injected,c.valid_spec())
+    result=c.run(['spec','--unit-file',str(c.unit_path)],0,'run spec prompt: retry works')
+    if result.returncode==0:
+        retry=(c.observed/'prompt-2.txt').read_text()
+        check(retry.rstrip().endswith('Your previous reply could not be used: first line is not Unit:.'),
+              'run spec prompt: fixed validator detail ends retry prompt')
+        check(injected not in retry,'run spec prompt: invalid reply omitted')
+        environment=(c.cdir/'units'/'retry-unit'/'spec.txt').read_text().split('## Environment\n',1)[1]
+        check('Leave your changes in the working tree you are given.' in environment and
+              'copy that has no git repository' in environment and '`.git` is read-only' not in environment,
+              'run spec prompt: environment describes copy')
+with_case(run_spec_prompt,name='run-spec-prompt')
+
+def run_environment(c):
+    c.calibrate('stop','commit')
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    c.env.update(LOOP_CONTEXT=str(c.root/'poison'),LOOP_JOURNAL='poison',LOOP_TREE_OID='poison',
+                 LOOP_UNIT='wrong',LOOP_ROUND='9',GIT_DIR=str(c.root/'poison-git'),
+                 GIT_WORK_TREE=str(c.root/'poison-work'),CLAUDE_LOOP_MODEL='poison',CODEX_LOOP_MODEL='poison',
+                 COORD_CHECK_STDIN='1')
+    gate_script(c,"import stat\npathlib.Path(os.environ['COORD_OBSERVED'],'gate-env.txt').write_text('\\n'.join(f'{k}={v}' for k,v in os.environ.items()))\na=os.fstat(0); b=os.stat('/dev/null'); pathlib.Path(os.environ['COORD_OBSERVED'],'gate-stdin.txt').write_text(str(stat.S_ISCHR(a.st_mode) and a.st_rdev==b.st_rdev))\nprint('Ran 1 test in 0.001s\\n\\nOK')\n")
+    hook=c.root/'gitadmin'/'hooks'/'pre-commit'; hook.parent.mkdir(parents=True,exist_ok=True)
+    hook.write_text('#!/bin/sh\nenv > "$COORD_OBSERVED/commit-env.txt"\npython3 -c "import os,stat; a=os.fstat(0); b=os.stat(\'/dev/null\'); open(os.environ[\'COORD_OBSERVED\']+\'/commit-stdin.txt\',\'w\').write(str(stat.S_ISCHR(a.st_mode) and a.st_rdev==b.st_rdev))"\n')
+    hook.chmod(0o755)
+    result=c.run_unit(0,'run environment: clean children')
+    if result.returncode==0:
+        for name in ('env-2.txt','gate-env.txt','commit-env.txt'):
+            data=(c.observed/name).read_text()
+            check('LOOP_UNIT=unit-one' in data and 'LOOP_ROUND=1' in data and
+                  all(key+'=' not in data for key in ('LOOP_CONTEXT','LOOP_JOURNAL','LOOP_TREE_OID','CLAUDE_LOOP_MODEL','CODEX_LOOP_MODEL')) and
+                  str(c.root/'poison-git') not in data and str(c.root/'poison-work') not in data and
+                  (name=='commit-env.txt' or ('GIT_DIR=' not in data and 'GIT_WORK_TREE=' not in data)),
+                  'run environment: scrubbed and attributed '+name)
+        check(all((c.observed/name).read_text()=='True' for name in ('stdin-2.txt','commit-stdin.txt','gate-stdin.txt')),
+              'run environment: implement, commit and gate stdin null')
+with_case(run_environment,name='run-environment')
+
+def run_caller_umask(c,mask,backend):
+    if backend=='codex': c.calibrate('stop','commit')
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n','newfile.txt':'new\n'}); c.set_response(c.verdict())
+    gate_script(c,"m=os.umask(0); os.umask(m); pathlib.Path(os.environ['COORD_OBSERVED'],'gate-umask').write_text(oct(m))\nprint('Ran 1 test in 0.001s\\n\\nOK')\n")
+    if backend=='codex':
+        hook=c.root/'gitadmin'/'hooks'/'pre-commit'; hook.parent.mkdir(parents=True,exist_ok=True)
+        hook.write_text('#!/bin/sh\numask > "$COORD_OBSERVED/hook-umask"\n'); hook.chmod(0o755)
+    result=subprocess.run([str(c.coordinator),'run','--unit','unit-one'],cwd=c.ws,env=c.env,
+                          capture_output=True,text=True,preexec_fn=lambda: os.umask(mask))
+    check(result.returncode==0,f'caller umask: run {backend} {mask:03o}',result.stderr)
+    if result.returncode:
+        return
+    observed=int((c.observed/'gate-umask').read_text(),8)
+    check(observed==mask,f'caller umask: gate inherits {mask:03o} {backend}')
+    check((c.cdir/'units'/'unit-one'/'state.json').stat().st_mode & 0o777==0o600 and
+          (c.cdir/'units'/'unit-one'/'gate.log').stat().st_mode & 0o777==0o600,
+          f'caller umask: private state and gate log 0600 {backend} {mask:03o}')
+    if backend=='codex':
+        check(int((c.observed/'hook-umask').read_text().strip(),8)==mask,
+              f'caller umask: commit hook inherits {mask:03o}')
+    else:
+        mode=(c.ws/'newfile.txt').stat().st_mode & 0o777
+        check(mode==(0o666 & ~mask),f'caller umask: cursor-created file mode {mode:03o} under {mask:03o}')
+for mask in (0o022,0o027):
+    with_case(lambda c,m=mask:run_caller_umask(c,m,'codex'),name=f'run-umask-commit-{mask:03o}')
+    with_case(lambda c,m=mask:run_caller_umask(c,m,'cursor'),judge='codex',implementer='cursor',name=f'run-umask-cursor-{mask:03o}')
+
+def run_child_signal_masks(c):
+    if not c.ready():return
+    c.env['COORD_RECORD_MASK']='1'
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    gate_script(c,"import json,signal\nblocked=signal.pthread_sigmask(signal.SIG_BLOCK,[])\npathlib.Path(os.environ['COORD_OBSERVED'],'gate-signal-mask.json').write_text(json.dumps(sorted(int(x) for x in blocked)))\nprint('Ran 1 test in 0.001s\\n\\nOK')\n")
+    result=c.run_unit(0,'child signal masks: run reaches engineer')
+    if result.returncode:
+        return
+    forbidden={int(signal.SIGINT),int(signal.SIGTERM),int(signal.SIGHUP)}
+    for name in ('implement','gate'):
+        observed=set(json.loads((c.observed/(name+'-signal-mask.json')).read_text()))
+        check(not forbidden & observed,'child signal masks: '+name+' unblocks INT TERM HUP',repr(observed))
+with_case(run_child_signal_masks,name='run-child-signal-masks')
+
+def run_output_safety(c,kind):
+    if kind in ('commit','stage'): c.calibrate('stop','commit')
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    unsafe='x'*3000+'\x1b]0;owned\x07\rraw line\n\t'+'y'*100
+    if kind=='commit':
+        script=c.root/'hook-output.py'; script.write_text('import sys\nsys.stderr.buffer.write('+repr(unsafe.encode())+')\n')
+        hook=c.root/'gitadmin'/'hooks'/'pre-commit'; hook.parent.mkdir(parents=True,exist_ok=True)
+        hook.write_text('#!/bin/sh\npython3 "'+str(script)+'"\nexit 1\n'); hook.chmod(0o755)
+    elif kind=='stage':
+        real=shutil.which('git'); wrapper=c.bin/'git'
+        script=c.root/'stage-output.py'; script.write_text('import sys\nsys.stderr.buffer.write('+repr(unsafe.encode())+')\n')
+        wrapper.write_text('#!/bin/sh\nif [ "${1:-}" = add ] && [ -z "${GIT_INDEX_FILE:-}" ]; then python3 "'+str(script)+'" >&2; exit 1; fi\nexec '+shlex.quote(real)+' "$@"\n')
+        wrapper.chmod(0o755)
+    else:
+        target='implement-1' if kind=='dispatch' else 'gate'
+        script=c.coordinator; source=script.read_text()
+        needle='                proc = subprocess.Popen([str(x) for x in argv], cwd=WS,'
+        check(needle in source,'output safety: launch injection point '+kind)
+        source=source.replace(needle,'                if label == '+repr(target)+':\n                    raise OSError('+repr(unsafe)+')\n'+needle,1)
+        script.write_text(source); script.chmod(0o755)
+    expected=7 if kind in ('commit','dispatch') else 6
+    result=c.run_unit(expected,'output safety: '+kind)
+    if result.returncode==expected:
+        reason={'commit':'commit-failed','stage':'stage-failed','dispatch':'implement-dispatch-failed','gate':'gate-record'}[kind]
+        detail=c.state().get('detail','')
+        check(c.state()['reason']==reason and bool(detail),'output safety: stored reason and detail '+kind)
+        check(not any(ord(ch)<32 for ch in result.stderr.rstrip('\n')) and
+              not any(ord(ch)<32 for ch in detail) and len(result.stderr.encode())<2600,
+              'output safety: terminal and state contain only escaped bounded text '+kind)
+        if kind=='commit':
+            raw=(c.cdir/'units'/'unit-one'/'commit.stderr').read_bytes()
+            check(len(raw)>3000 and b'\x1b' in raw and 'commit.stderr' in result.stderr,
+                  'output safety: full raw commit stderr retained privately')
+for kind in ('commit','stage','dispatch','gate'):
+    with_case(lambda c,k=kind:run_output_safety(c,k),name='run-output-safety-'+kind)
+
+def run_lifecycle(c,kind):
+    if kind=='after-commit': c.calibrate('stop','commit')
+    if not c.ready():return
+    c.set_response(c.verdict())
+    c.action(2,write={'tracked.txt':'after\n'})
+    release=c.root/'release-run'
+    if kind=='implement': c.env['COORD_WAIT_FILE']=str(release)
+    if kind=='gate':
+        gate_script(c,"pathlib.Path(os.environ['COORD_OBSERVED'],'gate-started').touch()\nrelease=pathlib.Path(os.environ['COORD_RELEASE']); deadline=time.monotonic()+30\nwhile not release.exists() and time.monotonic()<deadline: time.sleep(0.05)\nprint('Ran 1 test in 0.001s\\n\\nOK')\n")
+        c.env['COORD_RELEASE']=str(release)
+    if kind=='after-commit':
+        script=c.coordinator; source=script.read_text()
+        old="            log = unit_dir(args.unit) / 'gate.log'"
+        check(old in source,'run lifecycle: commit boundary found')
+        source=source.replace(old,"            os.kill(int(os.environ['COORD_KILL_PID']), signal.SIGKILL)\n"+old,1)
+        script.write_text(source); script.chmod(0o755)
+    if kind=='after-gate': c.wrap_journal('kill-after-gate')
+    proc=c.launch_killable('run','--unit','unit-one')
+    try:
+        path=c.cdir/'units'/'unit-one'/'state.json'
+        if kind in ('implement','gate'):
+            expected='implement-1' if kind=='implement' else 'gate'
+            marker=c.observed/('env-2.txt' if kind=='implement' else 'gate-started')
+            seen=wait_for(lambda: marker.exists() and path.exists() and json.loads(path.read_text()).get('step',{}).get('name')==expected,30)
+            check(seen,'run lifecycle: reached '+kind)
+            if not seen:return
+            pgid=c.state()['last_dispatch']['pgid']
+            proc.kill()
+        out,err=proc.communicate(timeout=45)
+        check(proc.returncode==-9,'run lifecycle: coordinator killed '+kind,err)
+        if kind in ('after-commit','after-gate'):
+            check(c.git('rev-parse','HEAD').stdout.decode().strip()!=c.base if kind=='after-commit' else any(e['event']=='gate.result' for e in c.events()),
+                  'run lifecycle: post-effect evidence '+kind)
+        if kind=='gate':
+            before=(c.cdir/'units'/'unit-one'/'state.json').read_bytes(),(c.journal_dir/'runs'/(c.state()['run']+'.jsonl')).read_bytes()
+            refused=c.run(['abandon','--unit','unit-one'],3,'run lifecycle: live gate blocks abandon')
+            check(str(pgid) in refused.stdout+refused.stderr,'run lifecycle: live gate named')
+            after=(c.cdir/'units'/'unit-one'/'state.json').read_bytes(),(c.journal_dir/'runs'/(c.state()['run']+'.jsonl')).read_bytes()
+            # Reconciliation is allowed to record the unknown outcome before the refusal.
+            check(before[1]==after[1],'run lifecycle: refused abandon leaves journal untouched')
+        release.touch()
+        if kind in ('implement','gate'):
+            check(wait_group_gone(pgid,30),'run lifecycle: child group eventually exits '+kind)
+        unknown=c.run_unit(9,'run lifecycle: next command reports unknown '+kind)
+        reason='commit' if kind=='after-commit' else 'gate' if kind in ('gate','after-gate') else 'implement-1'
+        check(f'unknown-outcome({reason})' in unknown.stderr and c.state()['reason']==reason,'run lifecycle: step named '+kind)
+        closed=c.run(['abandon','--unit','unit-one'],0,'run lifecycle: abandon closes '+kind)
+        check('branch: canvas/unit-one' in closed.stdout and c.state()['state']=='abandoned' and
+              c.git('branch','--show-current').stdout.decode().strip()=='canvas/unit-one',
+              'run lifecycle: branch retained '+kind)
+    finally:
+        release.touch(exist_ok=True)
+        if proc.poll() is None: proc.kill(); proc.wait()
+for kind in ('implement','after-commit','gate','after-gate'):
+    with_case(lambda c,k=kind:run_lifecycle(c,k),name='run-lifecycle-'+kind)
+
+def run_live_commit_abandon(c):
+    c.calibrate('stop','commit')
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    marker=c.observed/'commit-started'; release=c.root/'release-commit'
+    hook=c.root/'gitadmin'/'hooks'/'pre-commit'; hook.parent.mkdir(parents=True,exist_ok=True)
+    hook.write_text('#!/bin/sh\nprintf x > "'+str(marker)+'"\nwhile [ ! -e "'+str(release)+'" ]; do sleep 0.05; done\n')
+    hook.chmod(0o755)
+    proc=c.launch_killable('run','--unit','unit-one')
+    try:
+        seen=wait_for(lambda: marker.exists() and c.state()['step']['name']=='commit',30)
+        check(seen,'run commit liveness: hook reached')
+        if not seen:return
+        pgid=c.state()['last_dispatch']['pgid']
+        proc.kill(); proc.communicate(timeout=10)
+        check(c.run(['abandon','--unit','unit-one'],3,'run commit liveness: abandon refuses live commit').returncode==3 and c.state()['last_dispatch']['pgid']==pgid,
+              'run commit liveness: recorded commit group used')
+        release.touch()
+        check(wait_group_gone(pgid,30),'run commit liveness: commit group finished')
+        result=c.run(['abandon','--unit','unit-one'],0,'run commit liveness: abandon after hook exits')
+        if result.returncode==0: check(c.state()['state']=='abandoned','run commit liveness: run closed')
+    finally:
+        release.touch(exist_ok=True)
+        if proc.poll() is None: proc.kill(); proc.wait()
+with_case(run_live_commit_abandon,name='run-live-commit-abandon')
+
+def pid_alive_non_zombie(pid):
+    try: result=subprocess.run(['ps','-p',str(pid),'-o','stat='],capture_output=True,text=True)
+    except OSError: return True
+    return result.returncode==0 and any(line.strip() and not line.strip().startswith('Z') for line in result.stdout.splitlines())
+
+def launch_with_disposition(c,args,defaults=(),ignored=()):
+    program='''import os,signal,sys
+for number in DEFAULTS: signal.signal(number,signal.SIG_DFL)
+for number in IGNORED: signal.signal(number,signal.SIG_IGN)
+os.environ['COORD_KILL_PID']=str(os.getpid())
+os.execv(sys.argv[1],sys.argv[1:])
+'''.replace('DEFAULTS',repr(tuple(int(x) for x in defaults))).replace('IGNORED',repr(tuple(int(x) for x in ignored)))
+    return subprocess.Popen([sys.executable,'-c',program,str(c.coordinator),*args],cwd=c.ws,env=c.env,
+                            stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+
+def failing_ps(c):
+    path=c.bin/'ps'; path.write_text('#!/bin/sh\nexit 1\n'); path.chmod(0o755)
+
+def run_unreadable_ps(c,kind):
+    if kind=='spec-cap':
+        failing_ps(c)
+        c.env['COORD_SLEEP']='12'; c.cfg['caps']['dispatch_seconds']=2; c.write_config()
+        result=c.run(['spec','--unit-file',str(c.unit_path)],7,'unreadable ps: read-only spec cap parks')
+        if result.returncode==7: check(c.state()['reason']=='spec-dispatch-failed' and 'timeout' in result.stderr,
+                                       'unreadable ps: read-only outcome preserved')
+        return
+    if kind=='commit-cap': c.calibrate('stop','commit')
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    failing_ps(c)
+    if kind=='review-cap':
+        c.action(3,sleep=15)
+        c.cfg['caps']['dispatch_seconds']=2; c.write_config()
+        result=c.run_unit(7,'unreadable ps: run review timeout parks')
+        if result.returncode==7:
+            check(c.state()['reason']=='review-dispatch-failed' and 'timeout' in result.stderr and
+                  wait_group_gone(c.state()['last_dispatch']['pgid'],10),
+                  'unreadable ps: read-only review keeps its outcome')
+        return
+    marker=c.observed/'ps-fail-started'; heartbeat=c.ws/'ps-fail-heartbeat.txt'
+    if kind.startswith('gate'):
+        path=c.tree/'scripts'/'run-gate.sh'
+        path.write_text('''#!/usr/bin/env python3
+import os,pathlib,signal,time
+marker=pathlib.Path(os.environ['COORD_OBSERVED'],'ps-fail-started')
+heartbeat=pathlib.Path('ps-fail-heartbeat.txt')
+def stopped(*_):
+    pathlib.Path(os.environ['COORD_OBSERVED'],'ps-fail-stopped').touch()
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM,stopped)
+marker.touch()
+while True:
+    with heartbeat.open('a') as stream: stream.write('.')
+    time.sleep(0.05)
+'''); path.chmod(0o755)
+        c.cfg['caps']['gate_seconds']=2; c.write_config()
+    elif kind=='commit-cap':
+        hook=c.root/'gitadmin'/'hooks'/'pre-commit'; hook.parent.mkdir(parents=True,exist_ok=True)
+        hook.write_text('#!/bin/sh\nprintf x > "'+str(marker)+'"\nsleep 15\n'); hook.chmod(0o755)
+        c.cfg['caps']['commit_seconds']=2; c.write_config()
+    elif kind=='implement-cap':
+        c.action(2,write={'tracked.txt':'after\n'},sleep=15)
+        c.cfg['caps']['dispatch_seconds']=2; c.write_config()
+    if kind=='gate-signal':
+        proc=launch_with_disposition(c,['run','--unit','unit-one'],defaults=(signal.SIGTERM,))
+        try:
+            seen=wait_for(marker.exists,20); check(seen,'unreadable ps: gate started before signal',
+                                                   f'poll={proc.poll()} stderr={proc.stderr.read() if proc.poll() is not None else "running"}')
+            if not seen:return
+            os.kill(proc.pid,signal.SIGTERM)
+            out,err=proc.communicate(timeout=20)
+            check(proc.returncode==9,'unreadable ps: signalled gate is unknown',err)
+        finally:
+            if proc.poll() is None: proc.kill(); proc.wait()
+    else:
+        result=c.run_unit(9,'unreadable ps: '+kind+' is unknown')
+        if result.returncode!=9:return
+    step={'gate-cap':'gate','gate-signal':'gate','commit-cap':'commit','implement-cap':'implement-1'}[kind]
+    check(c.state()['reason']==step and c.state()['state']=='unknown-outcome',
+          'unreadable ps: step named '+kind)
+    check(wait_group_gone(c.state()['last_dispatch']['pgid'],10),'unreadable ps: created group stopped '+kind)
+    if kind.startswith('gate'):
+        check(heartbeat.exists() and (c.observed/'ps-fail-stopped').exists(),
+              'unreadable ps: gate received TERM '+kind)
+        size=heartbeat.stat().st_size; time.sleep(0.2)
+        check(heartbeat.stat().st_size==size,'unreadable ps: gate stopped writing '+kind)
+    if kind=='implement-cap':
+        pid=int((c.observed/'cli-2.pid').read_text())
+        try: os.kill(pid,signal.SIGKILL)
+        except ProcessLookupError: pass
+for kind in ('spec-cap','review-cap','gate-cap','commit-cap','implement-cap','gate-signal'):
+    with_case(lambda c,k=kind:run_unreadable_ps(c,k),name='run-ps-unreadable-'+kind)
+
+def run_stuck_ps(c,kind):
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    marker=c.observed/'stuck-ps-pid'; c.env['COORD_STUCK_PS_PID']=str(marker)
+    path=c.tree/'scripts'/'run-gate.sh'
+    path.write_text('#!/usr/bin/env python3\nimport os,pathlib,time\npathlib.Path(os.environ["COORD_STUCK_PS_PID"]).write_text(str(os.getpid()))\ntime.sleep(15)\n'); path.chmod(0o755)
+    ps=c.bin/'ps'; ps.write_text('''#!/usr/bin/env python3
+import os,pathlib,sys
+path=pathlib.Path(os.environ['COORD_STUCK_PS_PID'])
+pid=path.read_text().strip() if path.exists() else '999999'
+if any('ppid=' in x for x in sys.argv): print(f'{pid} 1 {pid} S')
+else: print(f'{pid} {pid} S')
+'''); ps.chmod(0o755)
+    script=c.coordinator; source=script.read_text()
+    old='((signal.SIGTERM, 10), (signal.SIGKILL, 2)):\n        for pgid in groups:'
+    check(old in source,'stuck ps: stop deadline injection point')
+    source=source.replace(old,'((signal.SIGTERM, 0.2), (signal.SIGKILL, 0.2)):\n        for pgid in groups:',1)
+    script.write_text(source); script.chmod(0o755)
+    if kind=='cap':
+        c.cfg['caps']['gate_seconds']=2; c.write_config()
+        result=c.run_unit(9,'stuck ps: capped gate unknown')
+        if result.returncode!=9:return
+    else:
+        proc=launch_with_disposition(c,['run','--unit','unit-one'],defaults=(signal.SIGTERM,))
+        try:
+            seen=wait_for(marker.exists,20); check(seen,'stuck ps: gate started before signal',
+                                                   f'poll={proc.poll()} stderr={proc.stderr.read() if proc.poll() is not None else "running"}')
+            if not seen:return
+            os.kill(proc.pid,signal.SIGTERM)
+            out,err=proc.communicate(timeout=20)
+            check(proc.returncode==9,'stuck ps: signalled gate unknown',err)
+        finally:
+            if proc.poll() is None: proc.kill(); proc.wait()
+    check(c.state()['reason']=='gate' and c.state()['state']=='unknown-outcome','stuck ps: survivor leaves unknown '+kind)
+for kind in ('cap','signal'):
+    with_case(lambda c,k=kind:run_stuck_ps(c,k),name='run-ps-stuck-'+kind)
+
+def gate_term_ignoring_writer(c):
+    gate_script(c,"""import subprocess,signal
+code="import signal,sys,time\\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\\nwhile True:\\n open(sys.argv[1],'a').write('.')\\n time.sleep(0.05)"
+child=subprocess.Popen([sys.executable,'-c',code,'gate-term-writer.txt'],start_new_session=True,
+                       stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+pathlib.Path(os.environ['COORD_OBSERVED'],'term-writer.pid').write_text(str(child.pid))
+time.sleep(25)
+""")
+
+def launch_signal_source(c,target):
+    source=c.coordinator.read_text()
+    first='    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled)'
+    launch='                proc = subprocess.Popen([str(x) for x in argv], cwd=WS,'
+    if first not in source or launch not in source:
+        raise AssertionError('launch signal injection points missing')
+    injection=('    def signal_during_popen(*a, **kw):\n'
+               '        child = subprocess.Popen(*a, **kw)\n'
+               '        if label == '+repr(target)+': os.kill(os.getpid(), signal.SIGTERM)\n'
+               '        return child\n')
+    return source.replace(first,injection+first,1).replace(launch,
+                          '                proc = signal_during_popen([str(x) for x in argv], cwd=WS,',1)
+
+def run_launch_signal(c,kind):
+    if not PS_AVAILABLE:
+        check(True,'launch signal '+kind+': skipped; sandbox denies ps')
+        return
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'},sleep=25 if kind=='implement' else 0)
+    c.set_response(c.verdict())
+    if kind=='gate': gate_script(c,"time.sleep(25)\n")
+    target='implement-1' if kind=='implement' else 'gate'
+    path=c.coordinator; source=launch_signal_source(c,target)
+    path.write_text(source); path.chmod(0o755)
+    proc=launch_with_disposition(c,['run','--unit','unit-one'],defaults=(signal.SIGTERM,))
+    try:
+        out,err=proc.communicate(timeout=35)
+        check(proc.returncode==130,'launch signal: exits 130 '+kind,err)
+        state=c.state(); pgid=state['last_dispatch']['pgid']
+        check(isinstance(state['last_dispatch']['pid'],int) and state['step']['name']==target and
+              state['step']['phase']=='begun' and wait_group_gone(pgid,10),
+              'launch signal: pid durable and child stopped '+kind)
+    finally:
+        if proc.poll() is None: proc.kill(); proc.wait()
+for kind in ('implement','gate'):
+    with_case(lambda c,k=kind:run_launch_signal(c,k),name='run-launch-signal-'+kind)
+
+def run_early_step_signal(c,kind):
+    if not PS_AVAILABLE:
+        check(True,'early step signal '+kind+': skipped; sandbox denies ps')
+        return
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'},sleep=12 if kind=='implement' else 0)
+    c.set_response(c.verdict())
+    if kind=='gate': gate_script(c,'time.sleep(12)\n')
+    target='implement-1' if kind=='implement' else 'gate'
+    path=c.coordinator; source=path.read_text()
+    needle='        begun(state, label)\n'
+    check(needle in source,'early step signal: begun injection point '+kind)
+    source=source.replace(needle,needle+'        if label == '+repr(target)+': os.kill(os.getpid(), signal.SIGTERM)\n',1)
+    path.write_text(source); path.chmod(0o755)
+    proc=launch_with_disposition(c,['run','--unit','unit-one'],defaults=(signal.SIGTERM,))
+    try:
+        out,err=proc.communicate(timeout=30)
+        check(proc.returncode==130,'early step signal: exit 130 '+kind,err)
+        state=c.state(); pgid=state['last_dispatch']['pgid']
+        check(state['step']['name']==target and isinstance(state['last_dispatch']['pid'],int) and
+              wait_group_gone(pgid,10),'early step signal: pid recorded and child stopped '+kind)
+    finally:
+        if proc.poll() is None: proc.kill(); proc.wait()
+for kind in ('implement','gate'):
+    with_case(lambda c,k=kind:run_early_step_signal(c,k),name='run-early-step-signal-'+kind)
+
+def run_repeated_signal(c,kind):
+    if not PS_AVAILABLE:
+        check(True,'repeated signal '+kind+': skipped; sandbox denies ps')
+        return
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    gate_term_ignoring_writer(c)
+    path=c.coordinator; source=path.read_text()
+    stop_deadline='((signal.SIGTERM, 10), (signal.SIGKILL, 2)):\n        for pgid in groups:'
+    check(stop_deadline in source,'repeated signal: stop deadline injection point')
+    source=source.replace(stop_deadline,'((signal.SIGTERM, 2.5), (signal.SIGKILL, 0.5)):\n        for pgid in groups:',1)
+    if kind=='cap-then-signal':
+        c.cfg['caps']['gate_seconds']=1; c.write_config()
+        marker=c.observed/'stop-snapshot'; c.env['COORD_STOP_MARKER']=str(marker)
+        needle='    snapshot = descendant_snapshot(pid)\n'
+        check(needle in source,'repeated signal: snapshot injection point')
+        source=source.replace(needle,needle+'    Path(os.environ["COORD_STOP_MARKER"]).touch()\n',1)
+    path.write_text(source); path.chmod(0o755)
+    proc=launch_with_disposition(c,['run','--unit','unit-one'],defaults=(signal.SIGTERM,))
+    try:
+        child_marker=c.observed/'term-writer.pid'
+        seen=wait_for(lambda:child_marker.exists() and (c.ws/'gate-term-writer.txt').exists(),30)
+        check(seen,'repeated signal: detached writer started '+kind)
+        if not seen:return
+        pid=int(child_marker.read_text())
+        if kind=='cap-then-signal':
+            check(wait_for(marker.exists,10),'repeated signal: cap began stop')
+        else:
+            os.kill(proc.pid,signal.SIGTERM)
+            time.sleep(1)
+        if proc.poll() is None: os.kill(proc.pid,signal.SIGTERM)
+        out,err=proc.communicate(timeout=35)
+        check(proc.returncode==130,'repeated signal: stop completes before exit '+kind,err)
+        check(wait_for(lambda:not pid_alive_non_zombie(pid),10),'repeated signal: TERM-ignoring child killed '+kind)
+        size=(c.ws/'gate-term-writer.txt').stat().st_size; time.sleep(0.2)
+        check((c.ws/'gate-term-writer.txt').stat().st_size==size,'repeated signal: file stable '+kind)
+    finally:
+        if proc.poll() is None: proc.kill(); proc.wait()
+        if (c.observed/'term-writer.pid').exists():
+            pid=int((c.observed/'term-writer.pid').read_text())
+            if pid_alive_non_zombie(pid):
+                try: os.kill(pid,signal.SIGKILL)
+                except ProcessLookupError: pass
+for kind in ('twice','cap-then-signal'):
+    with_case(lambda c,k=kind:run_repeated_signal(c,k),name='run-repeated-signal-'+kind)
+
+def run_signal_kind(c,kind):
+    if kind!='ignored-hup' and not PS_AVAILABLE:
+        check(True,'signal '+kind+': skipped; sandbox denies ps')
+        return
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    gate_script(c,"pathlib.Path(os.environ['COORD_OBSERVED'],'gate-signal-started').touch()\ntime.sleep(2 if os.environ.get('COORD_IGNORED_HUP') else 25)\nprint('Ran 1 test in 0.001s\\n\\nOK')\n")
+    sig=signal.SIGINT if kind=='int' else signal.SIGHUP
+    if kind=='ignored-hup': c.env['COORD_IGNORED_HUP']='1'
+    proc=launch_with_disposition(c,['run','--unit','unit-one'],
+                                 defaults=() if kind=='ignored-hup' else (sig,),
+                                 ignored=(sig,) if kind=='ignored-hup' else ())
+    try:
+        seen=wait_for((c.observed/'gate-signal-started').exists,25)
+        check(seen,'signal kind: gate reached '+kind)
+        if not seen:return
+        os.kill(proc.pid,sig)
+        out,err=proc.communicate(timeout=30)
+        expected=0 if kind=='ignored-hup' else 130
+        check(proc.returncode==expected,'signal kind: exit '+kind,err)
+        if kind=='ignored-hup': check(c.state()['state']=='awaiting-engineer','signal kind: inherited ignore survives')
+        else: check(wait_group_gone(c.state()['last_dispatch']['pgid'],10),'signal kind: gate stopped '+kind)
+    finally:
+        if proc.poll() is None: proc.kill(); proc.wait()
+for kind in ('int','hup','ignored-hup'):
+    with_case(lambda c,k=kind:run_signal_kind(c,k),name='run-signal-kind-'+kind)
+
+def late_gate_child_script():
+    return """import signal
+child=os.fork()
+if child==0:
+    os.close(1); os.close(2)
+    def on_term(*_):
+        with open('tracked.txt','a') as stream: stream.write('late edit after gate capture\\n')
+        os._exit(0)
+    signal.signal(signal.SIGTERM,on_term)
+    pathlib.Path(os.environ['COORD_OBSERVED'],'late-gate-ready').touch()
+    while True: time.sleep(0.05)
+pathlib.Path(os.environ['COORD_OBSERVED'],'late-gate-child.pid').write_text(str(child))
+while not pathlib.Path(os.environ['COORD_OBSERVED'],'late-gate-ready').exists(): time.sleep(0.01)
+print('Ran 1 test in 0.001s\\n\\nOK')
+"""
+
+def late_gate_move_script(stop):
+    action=("subprocess.run(['git','add','-A'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+            "            subprocess.run(['git','commit','-qm','late gate commit'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)"
+            if stop=='worktree' else
+            "subprocess.run(['git','switch','-qc','moved-after-gate'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)")
+    return """import signal,subprocess
+child=os.fork()
+if child==0:
+    os.close(1); os.close(2)
+    def on_term(*_):
+        try:
+            ACTION
+        except Exception as error:
+            pathlib.Path(os.environ['COORD_OBSERVED'],'late-move-error').write_text(str(error))
+        os._exit(0)
+    signal.signal(signal.SIGTERM,on_term)
+    pathlib.Path(os.environ['COORD_OBSERVED'],'late-move-ready').touch()
+    while True: time.sleep(0.05)
+pathlib.Path(os.environ['COORD_OBSERVED'],'late-move-child.pid').write_text(str(child))
+while not pathlib.Path(os.environ['COORD_OBSERVED'],'late-move-ready').exists(): time.sleep(0.01)
+print('Ran 1 test in 0.001s\\n\\nOK')
+""".replace('ACTION',action)
+
+def run_signal_fixture_syntax(c):
+    gate_term_ignoring_writer(c)
+    check(bool(compile((c.bin/'gate-test').read_text(),'<term-writer>','exec')),
+          'signal fixtures: TERM-ignoring gate parses')
+    gate_script(c,late_gate_child_script())
+    check(bool(compile((c.bin/'gate-test').read_text(),'<late-editor>','exec')),
+          'signal fixtures: late-edit gate parses')
+    for stop in ('worktree','commit'):
+        gate_script(c,late_gate_move_script(stop))
+        check(bool(compile((c.bin/'gate-test').read_text(),'<late-head-mover>','exec')),
+              'signal fixtures: late '+stop+' mover parses')
+    source=launch_signal_source(c,'gate').split("<<'PY'\n",1)[1].rsplit('\nPY',1)[0]
+    check(bool(compile(source,'<launch-race>','exec')),'signal fixtures: injected launch race parses')
+    early=c.coordinator.read_text().replace('        begun(state, label)\n',
+          '        begun(state, label)\n        if label == "gate": os.kill(os.getpid(), signal.SIGTERM)\n',1)
+    check(bool(compile(early.split("<<'PY'\n",1)[1].rsplit('\nPY',1)[0],'<early-race>','exec')),
+          'signal fixtures: early begun-step signal parses')
+with_case(run_signal_fixture_syntax,name='run-signal-fixture-syntax')
+
+def run_after_gate_edit(c,stop):
+    if not PS_AVAILABLE:
+        check(True,'post-gate TERM child '+stop+': skipped; sandbox denies ps')
+        return
+    if stop=='commit': c.calibrate('stop','commit')
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    gate_script(c,late_gate_child_script())
+    try:
+        result=c.run_unit(6,'post-gate edit: '+stop+' blocks')
+        if result.returncode==6:
+            check(c.state()['reason']=='tree-changed' and 'late edit' in (c.ws/'tracked.txt').read_text(),
+                  'post-gate edit: measured tree no longer current '+stop)
+            check(not (c.cdir/'quarantine.json').exists(),'post-gate edit: no quarantine '+stop)
+    finally:
+        marker=c.observed/'late-gate-child.pid'
+        if marker.exists():
+            try: os.kill(int(marker.read_text()),signal.SIGKILL)
+            except ProcessLookupError: pass
+for stop in ('worktree','commit'):
+    with_case(lambda c,s=stop:run_after_gate_edit(c,s),name='run-after-gate-edit-'+stop)
+
+def run_after_gate_head_move(c,stop,child):
+    if child and not PS_AVAILABLE:
+        check(True,'post-gate TERM head move '+stop+': skipped; sandbox denies ps')
+        return
+    if stop=='commit': c.calibrate('stop','commit')
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    if child:
+        gate_script(c,late_gate_move_script(stop))
+    else:
+        path=c.tree/'scripts'/'run-gate.sh'; real=path.with_suffix('.real'); path.rename(real)
+        action=('git add -A\ngit commit -qm "late gate commit"' if stop=='worktree' else
+                'git switch -qc moved-after-gate')
+        path.write_text('#!/bin/sh\n"'+str(real)+'" "$@"\nrc=$?\n'+action+'\nexit "$rc"\n')
+        path.chmod(0o755)
+    try:
+        result=c.run_unit(6,'post-gate HEAD move: '+stop+' '+('child' if child else 'wrapper'))
+        if result.returncode==6:
+            state=c.state()
+            if stop=='worktree': moved=c.git('rev-parse','HEAD').stdout.decode().strip()!=c.base
+            else: moved=c.git('branch','--show-current').stdout.decode().strip()=='moved-after-gate'
+            error=(c.observed/'late-move-error')
+            check(state['reason']=='head-moved' and moved and not error.exists(),
+                  'post-gate HEAD move: isolated head or branch check '+stop+' '+('child' if child else 'wrapper'),
+                  error.read_text() if error.exists() else '')
+    finally:
+        marker=c.observed/'late-move-child.pid'
+        if marker.exists():
+            try: os.kill(int(marker.read_text()),signal.SIGKILL)
+            except ProcessLookupError: pass
+for stop in ('worktree','commit'):
+    for child in (False,True):
+        with_case(lambda c,s=stop,k=child:run_after_gate_head_move(c,s,k),
+                  name='run-after-gate-head-'+stop+('-child' if child else '-wrapper'))
+
+def run_after_gate_wrapper(c,stop):
+    if stop=='commit': c.calibrate('stop','commit')
+    if not c.ready():return
+    c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+    path=c.tree/'scripts'/'run-gate.sh'; real=path.with_suffix('.real'); path.rename(real)
+    path.write_text('#!/bin/sh\n"'+str(real)+'" "$@"\nrc=$?\nprintf "late after record\\n" >> tracked.txt\nexit "$rc"\n')
+    path.chmod(0o755)
+    result=c.run_unit(6,'post-gate wrapper: '+stop+' blocks')
+    if result.returncode==6:
+        check(c.state()['reason']=='tree-changed' and 'late after record' in (c.ws/'tracked.txt').read_text(),
+              'post-gate wrapper: final tree read catches change '+stop)
+for stop in ('worktree','commit'):
+    with_case(lambda c,s=stop:run_after_gate_wrapper(c,s),name='run-after-gate-wrapper-'+stop)
+
+def run_process_tree(c,kind,stop):
+    if not PS_AVAILABLE:
+        check(True,f'run process tree {kind} {stop}: skipped; sandbox denies ps')
+        return
+    if not c.ready():return
+    writer=c.ws/('gate-writer.txt' if kind=='gate' else 'implement-writer.txt')
+    marker=c.observed/('gate-writer.pid' if kind=='gate' else 'writer-1.pid')
+    if kind=='implement':
+        c.action(2,write={'tracked.txt':'after\n'},spawn_writer=str(writer),sleep=25)
+    else:
+        c.action(2,write={'tracked.txt':'after\n'}); c.set_response(c.verdict())
+        code="import subprocess\ncode=\"import pathlib,sys,time; p=pathlib.Path(sys.argv[1]);\\nwhile True:\\n with p.open('a') as f: f.write('.'); f.flush()\\n time.sleep(0.05)\"\nchild=subprocess.Popen([sys.executable,'-c',code,"+repr(str(writer)) +"],start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\npathlib.Path(os.environ['COORD_OBSERVED'],'gate-writer.pid').write_text(str(child.pid))\ntime.sleep(25)\n"
+        gate_script(c,code)
+    if stop=='cap':
+        c.cfg['caps']['dispatch_seconds' if kind=='implement' else 'gate_seconds']=12; c.write_config()
+    proc=c.launch_killable('run','--unit','unit-one')
+    try:
+        seen=wait_for(lambda: marker.exists() and writer.exists() and writer.stat().st_size>=3,15)
+        check(seen,f'run process tree: detached {kind} child running before {stop}')
+        if not seen:return
+        pid=int(marker.read_text())
+        check(pid_alive_non_zombie(pid),f'run process tree: detached {kind} child observed alive')
+        if stop=='signal': os.kill(proc.pid,signal.SIGTERM)
+        out,err=proc.communicate(timeout=45)
+        expected=130 if stop=='signal' else 7
+        check(proc.returncode==expected,f'run process tree: coordinator outcome {kind} {stop}',f'exit {proc.returncode}: {err}')
+        stopped=wait_for(lambda: not pid_alive_non_zombie(pid),15)
+        check(stopped,f'run process tree: detached {kind} child stopped after {stop}')
+        if stopped:
+            size=writer.stat().st_size; time.sleep(0.25)
+            check(writer.stat().st_size==size,f'run process tree: {kind} file stopped changing after {stop}')
+        if stop=='cap': check(c.state()['reason']==('implement-dispatch-failed' if kind=='implement' else 'gate-timeout'),f'run process tree: timeout reason {kind}')
+    finally:
+        if proc.poll() is None: proc.kill(); proc.wait()
+        if marker.exists():
+            pid=int(marker.read_text())
+            if pid_alive_non_zombie(pid):
+                try: os.kill(pid,signal.SIGKILL)
+                except ProcessLookupError: pass
+for kind in ('implement','gate'):
+    for stop in ('signal','cap'):
+        with_case(lambda c,k=kind,s=stop:run_process_tree(c,k,s),name='run-process-tree-'+kind+'-'+stop)
+
 try:
     JOBS=int(os.environ.get('COORD_SELFTEST_JOBS','4'))
 except ValueError:
@@ -2052,7 +3572,7 @@ for records,_duration in results:
     for condition,name,detail in records:
         check(condition,name,detail)
 
-PINNED_CHECKS = 735
+PINNED_CHECKS = 1745 if PS_AVAILABLE else 1641
 if not FILTER and CHECKS != PINNED_CHECKS:
     FAILURES += 1
     print(f'not ok - pinned check count: expected {PINNED_CHECKS}, observed {CHECKS}',file=sys.stderr)
