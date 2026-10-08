@@ -23,6 +23,8 @@ Per-backend flags beyond the contract are allowed where a real capability exists
 
 All four adapters run strictly foreground: their own exit is the authoritative completion signal, and backgrounding happens at the harness level. Codex and grok use the exact id from loop-owned state wherever their runtime permits resume; neither may fall back to a newest-session selector. Codex resume is release-enabled for the calibrated 2026-08-17 tuple recorded in `backends/codex/runtime.md`; a changed adapter argv, state schema, pinned config set, or host tuple requires recalibration. cursor-agent and claude refuse resume and carry iterate state through the applied worktree plus a fresh prompt.
 
+Every adapter keeps its own run state private (0600 files, 0700 directories), but what the implementer creates belongs to the engineer: a file or directory that reaches the real worktree carries the modes the caller's umask gives (0666 and 0777 masked by it), the same as a command run from the engineer's own shell. Codex and grok write into the worktree directly and start the CLI under the caller's mask; claude and cursor apply their patch under it. The `worktree-umask` rule in `tests/contract-core.sh` dispatches under umask 027 and requires the implementer's new file to be 0640 and its new directory 0750 in the delivered tree (grok's authoritative snapshot, the workspace otherwise).
+
 `tests/contract-core.sh` enforces the shared rules against every registered real
 adapter through its fixture driver. `tests/contract-negative.sh` supplies one
 deliberately broken adapter per shared rule and requires the core suite to name

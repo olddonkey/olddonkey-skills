@@ -1012,6 +1012,8 @@ def observe_bootstrap(data: bytes, scratch_factory) -> Plan:
     if tip == intent["anchor_commit"]:
         try:
             fetched = anchor.fetch(scratch, remote.url)
+            if fetched is None:
+                raise anchor.Unreachable("the remote anchor disappeared while it was read")
             if fetched == tip:
                 content, parent = anchor.read_anchor_commit(scratch, tip)
                 if content == intent["anchor_json"].encode("utf-8") and parent is None:

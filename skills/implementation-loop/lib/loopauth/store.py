@@ -427,7 +427,7 @@ INTENT_POINTS = {"fs-create-intent-after-temp-fsync", "fs-create-intent-after-re
 MARKER_POINTS = {"fs-create-marker-after-temp-fsync", "fs-create-marker-after-rename"}
 for _command in ("genesis", "rotate", "revoke", "regenesis"):
     CRASH_APPLICABLE[_command] |= INTENT_POINTS
-for _command in ("revoke", "recover"):
+for _command in ("rotate", "revoke", "regenesis", "recover"):
     CRASH_APPLICABLE[_command] |= MARKER_POINTS
 for _command in ("regenesis", "recover"):
     CRASH_APPLICABLE[_command] |= {"archive-after-rename", "archive-after-readonly"}
@@ -1904,6 +1904,8 @@ def readback(token: Token, *, scratch: str, commit: str, anchor_json: bytes,
         fetched = anchor.fetch(scratch, remote.url)
     except anchor.Unreachable as error:
         refuse("pending", f"readback failed; the store is pending: {error}", EXIT_PENDING)
+    if fetched is None:
+        refuse("pending", "readback cannot confirm the push: the remote anchor is absent", EXIT_PENDING)
     if fetched != commit:
         refuse("readback", "the remote anchor is not the pushed commit")
     try:
