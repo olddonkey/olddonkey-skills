@@ -12,6 +12,12 @@
 #   loop-authority ceremony regenesis
 #   loop-authority submit <row-id>        the external entry for typed rows;
 #                                         every such row is dormant in 0a.2
+#   loop-authority refs --workspace <path> --run <run_id>
+#                                         read-only verification of the run's
+#                                         claimed references (0a.3): canonical
+#                                         JSON on stdout; takes no lock and
+#                                         leaves store/journal/remote unchanged;
+#                                         valid requests use scratch cache; exit 0 when printed
 #
 # Store: $HOME/.config/olddonkey-loop/authority/ (see references/state-schema.md).
 # A ceremony is an operator-TTY session (A1.1): it refuses unless stdin and

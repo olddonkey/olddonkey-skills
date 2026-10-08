@@ -281,7 +281,9 @@ the authority store could establish, is a **claim** its writer asserted. The
 reducer checks claims for shape and internal consistency and records each
 guard as `claimed`, never `verified`; no node is completion-eligible while any
 guard is only claimed, so schema 2 reduces runs and certifies nothing.
-Verification against the authority store is later work (sub-unit 0a.3).
+Sub-unit 0a.3 classifies these claims against the authority store (section 6,
+*Claimed references*): in 0a it rejects every request, answer, and expiry
+claim and verifies none.
 
 **Writing.** `loop-journal append --schema 2 --event E --json OBJ` validates
 the payload against `vocabulary.py` and writes the whole event as canonical
@@ -1082,3 +1084,114 @@ lists), checks single-link publication and a second
 recovery converging, and compares the independent verifier. The sharded CI
 matrix still exhausts frame-byte cuts. CI also runs the authority suite on
 macOS to exercise the Darwin start-token and durability paths.
+
+### Claimed references (sub-unit 0a.3)
+
+`loop-authority refs --workspace <path> --run <run_id>` verifies a run's
+claimed references, read-only. It reads the run's segment exactly where
+`loop-journal` keeps it (`journal/<sha256(realpath(workspace))>/runs/<run>.jsonl`,
+`lib/loopauth/journal_read.py`: the same ownership, mode, and no-symlink
+checks, `O_NOFOLLOW | O_NONBLOCK` (a FIFO is refused without waiting), never `meta.lock`, and no repair -- a torn last line is
+left out and reported as `torn_tail_bytes`, a mid-file invalid line fails
+closed), reduces it with 0a.1's reducer (unchanged), classifies every claim
+of every record the reducer accepted (`refs.py`), lays the outcomes over the
+reducer's guards (`eligibility.py`, pure), and reads the store only through
+0a.2's read-only classification (`recover.classify_stable`, wrapping the
+classifier that `status` runs, without its reader lock). It prints one canonical
+JSON object -- `run`,
+`workspace`, `workspace_key`, `vocabulary`, `journal` (`lines`,
+`torn_tail_bytes`, `degraded`, `unknown_schema`, the reducer's `rejected`),
+`store`, `claims`, `nodes`, `completion_eligible` -- and exits 0 whenever it
+prints it; 2 for a workspace that is not a directory, a malformed run id, or
+a run with no segment; 9 for an environment or output error (including closed
+stdout); 12 for a journal it cannot trust or a claim the map does not list.
+Stable classifier faults retain their coded errors, as with `status`.
+It admits no row and writes nothing to the journal store, the
+authority directory, or the remote (its only writes are 0a.2's process
+scratch under `$HOME/.cache/olddonkey-loop`, removed on exit); it takes
+neither the authority lock nor the journal's, so no writer waits on it; and
+the registry selftest's reachability scan proves that `refs.py`,
+`eligibility.py`, and `journal_read.py` reach no sink.
+
+Two dimensions, never mixed:
+
+- **Claim validity.** Every request, answer (any claimed outcome), and expiry
+  reference and every `review.recorded` `request_id` is `rejected`, reason
+  `rows-dormant`: A2.1 keeps every request row dormant through 0a and every
+  0a epoch admits no request protocol, so no admitted row could have
+  produced the record it names, whatever the store holds (a response without
+  a redeemed capability is rejected, not unattributed). Every other
+  reference and evidence field is `claimed`. Nothing is `verified`: the
+  positive verification rules arrive with the units that admit the records
+  they verify (A2.1: units 7, 8, 9, 12).
+- **Store state.** `current` (committed: anchored, and not pending,
+  quarantined, or in a bootstrap terminal state) or `unavailable` with its
+  reason: `absent`, `pending`, `changing` (no stable observation within the
+  attempt bound), `remote-unreachable` (a pending state whose
+  remote could not be read), `quarantined` (also for
+  `regenesis-quarantined`), `genesis-invalid`, `anchor-mismatch`,
+  `genesis-quarantined`, and the classifier's two other fail-closed states
+  under their own names, `active-invalid` and `regenesis-invalid`. It is
+  reported with the `classification`, its `table` and `rule`, the `lineage`
+  (`production` or `test`; null when no lineage was read), `test_only`, and
+  `current_authorization`. It is context: it never changes a claim.
+
+The closed reference map (`refs.REFERENCE_MAP` by reference kind,
+`refs.FIELD_MAP` for every other claim); a kind, field, event, or store
+classification it does not list is an error, never a silent claim:
+
+| reference kind (the 0a.1 fields that carry it) | names | validity in 0a |
+| --- | --- | --- |
+| `request` (`request_ref`) | a `request.opened` record | rejected (`rows-dormant`) |
+| `answer` (`answer_ref`, any claimed outcome; the approval row's `answer_ref`) | a `request.redeemed` record | rejected (`rows-dormant`) |
+| `expiry` (`expiry_ref`) | a `request.expired` record | rejected (`rows-dormant`) |
+| `cancel` (`cancel_ref`) | a node cancellation (tg:296); no record type in Phase A | claimed |
+| `authorization` (`authorization_ref`) | an effect authorization (units 3, 7, 8) | claimed |
+| `selection` (`selection_ref`), `drift` (`drift_ref`) | coordinator decisions (unit 10) | claimed |
+| `quiescence` (`quiescence_ref`), `operation-spawned` (`observation_ref`), `operation-reserve` (`barrier_closed_ref`) | process guards (unit 9, P5) | claimed |
+| `review`, `gate`, `publish`, `provider-receipt`, `operation-result`, `dispatch`, `dispatch-end`, `dispatch-abandoned` (the `terminal_evidence` references, every `failing_ref` alternative, and `reconciliation.result`'s `receipt_ref`, kind `provider-receipt`) | journal records (units 6, 9) | claimed |
+| `reconciliation`, `receipt-lookup` (`reconciliation_ref`); `attestation` (no field: 0a.1 refuses it there, tg:294) | journal records (unit 9) | claimed |
+
+| other claim | validity in 0a |
+| --- | --- |
+| `review.recorded`'s `request_id` (names the `request.redeemed` that answered it) | rejected (`rows-dormant`) |
+| `attempt.begin`'s pinned `node_type` and `stop_point` (node spec, unit 5) | claimed |
+| `identity`, `target_containment`, `integration_content`, `receipt_object`, `branch`, `sha`, `no_permitted_actor`, `phase`, and every digest and text field (`preconditions_digest`, `revalidation_digest`, `transcript_digest`, `report_digest`, `spawn_error`, `effect`, `lost_child`, `park_reason`, `unresolvable_reason`, `reason`) | claimed |
+
+`terminal_evidence` and `failure_evidence` are walked, never classified
+themselves; the one reference a reconciliation replaced is a claim of the
+substituted kind (`substituted_by: reconciliation_ref`). Each claim carries
+its report-local `id` (the key referenced by `refuted_by`), its originating
+`field`, and `substituted_by` (a replacement field name or null), plus its
+record's `position`, `seq`, `event`, `node_id`, and `attempt_id`, its
+`path` and the reducer's `guard` (null for a record's own field), `kind`,
+`digest`, the reference's own claims (`claims`, e.g. `answer`), `names`,
+`authority`, `validity`, and `reason`. Per node (its latest attempt, as the
+reducer reports it): each guard's `status` (`claimed`, or `rejected` with its
+`reason`); `refuted`, set when any of the node's authority claims in any of
+its attempts is rejected, with `refuted_by` listing them; and
+`completion_eligible`, the constant `false` of 0a -- an explicit gate, not
+derived from the guards, so a node with no reference at all is ineligible
+too.
+
+The lock-free store observation compares a local-state digest before and after
+classification, making at most three attempts. Any classification exception is
+retried if the after-digest differs or cannot be taken; identical digests
+re-raise the exception. A first-attempt `pending` plan whose remote read failed
+is retried too, since the remote may have moved between `ls-remote` and `fetch`.
+If no attempt produced two digests, the last error is re-raised. Otherwise, if
+no stable read is obtained it reports `unavailable` with reason `changing` and
+`current_authorization: false`. This is an observation, not synchronization:
+a later ceremony can still change the store after the report. It never acquires
+the writer lock.
+
+The refs command validates the journal and claims before establishing scratch
+space. Invalid input leaves no new cache directory. Valid observations may leave
+the parents `$HOME/.cache/olddonkey-loop/tmp` and
+`$HOME/.cache/olddonkey-loop/anchor-scratch` after their scratch entries
+are cleaned; “read-only” refers to authority, journal and remote contents. The
+canonical report is written as UTF-8 bytes, independent of stdout's locale codec.
+
+The classifier owns the closed `recover.STATES` tuple. `Plan` checks it during
+construction and later state assignments; the refs selftest compares the keys
+of `refs.CLASSIFICATIONS` directly with that tuple.
