@@ -374,6 +374,49 @@ NOT_ADMITTED = ("request.opened", "request.cancelled", "request.expired", "reque
                 "standing.revoked", "entry.enrolled", "entry.revoked", "platform.designated")
 SIGNING_COMMANDS = ("ssh-keygen.sign", "ssh-keygen.sign-pointer", "ssh-keygen.certify", "ssh-keygen.generate")
 SINK_COMMANDS = SIGNING_COMMANDS + ("git.push-anchor",)
+# The reviewed 1cf8bd7 push protocol: authorization precedes the token-carrying
+# read, then the complete direct-ref/loose-entry guard immediately precedes
+# the one process start. This read is not a remote sink or a new driver.
+PUSH_PREFIX = '''
+spec = COMMAND_TABLE.get(command_id)
+if spec is None:
+    raise ToolError("unlisted", f"command outside the closed table: {command_id!r}")
+if type(stdin) is not bytes:
+    raise ToolError("params", "stdin must be bytes")
+if stdin and command_id not in STDIN_COMMANDS:
+    raise ToolError("params", f"{command_id} takes no stdin")
+argv = build_argv(command_id, params)
+from . import store
+if spec["effect"] == "sink":
+    store.authorize_command(token, command_id, params, stdin)
+for name in PATH_PARAMS:
+    value = params.get(name)
+    if type(value) is str and is_authority_path(value):
+        if not store.token_is_open(token):
+            raise ToolError("refused", f"{command_id}: authority path without a token")
+env = command_env(command_id, params)
+timeout = REMOTE_TIMEOUT if command_id in REMOTE_COMMANDS else LOCAL_TIMEOUT
+'''
+PUSH_GUARD = r'''
+if command_id == "git.push-anchor":
+    refs = run("git.anchor-refs", token=token, scratch=params["scratch"])
+    expected = f"{params['commit']} {ANCHOR_REF} \n".encode("ascii")
+    if refs.returncode != 0 or refs.stdout != expected:
+        store.refuse("anchor-scratch", "scratch anchor namespace must contain only "
+                     "the direct anchor ref at the permit's commit")
+    namespace = os.path.join(params["scratch"], "refs", "olddonkey-loop")
+    try:
+        with os.scandir(namespace) as entries:
+            if any(entry.name != "anchor" or not entry.is_file(follow_symlinks=False)
+                   for entry in entries):
+                store.refuse("anchor-scratch", "scratch anchor namespace has extra loose entries")
+    except FileNotFoundError:
+        pass
+'''
+PUSH_PROCESS = '''
+completed = subprocess.run(argv, input=stdin, capture_output=True, env=env,
+                           cwd=scratch_tmp(), timeout=timeout, close_fds=True, check=False)
+'''
 PENDING_STATES = ("pending", "needs-recovery", "genesis-pending", "regenesis-pending")
 
 # The ordered token-trace vocabulary: one label per token the recovery
@@ -484,11 +527,21 @@ EXPECTED["revocation-active"].update({
     "fs-create-marker-after-temp-fsync": ([T_TD, T_QT], "both"),
     "fs-create-marker-after-rename": ([], "residual-intent"),
 })
+# Rotate/re-genesis first recover an already anchored active revocation.
+# Recorded on the real writer: both cuts mint [T_TD, T_QT] before exit 137;
+# recovery then materializes the marker, or observes its renamed bytes.
+for _kind in ("rotation", "regenesis"):
+    EXPECTED[_kind].update({
+        "fs-create-marker-after-temp-fsync": ([T_QT], "quarantined-before-ceremony"),
+        "fs-create-marker-after-rename": ([], "quarantined-before-ceremony"),
+    })
 
 RC_OF = {("genesis", "none"): 0, ("genesis", "committed"): 0, ("rotation", "neither"): 0, ("rotation", "both"): 0,
          ("revocation", "neither"): 0, ("revocation", "both"): 0, ("revocation-active", "neither"): 0,
          ("revocation-active", "both"): 6, ("regenesis", "abandoned"): 6, ("regenesis", "completed"): 0}
 RC_OF[("revocation-active", "residual-intent")] = 6
+for _kind in ("rotation", "regenesis"):
+    RC_OF[(_kind, "quarantined-before-ceremony")] = 6
 
 
 def run_spec(trace, rc, **extra):
@@ -1884,6 +1937,30 @@ def sink_problems(index):
     return problems, pairs
 
 
+def push_binding_problems(index):
+    """No general read allowance: freeze this nested read and its position."""
+    node = index.functions.get("tools.run")
+    if node is None:
+        return ["tools.run is missing"]
+    protocol = node.body[-2] if len(node.body) >= 2 else None
+    prefix = ast.unparse(ast.Module(body=node.body[1:-2], type_ignores=[]))
+    if prefix != ast.unparse(ast.parse(PUSH_PREFIX)):
+        return ["tools.run changed the frozen authorization-before-push-check prefix"]
+    if not isinstance(protocol, ast.Try) or len(protocol.body) != 2 \
+            or ast.unparse(protocol.body[0]) != ast.unparse(ast.parse(PUSH_GUARD).body[0]) \
+            or ast.unparse(protocol.body[1]) != ast.unparse(ast.parse(PUSH_PROCESS).body[0]):
+        return ["tools.run lacks its exact token-carrying direct-ref/loose-entry guard immediately before git"]
+    starts = [call for call in ast.walk(node) if isinstance(call, ast.Call)
+              and callee(call) == ("subprocess", "run")]
+    if len(starts) != 1 or starts[0] is not protocol.body[1].value:
+        return ["tools.run starts a process outside its frozen post-guard statement"]
+    reads = [call for call in ast.walk(node) if isinstance(call, ast.Call)
+             and callee(call) == (None, "run")]
+    if len(reads) != 1 or reads[0] is not protocol.body[0].body[0].value:
+        return ["tools.run contains an unfrozen nested command read"]
+    return []
+
+
 def begun_rows(node):
     return {constant(call.args[0]) for call in ast.walk(node) if isinstance(call, ast.Call)
             and store_call("", call, "begin") and call.args and constant(call.args[0]) is not None}
@@ -2645,6 +2722,7 @@ def f1_findings(root, rs, registry):
     found += [("0a.3 call graph", path) for path in paths]
     problems, _pairs = sink_problems(index)
     found += [("sink -> transaction driver map", problem) for problem in problems]
+    found += [("push binding", problem) for problem in push_binding_problems(index)]
     found += [("token minting", problem) for problem in minter_problems(index, registry)]
     found += [("entry point", problem) for problem in entry_problems(trees, rs)]
     found += [("entry loopauth access", problem) for problem in entry_module_problems(trees)]
@@ -3278,8 +3356,8 @@ VERIFIER_ALLOWED = {"Runner.run": {"subprocess.run", "subprocess.CompletedProces
                     "Runner.write_temp": {"os.open", "os.write"}, "Runner.make_temp": {"os.open", "os.mkdir"},
                     "Runner.init_repo": {"os.mkdir"}, "Runner.cleanup": {"shutil.rmtree"}}
 # That runner, whole: one subprocess.run with fixed argv/env/timeout and the
-# explicit F2 TimeoutExpired-to-Unreachable mapping; no other process start.
-RUNNER_RUN = "def run(self, argv: list[str], *, git: bool, stdin: bytes=b'', form: str='') -> subprocess.CompletedProcess:\n    try:\n        return subprocess.run(argv, input=stdin, capture_output=True, env=self.env(git), cwd=self.temp, timeout=120 if form in ('fetch', 'ls-remote') else 60, check=False, close_fds=True)\n    except subprocess.TimeoutExpired as error:\n        if form in ('fetch', 'ls-remote'):\n            raise Unreachable(f'git {form} timed out') from error\n        raise EnvError('local command timed out') from error"
+# explicit timeout and process-start error mappings; no other process start.
+RUNNER_RUN = "def run(self, argv: list[str], *, git: bool, stdin: bytes=b'', form: str='') -> subprocess.CompletedProcess:\n    try:\n        return subprocess.run(argv, input=stdin, capture_output=True, env=self.env(git), cwd=self.temp, timeout=120 if form in ('fetch', 'ls-remote') else 60, check=False, close_fds=True)\n    except subprocess.TimeoutExpired as error:\n        if form in ('fetch', 'ls-remote'):\n            raise Unreachable(f'git {form} timed out') from error\n        raise EnvError('local command timed out') from error\n    except OSError as error:\n        if form in ('fetch', 'ls-remote'):\n            raise Unreachable(f'git {form} could not run: {error}') from error\n        raise EnvError(f'local command could not run: {error}') from error"
 
 
 def verifier_findings(path, rs):
@@ -3288,7 +3366,7 @@ def verifier_findings(path, rs):
     temporary directory under $HOME/.cache/olddonkey-loop/verify -- judged by
     the alias-proof scan (every primitive resolved, whatever its spelling) and
     the runner rule: Runner.run is exactly its frozen body (one subprocess.run and the
-    explicit timeout mapping), and every other `.run` it references is
+    explicit timeout and process-start error mappings), and every other `.run` it references is
     a direct self.run / RUN.run call with a frozen argv."""
     tree = ast.parse(read_text(path), path)
     index = Index({"verify": tree})
@@ -3298,7 +3376,7 @@ def verifier_findings(path, rs):
     runner = index.functions.get("verify.Runner.run")
     start = None  # the one subprocess.run the runner may make: its statement's own call
     if runner is None or ast.unparse(runner) != RUNNER_RUN:
-        found.append(("runner", "Runner.run differs from its frozen one-process body and timeout mapping: "
+        found.append(("runner", "Runner.run differs from its frozen one-process body and error mappings: "
                                 + (ast.unparse(runner)[:240] if runner is not None else "missing")))
     else:
         start = runner.body[0].body[0].value.func
@@ -3566,24 +3644,54 @@ def mode_static():
          not heredocs(read_text(AUTH)) and 'exec python3 -I -B "$here/loop-authority.py" "$@"' in read_text(AUTH))
     live = f1_findings(SKILL, rs, registry)
     for rule in ("p2 s7 scan", "0a.3 read-only rules", "0a.3 call graph", "sink -> transaction driver map",
-                 "token minting", "entry point", "entry loopauth access", "entry importer inventory", "parse"):
+                 "push binding", "token minting", "entry point", "entry loopauth access", "entry importer inventory", "parse"):
         hits = [what for name, what in live if name == rule]
         emit("F1", f"the live tree passes F1's rule [{rule}] (every lib/loopauth module and loop-authority.py)",
              not hits, hits[:6])
     from loopauth import tools
     expected_commands = {
         "git.fetch-anchor": {"binary": "git", "argv": ("<git-prefix>", "<transport>", "-C", "<scratch>", "fetch", "--no-tags",
-            "--no-write-fetch-head", "<remote>", "+refs/olddonkey-loop/*:refs/readback/*"), "effect": "scratch"},
+            "--no-write-fetch-head", "<remote>", "+refs/olddonkey-loop/anchor:refs/readback/anchor"), "effect": "scratch"},
         "git.update-anchor": {"binary": "git", "argv": ("<git-prefix>", "-C", "<scratch>", "update-ref",
             "refs/olddonkey-loop/anchor", "<commit>"), "effect": "scratch"},
         "git.anchor-refs": {"binary": "git", "argv": ("<git-prefix>", "-C", "<scratch>", "for-each-ref",
-            "--format=%(objectname) %(refname)", "refs/olddonkey-loop/"), "effect": "read"},
+            "--format=%(objectname) %(refname) %(symref)", "refs/olddonkey-loop/"), "effect": "read"},
         "git.push-anchor": {"binary": "git", "argv": ("<git-prefix>", "<transport>", "-C", "<scratch>", "push", "<remote>",
             "refs/olddonkey-loop/*:refs/olddonkey-loop/*"), "effect": "sink"},
     }
     for command, expected in expected_commands.items():
         actual = tools.COMMAND_TABLE.get(command)
         emit("F1", f"reviewed base command form/effect remains frozen: {command}", actual == expected, actual)
+    emit("F1", "git.push-anchor is still the only remote sink, owned only by store.push_anchor; "
+         "git.anchor-refs is a token-carrying read inside tools.run, not another sink or driver",
+         {command for command, spec in tools.COMMAND_TABLE.items()
+          if spec["binary"] == "git" and spec["effect"] == "sink"} == {"git.push-anchor"}
+         and rs["SINK_COMMAND_OWNER"].get("git.push-anchor") == "push_anchor"
+         and tools.COMMAND_TABLE["git.anchor-refs"]["effect"] == "read"
+         and not push_binding_problems(live_index))
+    tools_text = read_text(os.path.join(LIB, "loopauth", "tools.py"))
+    begin = tools_text.index('        if command_id == "git.push-anchor":', tools_text.index("def run("))
+    end = tools_text.index('        completed = subprocess.run(', begin)
+    push_guard_source = tools_text[begin:end]
+    push_plants = (
+        ("removing the in-sink guard", (push_guard_source, "")),
+        ("dropping the nested read's token", ('refs = run("git.anchor-refs", token=token,',
+                                             'refs = run("git.anchor-refs", token=None,')),
+        ("removing the loose-entry scan", (push_guard_source,
+             push_guard_source[:push_guard_source.index('            namespace =')])),
+        ("moving the guard before authorization", (push_guard_source, "")),
+    )
+    for number, (label, edit) in enumerate(push_plants, 1):
+        edits = [("lib/loopauth/tools.py", edit)]
+        if number == 4:
+            edits.append(("lib/loopauth/tools.py", ('    if spec["effect"] == "sink":',
+                '\n'.join(line[4:] if line.startswith("    ") else line
+                          for line in push_guard_source.rstrip().splitlines())
+                + '\n    if spec["effect"] == "sink":')))
+        copy = planted_copy(f"push-binding-{number}", edits)
+        found = f1_findings(copy, rs, registry)
+        hits = [what for rule, what in found if rule == "push binding"]
+        emit("F1", f"planted push-binding control: {label} is DETECTED", bool(hits), hits)
     _problems, pairs = sink_problems(live_index)
     stale = [f"{caller} -> {sink}" for sink in SINK_FUNCTIONS for caller in sorted(SINK_DRIVERS[sink] - pairs.get(sink, set()))]
     emit("F1", "the frozen sink -> driver map is exact: every frozen sink (store.SINK_FUNCTIONS) is called by exactly "
@@ -3695,8 +3803,9 @@ def mode_static():
                                    "spelled"),
                        ("runner", "has exactly its frozen runner body: one process and explicit timeout mapping -- `return "
                                   "subprocess.run(argv, input=stdin, capture_output=True, env=self.env(git), "
-                                  "cwd=self.temp, timeout=120, check=False, close_fds=True)` with argv its own "
-                                  "parameter, and nothing else: no other call, command, or statement inside it"),
+                                  "cwd=self.temp, timeout=120 if form in (fetch, ls-remote) else 60, "
+                                  "check=False, close_fds=True)` with argv its own parameter, explicit "
+                                  "TimeoutExpired and OSError mappings, and no other process start"),
                        ("argv", "runs only its frozen argv forms -- git init, fetch, ls-remote, cat-file (-t|-p) through "
                                 "git_argv, which refuses any other, and ssh-keygen -Y verify and -l -- through direct "
                                 "self.run / RUN.run calls only"),
@@ -4248,7 +4357,7 @@ def live_registry():
 # ===========================================================================
 
 FROZEN_PATH = "/usr/bin:/opt/homebrew/bin:/usr/local/bin"
-ANCHOR_REFSPEC = "+refs/olddonkey-loop/*:refs/readback/*"
+ANCHOR_REFSPEC = "+refs/olddonkey-loop/anchor:refs/readback/anchor"
 # The environment every git run gets (an allowlist; SSH_AUTH_SOCK is the one
 # variable passed through, when set), and every ssh-keygen run.
 FROZEN_GIT_ENV = {"PATH": FROZEN_PATH, "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1",
@@ -4297,7 +4406,7 @@ def verifier_form(argv, home, url):
             rest = rest[4:]
             if len(rest) == 7 and rest[0] == "-C" and re.fullmatch(repo, rest[1]) \
                     and rest[2:] == ["fetch", "--no-tags", "--no-write-fetch-head", url,
-                                     "+refs/olddonkey-loop/*:refs/readback/*"]:
+                                     "+refs/olddonkey-loop/anchor:refs/readback/anchor"]:
                 return "git fetch"
             if len(rest) == 5 and rest[0] == "-C" and re.fullmatch(repo, rest[1]) \
                     and rest[2:] == ["ls-remote", url, ANCHOR_REF]:
@@ -5058,14 +5167,26 @@ def matrix_job(spec, journal):
         case.steps(steps)
         base = lineage(case.home)
         base["tip"] = remote_tip(case.remote)  # the recorded old pointer
+        if spec.get("pre_cut"):
+            case.steps(spec["pre_cut"])
         if crashed is not None:
             command, point, *extra = crashed
-            rc, err = case.child(command, point, *extra)
+            if spec.get("cut_trace") is not None:
+                cut, trace = case.cli("ceremony", command, tty=True, crash=point)
+                rc, err = cut.rc, cut.err
+                checks("F2", f"{label}: the ceremony's initial recovery mints exactly {spec['cut_trace']} "
+                       "before the marker cut, with no ceremony token",
+                       trace.labels == spec["cut_trace"]
+                       and any(event.get("e") == "crash" and event.get("point") == point for event in trace.events),
+                       (trace.labels, trace.events))
+            else:
+                rc, err = case.child(command, point, *extra)
             checks("F6", f"{label}: the cut is injected (exit 137), or is unreachable for a verify-only marker (exit 0)",
                    rc == spec.get("crash_rc", 137), err)
         if spec.get("mutate"):
             mutate(case, spec["mutate"])
         pre = case.durable()
+        pre_tip = remote_tip(case.remote) if spec.get("pre_cut") else None
         residual_digests = [tree_digest(root) for root in case.roots()] if spec.get("residual_intent") else None
         observation = case.observe()
         if spec.get("cut_residual"):
@@ -5121,7 +5242,7 @@ def matrix_job(spec, journal):
         if kind == "revocation-active" and spec["outcome"] == "both":
             # the anchored quarantine, materialized: once recovery has run to
             # completion from this cut, the marker exists with its exact bytes
-            writer = "recovery" if T_QT in minted else "ceremony"
+            writer = "recovery" if T_QT in minted or T_QT in spec.get("cut_trace", ()) else "ceremony"
             marker = marker_of(case.home, base["store_id"])
             checks("F6", f"{label}: once recovery has run to completion, the quarantine marker exists and is byte for "
                    "byte its writer's ("
@@ -5139,6 +5260,14 @@ def matrix_job(spec, journal):
                    read_bytes(auth(case.home, "stores", sid, "intent")) is not None and
                    marker_of(case.home, sid) == revocation_marker(sid, 2), sid)
         post = case.durable()
+        if spec.get("pre_cut"):
+            checks("F6", f"{label}: rotation/re-genesis never began; the old active generation and anchored "
+                   "revocation remain, with no bootstrap intent or archive",
+                   read_json(auth(case.home, "active")) == base["active"]
+                   and remote_tip(case.remote) == pre_tip
+                   and read_bytes(auth(case.home, "genesis.intent")) is None
+                   and read_bytes(auth(case.home, "regenesis.intent")) is None
+                   and not os.path.lexists(auth(case.home, "archive", base["store_id"])))
         allowed_frames = pre["frames"] | {i["frame"] for i in pre["intents"] if i["frame"]}
         allowed_commits = pre["commits"] | {i["commit"] for i in pre["intents"] if i["commit"]}
         checks("F5", f"{label}: every record after recovery is byte-equal to one durable before it (in the log, or the "
@@ -5157,7 +5286,12 @@ def fidelity_job(spec, journal):
     the frozen trace's rows in the same order."""
     def job(checks):
         case = Case(os.path.join(TMP, "c"), "fidelity " + spec["label"], journal)
-        case.steps(spec["steps"])
+        if spec.get("pre_cut"):
+            case.steps(spec["steps"][:-1])
+            case.steps(spec["pre_cut"])
+            case.steps(spec["steps"][-1:])
+        else:
+            case.steps(spec["steps"])
         run = spec["runs"][0]
         res = case.writer("recover")
         rows = [step.get("row") for step in res.json.get("steps", [])]
@@ -5342,6 +5476,12 @@ def matrix_specs(store):
                         crash_rc=0 if kind == "revocation" and point.startswith("fs-create-marker-") else 137,
                         steps=BASE_STEPS[kind] + [(command, point, *extra)],
                         runs=[run_spec(trace, RC_OF[(kind, outcome)])], outcome=outcome)
+            if outcome == "quarantined-before-ceremony":
+                # Same compound predicate as the active revocation cuts: its
+                # anchored record + exact recovery marker, no residual intent.
+                spec.update(kind="revocation-active", outcome="both",
+                            steps=[("genesis", "-"), (command, point)],
+                            pre_cut=[("revoke", "after-readback", "1")], cut_trace=[T_TD, T_QT])
             if outcome == "residual-intent":
                 # New #66 cut reaches the already pinned marker-written terminal
                 # state. It is never admitted by is_safe() or called "both".
@@ -5377,6 +5517,7 @@ def mode_matrix():
                                               "revocation-active crashed at after-frame-fsync",
                                               "genesis crashed at frame-byte-last",
                                               "regenesis crashed at regenesis-step-4")]
+    fidelity += [spec for spec in specs if spec.get("pre_cut")]
     jobs = [("F6", "outcome predicates against planted half-transitions", outcome_controls_job(journal))]
     jobs += [("F6", spec["label"], matrix_job(spec, journal)) for spec in specs]
     jobs += [("F2", "fidelity " + spec["label"], fidelity_job(spec, journal)) for spec in fidelity]

@@ -142,7 +142,7 @@ run):
    runs the changed review, frozen inventory/transport, named revocation and
    re-genesis scenarios, and coverage negative controls; it does not run the
    frame-byte matrix. `--review-only inventory` runs just the frozen inventory,
-   transport, and coverage controls — expect `selftest: PASS (94 checks)`.
+   transport, and coverage controls — expect `selftest: PASS (98 checks)`.
    The pty cases require a readable macOS
    `sysctl kern.bootsessionuuid` (sandbox denial is an environment failure,
    not a skipped or passed case). Then the crash matrix,
@@ -235,12 +235,18 @@ run):
    and `s._fs_create` fails, and is shown live), the verifier's runner frozen
    to its one `subprocess.run(argv, ...)` (an extra call planted inside it
    fails), and the verifier's complete fetch argv and git environment frozen
-   for file://, SSH, and HTTPS remotes, the wildcard fetch/push and exact
-   ls-remote forms, the whole-skill Python import-edge inventory and its
+   for file://, SSH, and HTTPS remotes, the exact anchor fetch and pattern
+   push and exact ls-remote forms, the token-carrying in-sink anchor-ref read
+   and direct-ref/loose-entry guard frozen after authorization immediately
+   before git (removing it, dropping its token, removing its loose-entry scan,
+   or moving it before authorization is detected), the whole-skill Python
+   import-edge inventory and its
    dynamic-import, subpackage, symlink and bytecode controls, alias begin/child
    and stream-factory controls; F2 the frozen entry-point table
    against the real parser and the ordered token trace of `recover` for every
-   case of the crash matrix;
+   case of the crash matrix, including both targeted marker cuts during
+   rotate/re-genesis's initial recovery (real crashes, frozen cut and recovery
+   traces, and uninstrumented-writer fidelity checks);
    F3 derived rows with no entry, unminted sink traces, and the compound
    children's token refusals;
    F4 no generic sealing or append hatch, each row validator dominating its
@@ -261,7 +267,7 @@ run):
    stubbed, so no pty; needs `ssh-keygen` with `-Y`, `git`, and `ssh`; the crash
    matrix runs in parallel beside the other modes) — expect one `F1` … `F6`
    line each with `PASS`, `escape-hatch: none`,
-   `falsifier: PASS (2680 checks)`, and `selftest: PASS (2680 checks)`.
+   `falsifier: PASS (2739 checks)`, and `selftest: PASS (2739 checks)`.
 13. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
 14. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.

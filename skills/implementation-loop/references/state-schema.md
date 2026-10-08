@@ -1236,16 +1236,34 @@ adds nothing to the writer.
   (`s = mods["store"]` forging an open token through `s._new(s.Token(...))`,
   `s._grant`, and `s._fs_create`), which is also run through the planted
   entry to show it writes `authority/active`. The verifier's `Runner.run` is
-  frozen timeout-handling body with one `subprocess.run(argv, ...)`, and an
+  frozen timeout- and process-start-error-handling body with one
+  `subprocess.run(argv, ...)`: fetch/ls-remote use 120 seconds and map
+  `TimeoutExpired` and `OSError` to `Unreachable`; local forms use 60 seconds
+  and map both to `EnvError`. Only direct `self.run` / `RUN.run` calls with
+  the frozen argv forms are reachable, and an
   extra process start planted inside it must fail. Starred arguments and
   `**` keywords on `open`, and dynamic stream factories, fail closed.
   `type()` is confined to operands of `is`/`is not`, apart from the verifier's
   frozen terminal type-name diagnostic; `.__init__` calls are refused apart
   from `Bad`'s frozen `super().__init__(detail or rule)` statement. Neither
   exception admits a stream constructor, an alias, or another call position.
-  The reviewed wildcard fetch/push refspecs, exact-anchor `ls-remote`, scratch
-  `git.update-anchor`, read `git.anchor-refs`, and remote `git.push-anchor`
-  sink retain their distinct frozen argv forms and effects.
+  The reviewed `1cf8bd7` exact fetch refspec
+  (`+refs/olddonkey-loop/anchor:refs/readback/anchor`) and pattern push
+  (`refs/olddonkey-loop/*:refs/olddonkey-loop/*`), exact-anchor `ls-remote`,
+  scratch `git.update-anchor`, read `git.anchor-refs` (including `%(symref)`),
+  and remote `git.push-anchor` sink retain their distinct frozen argv forms
+  and effects. `git.push-anchor` remains the only remote sink, owned by
+  `store.push_anchor`. The nested `git.anchor-refs` read inside `tools.run`
+  carries that sink's token; its complete AST and position are frozen after
+  authorization and immediately before the one process start. It requires
+  exactly the direct anchor at the permit's commit and scans loose entries
+  for siblings and dangling symbolic refs. Removing the guard, dropping its
+  token, removing the loose-entry scan, or moving it before authorization
+  are planted controls that must be detected; no new driver is admitted.
+  The reviewed read path gates fetch on exact-name `ls-remote`, returns
+  absent without fetching, and requires fetched and advertised ids to agree.
+  Missing/unreadable readback refs remain unreachable/pending; absent writer
+  readback is pending (exit 5). The subsequent classifier is unchanged.
 - **F2** every external entry point maps to exactly one row: a frozen table
   equal to the real parser's subcommands and ceremony names; `recover` maps
   to the recovery routine, and for every case of the crash matrix its
@@ -1313,6 +1331,17 @@ adds nothing to the writer.
   reaches a marker cut. Target-qualified intent and marker temp-fsync cuts
   each retain their own frozen ordered recovery traces. `matrix_cut` itself
   is exercised against scripted correct and incorrect markers, and bypassing its checks must fail.
+  The same two marker cuts are applicable to `rotate` and `regenesis` during
+  their initial recovery. Their fixture crashes active revocation at
+  `after-readback`, leaving its anchored record and residual intent but no
+  marker. Both ceremonies mint `recovery-tidy`, then `store-quarantine`, and
+  crash with exit 137 before any ceremony token is minted. At temp-fsync,
+  the next recovery mints only `store-quarantine`; at rename, it mints nothing.
+  Both exit 6 with the revocation's exact recovery marker, no residual intent,
+  and no rotation or new generation. All four cases retain F2's frozen
+  traces, F5's durable-record/pointer/key and no-signing checks, and F6's
+  strict active-revocation compound predicate; the uninstrumented writer
+  independently checks each recovery trace's rows.
   Neither means no
   revocation anchored and the old epoch still active; pending means the
   writer itself classifies a pending state (its transaction's durable frame
@@ -1324,6 +1353,11 @@ adds nothing to the writer.
   (`tests/authority-selftest.sh --crash-matrix`) must enumerate genesis,
   rotation, and active-epoch revocation frames, checked from its own
   enumerator. The request compounds are refused in 0a.
+  Falsifier frame samples resolve their offset from the run's own frame;
+  numeric torn samples are at most length minus two. The reviewed default
+  authority suite's `sampled_torn_crash` likewise credits a numeric sample
+  only when that run's frame has at least n + 2 bytes, discarding and retrying
+  shorter frames rather than crediting an unterminated cut as torn.
 
 The token trace comes from an in-test fixture that runs the real
 `loop-authority.py` with `store._new`, the sinks, `tools.run`, and the crash
