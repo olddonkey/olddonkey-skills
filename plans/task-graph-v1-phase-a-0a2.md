@@ -198,10 +198,12 @@ the genesis record, never in a config file.
   | `git.hash-object` | `git -C <scratch> hash-object -w --stdin` | scratch |
   | `git.mktree` | `git -C <scratch> mktree` (stdin: the one tree line) | scratch |
   | `git.commit-tree` | `git -C <scratch> commit-tree <tree> [-p <parent>] -m <message>` (pinned identity and `@<seq> +0000` dates) | scratch |
-  | `git.fetch-anchor` | `git <transport options> -C <scratch> fetch --no-tags --no-write-fetch-head <remote> +refs/olddonkey-loop/anchor:refs/readback/anchor` | scratch (writes objects and one scratch ref) |
+  | `git.fetch-anchor` | `git <transport options> -C <scratch> fetch --no-tags --no-write-fetch-head <remote> +refs/olddonkey-loop/anchor:refs/readback/anchor` | scratch (only the exact anchor; `anchor.fetch` gates on the exact advertised name and requires advertised/fetched equality) |
   | `git.ls-remote` | `git <transport options> -C <scratch> ls-remote <remote> refs/olddonkey-loop/anchor` | read |
   | `git.cat-file` | `git -C <scratch> cat-file (-t\|-p) <oid>` | read |
-  | `git.push-anchor` | `git <transport options> -C <scratch> push <remote> <commit>:refs/olddonkey-loop/anchor` | **sink**: anchor push |
+  | `git.update-anchor` | `git -C <scratch> update-ref refs/olddonkey-loop/anchor <commit>` | scratch |
+  | `git.anchor-refs` | `git -C <scratch> for-each-ref --format=%(objectname) %(refname) %(symref) refs/olddonkey-loop/` | read |
+  | `git.push-anchor` | `git <transport options> -C <scratch> push <remote> refs/olddonkey-loop/*:refs/olddonkey-loop/*` | **sink**: immediately checks sole direct scratch anchor at the permit's required `commit`, then pushes without intervening scratch mutation |
   | `ssh-keygen.generate` | `ssh-keygen -q -t ed25519 -N '' -C <comment> -f <temp path in the store's keys dir>` | **sink**: key file create |
   | `ssh-keygen.certify` | `ssh-keygen -q -s <root> -I <type>@e<epoch> -n <type> -V always:forever <subkey.pub>` | **sink**: key file create (uses the root) |
   | `ssh-keygen.sign` | `ssh-keygen -Y sign -f <subkey> -n olddonkey-loop.authority.<type>.v1` (payload on stdin, signature on stdout) | **sink**: seal |
@@ -269,10 +271,27 @@ tree = one entry `100644 anchor.json`; commit with parent `expected_parent`,
 author and committer `olddonkey-loop <anchor@olddonkey-loop.invalid>` and
 date = the raw git date `@<seq> +0000` (deterministic, timezone-independent), message
 `anchor <store_id> g<generation> s<seq>`. `git hash-object -w`, `git mktree`,
-and `git commit-tree` with `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` fixed; push
-`git push <remote> <commit>:refs/olddonkey-loop/anchor` (fast-forward only;
-a non-fast-forward is refused); readback `git fetch` of the ref into the
-scratch ref `refs/readback/anchor`, then verify by content (A1.2 step 4).
+and `git commit-tree` with `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` fixed. Stage
+the bound commit with `git.update-anchor`. Inside the authorized `git.push-anchor`
+sink, immediately before git runs, require `git.anchor-refs` (including
+`%(symref)`) to show only the direct anchor ref under `refs/olddonkey-loop/`,
+at the permit's required, validated `commit`. Refuse any extra loose, packed,
+symbolic or case-variant ref, symbolic anchor, or differing commit. Also inspect
+loose namespace entries to catch dangling symbolic refs omitted by Git's listing.
+No scratch mutation runs between this check and the push on the code path. Push
+`git push <remote> refs/olddonkey-loop/*:refs/olddonkey-loop/*` (fast-forward only;
+a non-fast-forward is refused). The pattern avoids an ambiguous exact push
+destination when `refs/heads/refs/olddonkey-loop/anchor` also exists. For every
+writer `anchor.fetch` and independent verifier fetch, first `ls-remote`, accepting
+only the exact advertised name; if absent, return absent without fetching.
+Otherwise use `+refs/olddonkey-loop/anchor:refs/readback/anchor` and require the
+fetched id to equal the advertised id. Git selects the exact source first when
+present; the gate prevents tail-matching when it was not advertised. Nothing
+from sibling refs is fetched. A disagreement ("the remote anchor moved while it
+was read"), failed fetch, or missing, malformed or unreadable readback ref is
+pending (exit 5). Each caller retains its comparison with its expected id, then
+verifies by content (A1.2 step 4). A reused scratch never supplies an old tip after
+an absent advertisement or failed fetch; the verifier starts a fresh bare repo.
 
 **The remote and git isolation.** `genesis --remote` accepts, in production,
 only two URL forms, pinned in the genesis record: `git@<host>:<path>.git` (SSH)
@@ -371,6 +390,12 @@ certificate link of that ceremony). An unknown point, a `frame-byte-<n>` with `n
 not strictly inside the frame being written, or a `key-step-<n>` beyond the
 ceremony's key steps makes the writer refuse to start.
 The selftest runs the writer as a subprocess under a scratch `HOME`.
+Target-qualified `fs-create-marker-after-temp-fsync` and
+`fs-create-marker-after-rename` also apply to rotation and re-genesis, whose
+recovery prelude can publish a quarantine marker, as well as revocation and
+recovery. Prelude cases delete the remote anchor before starting the ceremony.
+The registered command/point pairs and the scenarios actually exercised must
+equal an independently frozen inventory.
 
 ## 7. Fields
 
@@ -389,12 +414,15 @@ with the same rules: an environment built from its own allowlist (never
 inherited), `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
 `-c protocol.allow=never` plus the pinned transport, `-c http.sslVerify=true`,
 ssh as `-F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes`, and
-exactly three argv forms, each with `-c core.hooksPath=/dev/null -c
+exactly four argv forms, each with `-c core.hooksPath=/dev/null -c
 core.fsmonitor=false` (and the transport options where the remote is
 contacted) before the subcommand, and the same `[core]`-only config check
 after init: `git -C <temp> init --bare --template= --object-format=sha1 .`,
 `git -C <temp> fetch --no-tags --no-write-fetch-head <pinned remote>
-+refs/olddonkey-loop/anchor:refs/verify/anchor`, and `git -C <temp> cat-file
++refs/olddonkey-loop/anchor:refs/readback/anchor`,
+`git -C <temp> ls-remote <pinned remote> refs/olddonkey-loop/anchor` (only
+the exact advertised ref name is accepted; absence bypasses fetch and the
+fetched id must equal this advertisement), and `git -C <temp> cat-file
 (-t|-p) <oid>`, where the remote is only the genesis-pinned URL),
 `skills/implementation-loop/lib/loopauth/tools.py` (the subprocess wrapper),
 `skills/implementation-loop/tests/authority-selftest.sh`,

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Independent verifier of the authority store (task-graph-v1 Phase A, 0a.2).
+#
+# Usage:
+#   loop-authority-verify                 verify $HOME/.config/olddonkey-loop/authority
+#   loop-authority-verify transport-plan <remote>   (LOOP_AUTHORITY_TEST=1 only)
+#                                         print the exact git argv and environment
+#
+# By design this shares no code with lib/loopauth: loop-authority-verify.py
+# beside this wrapper has its own frame parser, canonical encoder, SSH
+# certificate and signature parser, chain and anchor checks, activation
+# boundary, and its own git and ssh-keygen runner, and imports nothing from
+# lib/. It writes nothing to the authority store or the remote: it fetches the
+# anchor into a disposable scratch repository in a fresh temporary directory
+# ($HOME/.cache/olddonkey-loop/verify/<pid>-<16 hex>, created with O_NOFOLLOW
+# on every component, never the inherited TMPDIR) that it deletes, and writes
+# its temporary allowed_signers there.
+#
+# git runs only in four argv forms, each with -c core.hooksPath=/dev/null
+# -c core.fsmonitor=false (and the transport options where the remote is
+# contacted) before the subcommand:
+#   git -C <temp> init --bare --template= --object-format=sha1 .
+#   git -C <temp> fetch --no-tags --no-write-fetch-head <pinned remote>
+#       +refs/olddonkey-loop/anchor:refs/readback/anchor
+#   git -C <temp> ls-remote <pinned remote> refs/olddonkey-loop/anchor
+#       (accept only the exact name; absent skips fetch; fetched id must agree)
+#   git -C <temp> cat-file (-t|-p) <oid>
+# with an environment built from an allowlist (never inherited).
+#
+# Output: one JSON object (state, table, rule, current_authorization,
+# test_only, ...), in the writer's state vocabulary. Exit 0 committed,
+# 5 pending, 6 quarantined, 7 terminal bootstrap state, 9 environment,
+# 12 invalid (including no store).
+#
+# This wrapper writes nothing (no directory, no heredoc temporary file).
+
+set -euo pipefail
+: "${HOME:?HOME must be set}"
+self="${BASH_SOURCE[0]}"
+while [[ -L "$self" ]]; do
+  link="$(readlink -- "$self")"
+  case "$link" in
+    /*) self="$link" ;;
+    *) self="$(dirname -- "$self")/$link" ;;
+  esac
+done
+here="$(CDPATH= cd -P -- "$(dirname -- "$self")" && pwd -P)"
+exec python3 -I -B "$here/loop-authority-verify.py" "$@"

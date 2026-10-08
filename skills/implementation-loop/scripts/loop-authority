@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# The authority store's writer (task-graph-v1 Phase A, sub-unit 0a.2).
+#
+# Usage:
+#   loop-authority status                 classify, read-only (JSON on stdout)
+#   loop-authority verify                 classify, read-only; exit 0 only when
+#                                         committed; exit 12 with no store
+#   loop-authority recover                run recovery rows under the lock
+#   loop-authority ceremony genesis --remote <url>
+#   loop-authority ceremony rotate
+#   loop-authority ceremony revoke --epoch <n>
+#   loop-authority ceremony regenesis
+#   loop-authority submit <row-id>        the external entry for typed rows;
+#                                         every such row is dormant in 0a.2
+#
+# Store: $HOME/.config/olddonkey-loop/authority/ (see references/state-schema.md).
+# A ceremony is an operator-TTY session (A1.1): it refuses unless stdin and
+# stdout are terminals and proceeds only when the printed challenge is typed
+# back. It proves a session with a terminal performed it, not that a human
+# approved it. No environment variable skips the TTY check.
+#
+# Exit codes: 0 ok, 2 usage, 3 lock busy, 4 refused, 5 pending, 6 quarantined,
+# 7 terminal bootstrap state, 8 dormant row, 9 environment (binary, ssh-keygen,
+# library, scratch path), 10 approval.consume refused, 11 TTY or challenge,
+# 12 invalid (including verify with no store), 137 test crash point.
+#
+# Test-only (LOOP_AUTHORITY_TEST=1): file:// remotes (a permanently
+# non-authorizing test lineage), LOOP_AUTHORITY_CRASH_AT=<point>, and
+# LOOP_AUTHORITY_TEST_BIN_DIR (wrapper fixtures; refused for any mutation of a
+# production lineage, and nothing then reports current authorization).
+#
+# This wrapper writes nothing -- no directory, no heredoc temporary file: it
+# resolves its real directory and runs loop-authority.py beside it, whose
+# first act (after refusals that need no file) is to create its scratch
+# directory under $HOME/.cache/olddonkey-loop with O_NOFOLLOW on every path
+# component. The inherited TMPDIR is never used. Shared code is imported
+# from the sibling lib/ of that real directory; a symlinked lib/ is refused.
+
+set -euo pipefail
+: "${HOME:?HOME must be set}"
+self="${BASH_SOURCE[0]}"
+while [[ -L "$self" ]]; do
+  link="$(readlink -- "$self")"
+  case "$link" in
+    /*) self="$link" ;;
+    *) self="$(dirname -- "$self")/$link" ;;
+  esac
+done
+here="$(CDPATH= cd -P -- "$(dirname -- "$self")" && pwd -P)"
+exec python3 -I -B "$here/loop-authority.py" "$@"
