@@ -96,7 +96,7 @@ COMMAND_TABLE: dict[str, dict] = {
         "binary": "git",
         "argv": ("<git-prefix>", "<transport>", "-C", "<scratch>", "fetch", "--no-tags",
                  "--no-write-fetch-head", "<remote>",
-                 "+refs/olddonkey-loop/*:refs/readback/*"),
+                 "+refs/olddonkey-loop/anchor:refs/readback/anchor"),
         "effect": "scratch",
     },
     "git.ls-remote": {
@@ -119,7 +119,7 @@ COMMAND_TABLE: dict[str, dict] = {
     "git.anchor-refs": {
         "binary": "git",
         "argv": ("<git-prefix>", "-C", "<scratch>", "for-each-ref",
-                 "--format=%(objectname) %(refname)", "refs/olddonkey-loop/"),
+                 "--format=%(objectname) %(refname) %(symref)", "refs/olddonkey-loop/"),
         "effect": "read",
     },
     "git.push-anchor": {
@@ -770,6 +770,25 @@ def run(command_id: str, *, token: object = None, stdin: bytes = b"", **params: 
     env = command_env(command_id, params)
     timeout = REMOTE_TIMEOUT if command_id in REMOTE_COMMANDS else LOCAL_TIMEOUT
     try:
+        if command_id == "git.push-anchor":
+            # The permit covers commit even though the pattern push argv
+            # names refs. Check at the sink, after authorization, with no
+            # scratch mutation between this observation and the push.
+            refs = run("git.anchor-refs", token=token, scratch=params["scratch"])
+            expected = f"{params['commit']} {ANCHOR_REF} \n".encode("ascii")
+            if refs.returncode != 0 or refs.stdout != expected:
+                store.refuse("anchor-scratch", "scratch anchor namespace must contain only "
+                             "the direct anchor ref at the permit's commit")
+            # for-each-ref omits dangling symbolic refs. Refuse those and
+            # other loose entries too; a packed-only anchor has no directory.
+            namespace = os.path.join(params["scratch"], "refs", "olddonkey-loop")
+            try:
+                with os.scandir(namespace) as entries:
+                    if any(entry.name != "anchor" or not entry.is_file(follow_symlinks=False)
+                           for entry in entries):
+                        store.refuse("anchor-scratch", "scratch anchor namespace has extra loose entries")
+            except FileNotFoundError:
+                pass
         completed = subprocess.run(
             argv,
             input=stdin,

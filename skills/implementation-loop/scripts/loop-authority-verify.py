@@ -417,7 +417,7 @@ class Runner:
             assert self.remote is not None
             return prefix + self.transport() + ["-C", self.repo, "fetch", "--no-tags",
                                                 "--no-write-fetch-head", self.remote["url"],
-                                                "+refs/olddonkey-loop/*:refs/readback/*"]
+                                                "+refs/olddonkey-loop/anchor:refs/readback/anchor"]
         if form == "ls-remote":
             assert self.remote is not None
             return prefix + self.transport() + ["-C", self.repo, "ls-remote",
@@ -437,6 +437,10 @@ class Runner:
             if form in ("fetch", "ls-remote"):
                 raise Unreachable(f"git {form} timed out") from error
             raise EnvError("local command timed out") from error
+        except OSError as error:
+            if form in ("fetch", "ls-remote"):
+                raise Unreachable(f"git {form} could not run: {error}") from error
+            raise EnvError(f"local command could not run: {error}") from error
 
     def init_repo(self) -> None:
         self.repo = os.path.join(self.temp, "anchor.git")
@@ -478,7 +482,7 @@ class Runner:
         try:
             with open(path, "rb") as handle:
                 oid = handle.read(128).decode("ascii", "replace").strip()
-        except OSError:
+        except FileNotFoundError:
             oid = ""
             try:
                 with open(os.path.join(self.repo, "packed-refs"), "rb") as handle:
@@ -488,8 +492,12 @@ class Runner:
                             oid = value
             except OSError:
                 pass
+        except OSError as error:
+            raise Unreachable("fetched ref is unreadable") from error
         if not OID.fullmatch(oid):
             raise Unreachable("fetched ref is missing or malformed")
+        if oid != matches[0]:
+            raise Unreachable("the remote anchor moved while it was read")
         return oid
 
     def cat(self, mode: str, oid: str) -> bytes:

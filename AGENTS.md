@@ -123,7 +123,7 @@ run):
    plus schema-2 records written through `loop-journal append --schema 2`) —
    expect `selftest: PASS (803 checks)`.
 12. `python3 skills/implementation-loop/tests/authority-review-selftest.py`
-   runs 20 offline review regression tests, including real Git writer/verifier
+   runs 33 offline review regression tests, including real Git writer/verifier
    agreement and full-fsync routing.
    `bash skills/implementation-loop/tests/authority-selftest.sh` (the 0a.2
    authority store: the real `scripts/loop-authority` under a scratch `HOME`,
@@ -131,7 +131,8 @@ run):
    Ed25519 keys from the host `ssh-keygen`, crash injection at every protocol
    cut, and the independent verifier; needs `ssh-keygen` with `-Y`, `git`,
    `ssh`, and `openssl`, and runs its cases in parallel) — expect
-   `selftest: PASS (1916 checks)`, including the real
+   `selftest: PASS (2020 checks)` (2016 baseline checks plus four deterministic
+   sample-retry controls), including the real
    crashes derived from every command's `CRASH_APPLICABLE` set. The
    "crash matrix coverage check" section tests missing, duplicate, and
    miscredited cuts independently of section order. For review-only work,
@@ -139,7 +140,7 @@ run):
    runs the changed review, frozen inventory/transport, named revocation and
    re-genesis scenarios, and coverage negative controls; it does not run the
    frame-byte matrix. `--review-only inventory` runs just the frozen inventory,
-   transport, and coverage controls — expect `selftest: PASS (83 checks)`.
+   transport, and coverage controls — expect `selftest: PASS (94 checks)`.
    The pty cases require a readable macOS
    `sysctl kern.bootsessionuuid` (sandbox denial is an environment failure,
    not a skipped or passed case). Then the crash matrix,
@@ -200,7 +201,7 @@ run):
    so forged, altered, and replayed plans and caller-built bindings mint
    nothing -- abandonment that removes only the intent, missing intent-named
    directories, and the revocation's quarantine child) — expect
-   `selftest: PASS (467 checks)`.
+   `selftest: PASS (471 checks)`.
 13. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
    — expect `selftest: PASS (207 checks)`.
 14. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
