@@ -237,12 +237,15 @@ invoke() { # name action variant flags...
   env HOME="$HOME_FIX" PATH="$BIN:$PATH" LOOP_JOURNAL="$TMP_ROOT/no-journal" \
     CLAUDE_STUB_LOG="$LOG" CLAUDE_STUB_ACTION="$action" CLAUDE_STUB_VARIANT="$variant" \
     CLAUDE_REAL_REPO="$REPO" CLAUDE_LATE_MARKER="$TMP_ROOT/$name.late-marker" ${INVOKE_ENV[@]+"${INVOKE_ENV[@]}"} \
-    bash -c 'cd "$1" && shift && exec "$@"' _ "$REPO" "$DISPATCH" --prompt 'bounded fixture change' "$@" \
+    bash -c 'umask "$1" && cd "$2" && shift 2 && exec "$@"' _ "$INVOKE_UMASK" "$REPO" "$DISPATCH" --prompt 'bounded fixture change' "$@" \
       < "$TMP_ROOT/adapter-input" > "$OUT" 2> "$ERR"
   STATUS=$?
   set -e
 }
 INVOKE_ENV=()
+# The adapter applies its patch under the caller's umask, so every case pins
+# the mask it is called with instead of inheriting the host's.
+INVOKE_UMASK=022
 
 # Implement: patch, provenance, exact fixed argv, result, and Git ownership.
 init_fixture implement
@@ -330,11 +333,34 @@ check 'mode change reaches 755' python3 - "$REPO/mode.sh" <<'PY'
 import os,stat,sys
 raise SystemExit(0 if stat.S_IMODE(os.stat(sys.argv[1]).st_mode)==0o755 else 1)
 PY
-check 'new file mode is 644 under apply umask' python3 - "$REPO/added.txt" <<'PY'
+check 'new file mode is 644 under caller umask 022' python3 - "$REPO/added.txt" <<'PY'
 import os,stat,sys
 raise SystemExit(0 if stat.S_IMODE(os.stat(sys.argv[1]).st_mode)==0o644 else 1)
 PY
 check 'single raw patch has no normalized companion' missing "$(summary 'run state')/changes.raw.patch"
+
+# The patch is applied under the caller's umask, not a fixed 022: a caller
+# with 027 gets the new file as 0640, as its own shell would create it, while
+# the adapter's own run state stays private.
+init_fixture umask-027
+INVOKE_UMASK=027
+invoke umask-027 edit normal
+INVOKE_UMASK=022
+check 'dispatch under caller umask 027 succeeds' status_is 0
+check 'summary discloses caller umask 027 as the worktree umask' contains "worktree umask: 0027 (caller's; the patch is applied under it)" "$OUT"
+check 'new file mode is 640 under caller umask 027' python3 - "$REPO/added.txt" <<'PY'
+import os,stat,sys
+raise SystemExit(0 if stat.S_IMODE(os.stat(sys.argv[1]).st_mode)==0o640 else 1)
+PY
+check 'run state stays private under caller umask 027' python3 - "$(summary 'run state')" <<'PY'
+import os,stat,sys
+root=sys.argv[1]
+def mode(path): return stat.S_IMODE(os.lstat(path).st_mode)
+ok = mode(root)==0o700 and all(
+    mode(os.path.join(root,name)) == (0o700 if os.path.isdir(os.path.join(root,name)) else 0o600)
+    for name in os.listdir(root))
+raise SystemExit(0 if ok else 1)
+PY
 
 # The background child writes only after frozen/untracked.txt appears.
 init_fixture late-write
@@ -717,7 +743,7 @@ check 'failed dispatch.end does not change dispatch exit' status_is 0
 check 'failed dispatch.end warns' contains 'warning: loop-journal dispatch.end failed' "$ERR"
 INVOKE_ENV=()
 
-EXPECTED_CHECKS=303
+EXPECTED_CHECKS=307
 if [[ $CHECKS -ne $EXPECTED_CHECKS || $FAILURES -ne 0 ]]; then
   printf 'selftest: FAIL (%d/%d checks failed; expected %d checks)\n' "$FAILURES" "$CHECKS" "$EXPECTED_CHECKS" >&2
   exit 1
