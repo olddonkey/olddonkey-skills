@@ -1,5 +1,7 @@
 # task-graph-v1 — amendment A1 (trusted writer)
 
+**Archived 2026-10-15.** The task-graph-v1 Phase A implementation (0a.1–0a.4, PRs #65–#68) was removed from main, where nothing used it. It stays in main's history at `47b8cc1`; `git diff 7111489 47b8cc1` is the whole of it. This plan is kept as a design record, not as live work.
+
 **Status: ACCEPTED** at Codex read-only review round 9 (2026-09-29, gpt-6-sol /
 max, thread `01a0ebb0`), findings per round 8 → 4 → 3 → 3 → 2 → 1 → 1 → 1 → 0.
 A1 **amends** `plans/task-graph-v1.md` (ACCEPTED, round 11): where they

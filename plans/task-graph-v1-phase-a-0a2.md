@@ -1,5 +1,7 @@
 # task-graph-v1 Phase A — sub-unit 0a.2 (the authority store and its ceremonies)
 
+**Archived 2026-10-15.** The task-graph-v1 Phase A implementation (0a.1–0a.4, PRs #65–#68) was removed from main, where nothing used it. It stays in main's history at `47b8cc1`; `git diff 7111489 47b8cc1` is the whole of it. This plan is kept as a design record, not as live work.
+
 **Status: ACCEPTED** at Codex read-only review round 15 (2026-09-29, gpt-6-sol / max, thread `01a0ebb0`), together with amendment A2.3–A2.4; the two round-15 minors are applied (§23). Its post-acceptance delta under
 A2.1 (§24) was accepted at round 5 of thread `01a0ec41`. The contract is amendment A1
 (`plans/task-graph-v1-amendment-a1.md`, ACCEPTED round 9) on top of

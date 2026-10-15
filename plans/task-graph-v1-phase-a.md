@@ -1,5 +1,7 @@
 # task-graph-v1 Phase A — kickoff
 
+**Archived 2026-10-15.** The task-graph-v1 Phase A implementation (0a.1–0a.4, PRs #65–#68) was removed from main, where nothing used it. It stays in main's history at `47b8cc1`; `git diff 7111489 47b8cc1` is the whole of it. This plan is kept as a design record, not as live work.
+
 **Status: 0a.1 ACCEPTED** at Codex read-only review round 13 (2026-09-29,
 gpt-6-sol / max, thread `01a0ebb0`); findings per round 15 → 10 → 5 → 4 → 5 → 3
 → 3 → 2 → 2 → 2 → 2 → 3 → 2 (minor). This document specifies **only sub-unit
