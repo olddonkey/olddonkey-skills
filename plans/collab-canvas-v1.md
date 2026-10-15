@@ -962,6 +962,9 @@ person it depends on, and they will stop running it.
    frozen stack's own schema-1 event list and index do not know the `claude`
    backend value, the `reviewer` field, or `read-run`; if the stack is ever
    merged, porting those is required work, not an automatic compatibility.
+   *Later (2026-10-15):* the stack was merged on 2026-10-08 and removed from
+   main again on 2026-10-15; main is back on journal schema 1 only. The code
+   stays in main's history at `47b8cc1`.
 2. **Claude is an agent on the canvas in v1.** There is no shipped `claude`
    backend; a `claude -p` harness exists under
    `plans/product-direction-v1-tools/`. Unit 0 turns it into a fourth backend

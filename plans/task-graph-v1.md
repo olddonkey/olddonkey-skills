@@ -1,5 +1,7 @@
 # task-graph-v1
 
+**Archived 2026-10-15.** The task-graph-v1 Phase A implementation (0a.1–0a.4, PRs #65–#68) was removed from main, where nothing used it. It stays in main's history at `47b8cc1`; `git diff 7111489 47b8cc1` is the whole of it. This plan is kept as a design record, not as live work.
+
 **Status: ACCEPTED** — Codex read-only adversarial review, 11 rounds, 2026-08-18. **Amended by A1** (`plans/task-graph-v1-amendment-a1.md`, accepted 2026-09-29; where the two differ, A1 wins).
 See §12 for the acceptance record and the falsifier carried into implementation.
 

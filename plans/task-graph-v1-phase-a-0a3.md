@@ -1,5 +1,7 @@
 # task-graph-v1 Phase A — sub-unit 0a.3 (verifying claimed authority references)
 
+**Archived 2026-10-15.** The task-graph-v1 Phase A implementation (0a.1–0a.4, PRs #65–#68) was removed from main, where nothing used it. It stays in main's history at `47b8cc1`; `git diff 7111489 47b8cc1` is the whole of it. This plan is kept as a design record, not as live work.
+
 **Status: ACCEPTED** at Codex read-only review round 3 (2026-09-29, gpt-6-sol /
 max, thread `01a0ec41`; findings 10 → 7 → 4, the last on A2.1 and the 0a.2
 delta, both accepted at rounds 4 and 5), together with

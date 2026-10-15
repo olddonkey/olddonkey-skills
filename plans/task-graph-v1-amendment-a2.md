@@ -1,5 +1,7 @@
 # task-graph-v1 — amendment A2 (request rows dormant through 0a; genesis recovery)
 
+**Archived 2026-10-15.** The task-graph-v1 Phase A implementation (0a.1–0a.4, PRs #65–#68) was removed from main, where nothing used it. It stays in main's history at `47b8cc1`; `git diff 7111489 47b8cc1` is the whole of it. This plan is kept as a design record, not as live work.
+
 **Status: A2.3–A2.4 ACCEPTED** at Codex read-only review round 15 (2026-09-29,
 gpt-6-sol / max, thread `01a0ebb0`) together with the 0a.2 specification.
 **A2.1 ACCEPTED** at round 4 (thread `01a0ec41`) together with
