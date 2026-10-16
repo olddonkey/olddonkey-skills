@@ -73,16 +73,13 @@ A unit = one coherent, reviewable change, roughly one PR. Settle the design **be
 # manually with the skill's install directory.
 # State the intent settled at kickoff on EVERY dispatch — model names age, and
 # ambient config can change under you between one unit and the next.
-# LOOP_UNIT/LOOP_ROUND label the journaled dispatch with the unit and round it serves.
-LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" \
+"${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" \
     --prompt-file /tmp/unit-prompt.txt --model gpt-5.6-sol --effort max   # both are per-turn overrides
-LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" \
+"${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" \
     --prompt-file /tmp/unit-prompt.txt                                    # inherit whatever config says
-LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/claude/dispatch.sh" \
+"${CLAUDE_SKILL_DIR}/backends/claude/dispatch.sh" \
     --prompt-file /tmp/unit-prompt.txt --model opus --effort xhigh
 ```
-
-Set `LOOP_UNIT` and `LOOP_ROUND` on every dispatch and gate command, iterations included, so the journal can attribute each event to its unit without guessing from order or time. The label is a declaration by whoever ran the command, not proof of which unit ran.
 
 For absolute-path invocation from Cursor, a plain shell, or CI, see
 [references/running-anywhere.md](references/running-anywhere.md).
@@ -135,7 +132,7 @@ Read the actual diff; the summary only says where to look. Check the whole tree 
 **Cross-review when the writer is your own vendor.** When you and the implementer are the same model family (a Claude session driving the claude backend), your reading shares its blind spots, so every round also goes to the other backend as a read-only dispatch. Write a prompt file with the spec, the full diff against the unit's base (new files included, for example `git add -A && git diff --cached <base>`), and the checklist above, and ask for `SHIP` or `ITERATE` with findings at file:line:
 
 ```bash
-LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" \
+"${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" \
     --read-only --prompt-file /tmp/unit-3-review.txt
 ```
 
@@ -166,14 +163,13 @@ Repeat until the diff is something you'd sign. A bug that surfaces **outside** a
 Run the whole suite yourself via the bundled helper — piping through `tail` masks the real exit code:
 
 ```bash
-# LOOP_UNIT/LOOP_ROUND label the journaled gate.result, as on dispatch (§2).
 # strict policy — zero failures ENFORCED (recognized verdict + executed tests + no failure lines):
-LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --strict --log /tmp/gate.log -- <test command>
+"${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --strict --log /tmp/gate.log -- <test command>
 # baseline policy ONLY — tolerates failures already present in the base-branch log:
-LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log --baseline /tmp/base.log -- <test command>
+"${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log --baseline /tmp/base.log -- <test command>
 # no flag = pass-through (exit code only, works with any runner) — WEAKEST; only for
 # runners the parser doesn't support, and say so when reporting the result:
-LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log -- <test command>
+"${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log -- <test command>
 ```
 
 `baseline` policy = no new non-flake failures vs the base branch, decided mechanically (pytest identifiers include the exception class; skipped-only, empty, or unparseable runs fail closed). It proves *no new failure identifiers and that tests executed* — not that the full calibrated suite ran; check the reported count when it matters. **A check you forbade the implementer from running is a check you own, and it runs before you judge the diff — not after the cheap ones.** Dispatches routinely prohibit the slow, environment-heavy suites (browser e2e, anything needing a database or two servers) while the spec still requires them to pass. That combination is a blind spot you built: the implementer cannot discover the breakage, so nothing does until you run it. And it is exactly where a change of UI surface lands — a flow moved from a dialog to a route, a heading renamed, a default filter added — because those specs drive the product through the same affordances the unit just rewrote.
@@ -187,8 +183,6 @@ On red that does implicate the diff, follow the on-red dial with capped attempts
 ## 6. Publish
 
 Go exactly as far as the stop point says. **Check the branch before pushing** (`git status -sb`) — other tools quietly move checkouts, and a blind push lands commits on whatever is checked out; with the unit branch created at dispatch time this is confirmation, not rescue. Write commits/PRs so an absent reader understands *why*, with real gate numbers; match the repo's existing conventions. Merge only under recorded authorization (non-negotiable #2).
-
-**The record card may be pasted into the PR body — as what it is.** `"${CLAUDE_SKILL_DIR}/scripts/loop-evidence" --unit unit-3` prints a markdown card derived mechanically from the journal index (`--format json` for the same data): the unit's declared dispatches, review rounds and last verdict, final gate, later red or unknown gates, whether the final gate's post head equals the published SHA, and the publication (recorded by `scripts/loop-run publish`). It is a record, not a proof: every row is a local journal entry that any process running as you can append to — a tracked test suite running inside a gate included — and is labelled `recorded`, `declared`, `values match`, or `unknown`; the card ends with a sentence saying so. Paste it whole, beside your own account of the gate numbers, never in place of the head and base checks below.
 
 **Bind the gate to the commit that ships — commit first, gate the commit.** A gate certifies one commit, and gating the working tree *before* committing proves nothing about what lands: a commit hook can rewrite or re-stage content, so tree A gets gated while commit B ships. Order: create the candidate commit → record its SHA (`git rev-parse HEAD`) → run the final gate on that committed state → confirm HEAD still equals the recorded SHA and the tree is clean → push that same SHA.
 
@@ -234,5 +228,3 @@ Recognize both `loop[<repo>]` and the legacy `codex-loop[<repo>]` prefixes in us
 Record format example: [references/dials.md](references/dials.md).
 
 A setting stored in **user-level memory** IS standing authorization for the scope it was given in — that's what lets sessions resume without re-asking. It does not stretch to work of a different character: a `light`-depth unit that turns out to touch a security boundary, or a `merge` stop point meeting money, gets surfaced and re-checked.
-
-When a calibration store exists for the workspace (`~/.config/olddonkey-loop/calibration/<workspace-key>.tsv`) it is the machine-read authority: kickoff reads it instead of asking about the dials it covers. A rejected store means **no standing authorization** — kickoff asks, and must not fall back to memory (that is what would resurrect a revoked grant). After a workspace has a store, a permission granted in chat is valid for that session but does not persist; persisting it takes a console action.

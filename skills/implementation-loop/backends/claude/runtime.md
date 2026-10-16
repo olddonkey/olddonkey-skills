@@ -77,9 +77,7 @@ root, not the protected state directory.
 State includes `project-files.zlist`, `prompt.txt`, `stream.jsonl`,
 `stderr.log`, and, after a valid result, `last-message.txt`. Implement mode
 also records `changes.patch`; a nonempty checked patch
-records apply logs. See the [state schema](../../references/state-schema.md).
-`dispatch.start` is appended after the copies exist and before launch;
-`dispatch.end` is appended by the exit trap.
+records apply logs.
 
 ## Read-only mode
 

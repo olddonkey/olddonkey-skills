@@ -95,7 +95,7 @@ Verify once:
 
 ```bash
 bash ~/.cursor/plugins/local/cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
-# expect: selftest: PASS (207 checks)
+# expect: a final `selftest: PASS (N checks)` line and exit 0
 ```
 
 To reproduce the default install manually, copy bare files — both steps are required:

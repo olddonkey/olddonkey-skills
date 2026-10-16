@@ -95,14 +95,6 @@ expect_no_file_line() { # $1=file $2=exact line $3=description
   fi
 }
 
-expect_file_contains() { # $1=file $2=fixed string $3=description
-  if [[ -f "$1" ]] && grep -Fq -- "$2" "$1"; then
-    pass "$3"
-  else
-    fail "$3 (missing: $2 in $1)"
-  fi
-}
-
 expect_missing_file() { # $1=file $2=description
   if [[ -e "$1" ]]; then
     fail "$2 (unexpected file: $1)"
@@ -377,12 +369,6 @@ write_lines "$LAUNCHER" \
   '    signal.signal(getattr(signal, name), signal.SIG_IGN if name in ignored else signal.SIG_DFL)' \
   'os.chdir(sys.argv[1])' \
   'os.execvp(sys.argv[2], sys.argv[2:])'
-
-JOURNAL_STUB="$BIN_DIR/loop-journal-stub"
-write_lines "$JOURNAL_STUB" \
-  '#!/usr/bin/env bash' \
-  'printf "%s\n" "$*" >> "${JOURNAL_STUB_LOG:?}"'
-chmod +x "$JOURNAL_STUB"
 
 wait_until() { # remaining args=condition command; polls for up to 10 seconds
   local attempt=0
@@ -1125,7 +1111,6 @@ run_recover crash-recover-dead "$CRASH_HOME" "$CRASH_WORKSPACE" --recover-stale
 expect_status 0 "--recover-stale succeeds once the lock is free and the process group is empty"
 expect_output "generation $CRASH_ID recorded as failed (was running)" "recovery reports the transition"
 expect_output "process group $CRASH_CHILD_PID has no members" "recovery states its evidence"
-expect_output "loop-journal recover --acknowledge $CRASH_ID" "recovery points at the journal's own acknowledgement"
 expect_stdout_exact "" "recovery prints nothing on stdout"
 expect_missing_file "$TMP_ROOT/crash-recover-dead.argv" "recovery never launches Codex"
 expect_file_line "$CRASH_STATE/meta.tsv" $'state\tfailed' "recovered generation is recorded failed"
@@ -1248,15 +1233,13 @@ run_split_case_in_dir recover-with-prompt "$WORKSPACE" env \
 expect_status 2 "--recover-stale with a dispatch argument is refused"
 expect_output "takes no other arguments" "recovery refusal says it never dispatches"
 
-# SIGTERM, SIGINT, and SIGHUP stop the Codex process group, record the
-# generation failed, and journal dispatch.end, so the common ways a wrapper is
-# stopped leave no stale record and no orphaned CLI.
+# SIGTERM, SIGINT, and SIGHUP stop the Codex process group and record the
+# generation failed, so the common ways a wrapper is stopped leave no stale
+# record and no orphaned CLI.
 TERM_HOME="$STATE_PARENT/sig-term-home"
 TERM_WORKSPACE="$STATE_PARENT/sig-term-workspace"
-TERM_JOURNAL="$TMP_ROOT/sig-term.journal"
 mkdir -p "$TERM_HOME/.codex" "$TERM_WORKSPACE"
-if start_held_dispatch sig-term "$TERM_HOME" "$TERM_WORKSPACE" \
-     LOOP_JOURNAL="$JOURNAL_STUB" JOURNAL_STUB_LOG="$TERM_JOURNAL"; then
+if start_held_dispatch sig-term "$TERM_HOME" "$TERM_WORKSPACE"; then
   pass "signal fixture holds a live dispatch"
 else
   fail "signal fixture holds a live dispatch"
@@ -1271,9 +1254,6 @@ expect_status 143 "SIGTERM to the wrapper exits 128 plus the signal"
 expect_output "dispatch interrupted by SIGTERM" "SIGTERM is diagnosed as an interrupted dispatch"
 expect_group_gone "$HELD_CHILD_PID" "SIGTERM stops the Codex process group"
 expect_file_line "$HELD_STATE/meta.tsv" $'state\tfailed' "SIGTERM records the generation failed"
-expect_file_contains "$TERM_JOURNAL" \
-  "--event dispatch.end --field dispatch_id=$HELD_ID --field exit=143 --field session=$CRASH_SESSION" \
-  "SIGTERM journals dispatch.end with the signal exit and the session"
 run_split_case_in_dir sig-term-next "$TERM_WORKSPACE" env \
   HOME="$TERM_HOME" CODEX_HOME="$TERM_HOME/.codex" PATH="$TEST_PATH" \
   CODEX_STUB_LOG="$TMP_ROOT/sig-term-next.argv" "$DISPATCH" --prompt next

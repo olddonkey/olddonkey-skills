@@ -12,9 +12,10 @@ TMP_ROOT_RAW="$(mktemp -d "$SCRIPT_DIR/.contract-negative.XXXXXX")"
 TMP_ROOT="$(CDPATH= cd -- "$TMP_ROOT_RAW" && pwd -P)"
 trap 'rm -rf -- "$TMP_ROOT"' EXIT HUP INT TERM
 
-RULES="help prompt-file prompt-inline prompt-precedence prompt-required dash-prompt missing-values repeated-flags unknown-flags readonly-alias background exit-status signal-status env-namespace summary-fields journal-missing journal-start-refusal journal-events journal-unattributed journal-readonly-mode final-message worktree-umask"
+RULES="help prompt-file prompt-inline prompt-precedence prompt-required dash-prompt missing-values repeated-flags unknown-flags readonly-alias background exit-status signal-status env-namespace summary-fields final-message worktree-umask"
 CHECKS=0
 FAILURES=0
+REJECTED=0
 
 pass() {
   CHECKS=$((CHECKS + 1))
@@ -58,15 +59,6 @@ if [[ "$BROKEN_RULE" == "background" ]]; then
   exit 0
 fi
 if [[ "$BROKEN_RULE" == "exit-status" || "$BROKEN_RULE" == "signal-status" ]]; then
-  exit 0
-fi
-if [[ "$BROKEN_RULE" == "journal-missing" ]]; then
-  mkdir -p "${HOME:?}/.config/olddonkey-loop/journal/created-by-stub"
-fi
-if [[ "$BROKEN_RULE" == "journal-start-refusal" ]]; then
-  : "${CONTRACT_TMPDIR:?}"
-  : "${CONTRACT_CASE:?}"
-  printf '%s' 'journal' > "$CONTRACT_TMPDIR/$CONTRACT_CASE.observed-prompt"
   exit 0
 fi
 
@@ -126,11 +118,6 @@ fi
 
 if [[ "$BROKEN_RULE" == "final-message" ]]; then
   dispatch_id="20260901T000000Z-a1b2c3d4"
-  : "${LOOP_JOURNAL:?}"
-  "$LOOP_JOURNAL" append --workspace "$PWD" --event dispatch.start \
-    --field "dispatch_id=$dispatch_id" --field backend=codex --field mode=implement >/dev/null || exit $?
-  "$LOOP_JOURNAL" append --workspace "$PWD" --event dispatch.end \
-    --field "dispatch_id=$dispatch_id" --field exit=0 >/dev/null || exit $?
   workspace_key="$(python3 - "$PWD" <<'PY_KEY'
 import hashlib, os, sys
 print(hashlib.sha256(os.path.realpath(sys.argv[1]).encode("utf-8")).hexdigest())
@@ -165,6 +152,7 @@ for RULE in $RULES; do
   STATUS=$?
   set -e
   if [[ $STATUS -eq 1 ]]; then
+    REJECTED=$((REJECTED + 1))
     pass "broken $RULE adapter is rejected by contract-core"
   else
     fail "broken $RULE adapter exits through contract-core with status 1 (got $STATUS)"
@@ -174,9 +162,8 @@ for RULE in $RULES; do
      { [[ "$RULE" != final-message ]] || {
        [[ "$(env LC_ALL=C grep -c '^not ok ' "$OUTPUT")" -eq 1 ]] &&
        LC_ALL=C grep -qE '^not ok [0-9]+ - backend=codex rule=final-message manifest final-message bytes equal the scripted message' "$OUTPUT" &&
-       LC_ALL=C grep -qE '^ok [0-9]+ - backend=codex rule=final-message journaled final-message dispatch succeeds' "$OUTPUT" &&
-       LC_ALL=C grep -qE '^ok [0-9]+ - backend=codex rule=final-message case run has exactly one indexed dispatch' "$OUTPUT" &&
-       LC_ALL=C grep -qE '^ok [0-9]+ - backend=codex rule=final-message indexed dispatch state_dir exists' "$OUTPUT"
+       LC_ALL=C grep -qE '^ok [0-9]+ - backend=codex rule=final-message final-message dispatch succeeds' "$OUTPUT" &&
+       LC_ALL=C grep -qE '^ok [0-9]+ - backend=codex rule=final-message case left exactly one final-message file in adapter state' "$OUTPUT"
      }; }; then
     pass "broken $RULE adapter fails for rule=$RULE and no other rule"
   else
@@ -190,4 +177,4 @@ if [[ $FAILURES -gt 0 ]]; then
   exit 1
 fi
 
-printf 'contract-negative: PASS (%d checks; 22 broken adapters rejected)\n' "$CHECKS"
+printf 'contract-negative: PASS (%d checks; %d broken adapters rejected)\n' "$CHECKS" "$REJECTED"
