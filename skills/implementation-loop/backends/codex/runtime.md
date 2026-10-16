@@ -226,8 +226,7 @@ after a failed or recovered turn, described below.
 
 **Stopping.** SIGTERM, SIGINT, and SIGHUP to the wrapper stop the dispatch: the
 Codex process group gets SIGTERM, then SIGKILL after two seconds if any member
-remains; the generation is recorded `failed`; `dispatch.end` is journaled with
-the exit status; and the wrapper exits 128 plus the signal number (143, 130,
+remains; the generation is recorded `failed`; and the wrapper exits 128 plus the signal number (143, 130,
 129). To cancel an in-flight dispatch, send the wrapper SIGTERM. A refused
 concurrent dispatch names it: `workspace lock is held by <id> (wrapper pid N)`.
 A disposition inherited as ignored is left ignored, so `nohup` keeps a dispatch
@@ -280,11 +279,6 @@ start a fresh dispatch, or name the session with `--resume-unmanaged
 <exact-id>`. Recovery prints the recovered generation's session id and the
 newest ready generation's. A successful turn makes plain `--resume` available
 again.
-
-Recovery writes no journal event. The wrapper that died never wrote
-`dispatch.end`, and its exit status is unknown, so a loop run that recorded the
-dispatch still shows it open. `loop-journal recover --acknowledge <id>` is the
-journal's own acknowledgement and retires that run.
 
 ### External tools and foreground lifecycle
 

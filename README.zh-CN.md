@@ -94,7 +94,7 @@ ln -s "$(pwd)/olddonkey-skills/cursor-implementation-loop" \
 
 ```bash
 bash ~/.cursor/plugins/local/cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
-# 期望输出：selftest: PASS (207 checks)
+# 期望输出：最后一行是 `selftest: PASS (N checks)`，退出码 0
 ```
 
 若想手动复现默认安装，请裸拷贝文件——两步都要做：
@@ -119,8 +119,6 @@ Codex 侧依赖链：`engineering-mode` → `implementation-loop` → 已登录�
 ---
 
 ## implementation-loop
-
-新增的[循环协调器](./skills/implementation-loop/references/coordinator.md)可让 judge agent 起草单元规格，记录工程师对规格的批准，并诊断审查现有工作树 diff。本单元不会运行实现者、门禁、提交或发布。
 
 **一个模型写代码，另一家的模型审，当前会话守住门禁和发布。**
 

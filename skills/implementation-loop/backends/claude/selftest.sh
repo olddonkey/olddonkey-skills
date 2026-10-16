@@ -234,7 +234,7 @@ invoke() { # name action variant flags...
   ERR="$TMP_ROOT/$name.stderr"
   LOG="$TMP_ROOT/$name.argv.json"
   set +e
-  env HOME="$HOME_FIX" PATH="$BIN:$PATH" LOOP_JOURNAL="$TMP_ROOT/no-journal" \
+  env HOME="$HOME_FIX" PATH="$BIN:$PATH" \
     CLAUDE_STUB_LOG="$LOG" CLAUDE_STUB_ACTION="$action" CLAUDE_STUB_VARIANT="$variant" \
     CLAUDE_REAL_REPO="$REPO" CLAUDE_LATE_MARKER="$TMP_ROOT/$name.late-marker" ${INVOKE_ENV[@]+"${INVOKE_ENV[@]}"} \
     bash -c 'umask "$1" && cd "$2" && shift 2 && exec "$@"' _ "$INVOKE_UMASK" "$REPO" "$DISPATCH" --prompt 'bounded fixture change' "$@" \
@@ -700,50 +700,7 @@ check 'environment model provenance' contains 'model: env-model (CLAUDE_LOOP_MOD
 check 'environment effort provenance' contains 'effort: medium (CLAUDE_LOOP_EFFORT)' "$OUT"
 INVOKE_ENV=()
 
-# Journal fixtures: a refused start, normal ordered pair, and a failing end.
-init_fixture journal-refuse
-REFUSER="$TMP_ROOT/journal-refuser"
-printf '#!/usr/bin/env bash\nexit 6\n' > "$REFUSER"
-chmod 755 "$REFUSER"
-INVOKE_ENV=("LOOP_JOURNAL=$REFUSER")
-invoke journal-refuse edit normal
-check 'failed dispatch.start propagates helper exit' status_is 6
-check 'failed dispatch.start never launches CLI' missing "$LOG"
-check 'failed dispatch.start leaves real worktree alone' clean_repo
-
-init_fixture journal-good
-JOURNAL="$SCRIPT_DIR/../../scripts/loop-journal"
-env HOME="$HOME_FIX" "$JOURNAL" begin-run --workspace "$REPO" > "$TMP_ROOT/journal-good.begin"
-INVOKE_ENV=("LOOP_JOURNAL=$JOURNAL")
-invoke journal-good none normal --read-only
-check 'journaled read-only succeeds' status_is 0
-check 'journal has ordered start/end, mode, exit and session' python3 - "$HOME_FIX" "$REPO" <<'PY'
-import hashlib,json,os,sys
-home,repo=sys.argv[1:]
-key=hashlib.sha256(os.path.realpath(repo).encode()).hexdigest()
-root=os.path.join(home,'.config','olddonkey-loop','journal',key,'runs')
-events=[json.loads(line) for name in os.listdir(root) for line in open(os.path.join(root,name))]
-pair=[e for e in events if e['event'] in ('dispatch.start','dispatch.end')]
-raise SystemExit(0 if len(pair)==2 and pair[0]['backend']=='claude' and pair[0]['mode']=='read-only' and pair[1]['exit']==0 and pair[1]['session']=='session-123' and pair[0]['dispatch_id']==pair[1]['dispatch_id'] else 1)
-PY
-
-init_fixture journal-end-fail
-END_HELPER="$TMP_ROOT/journal-end-fail-helper"
-cat > "$END_HELPER" <<'EOF_HELPER'
-#!/usr/bin/env bash
-for arg in "$@"; do
-  [[ "$arg" != "dispatch.end" ]] || exit 8
-done
-exit 0
-EOF_HELPER
-chmod 755 "$END_HELPER"
-INVOKE_ENV=("LOOP_JOURNAL=$END_HELPER")
-invoke journal-end-fail none normal
-check 'failed dispatch.end does not change dispatch exit' status_is 0
-check 'failed dispatch.end warns' contains 'warning: loop-journal dispatch.end failed' "$ERR"
-INVOKE_ENV=()
-
-EXPECTED_CHECKS=307
+EXPECTED_CHECKS=300
 if [[ $CHECKS -ne $EXPECTED_CHECKS || $FAILURES -ne 0 ]]; then
   printf 'selftest: FAIL (%d/%d checks failed; expected %d checks)\n' "$FAILURES" "$CHECKS" "$EXPECTED_CHECKS" >&2
   exit 1

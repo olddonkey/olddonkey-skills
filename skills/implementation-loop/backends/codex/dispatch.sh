@@ -49,13 +49,6 @@ set -euo pipefail
 CALLER_UMASK="$(umask)"
 umask 077
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
-if [[ -n "${LOOP_JOURNAL:-}" ]]; then
-  JOURNAL_HELPER="$LOOP_JOURNAL"
-else
-  JOURNAL_HELPER="$SCRIPT_DIR/../../scripts/loop-journal"
-fi
-
 MODEL="${CODEX_LOOP_MODEL:-}"
 EFFORT="${CODEX_LOOP_EFFORT:-}"
 PROMPT_FILE=""
@@ -330,7 +323,7 @@ fi
 # handling, and stale-generation recovery.
 exec python3 - \
   "$STATE_ROOT" "$WORKSPACE" "$SANDBOX_MODE" "$ACTION" "$RESUME_ID" \
-  "$CODEX_BIN" "$MODEL" "$EFFORT" "$PROMPT" "$JOURNAL_HELPER" "$CALLER_UMASK" <<'PY'
+  "$CODEX_BIN" "$MODEL" "$EFFORT" "$PROMPT" "$CALLER_UMASK" <<'PY'
 import datetime
 import fcntl
 import hashlib
@@ -353,7 +346,6 @@ import time
     model,
     effort,
     prompt,
-    journal_helper,
     caller_umask_text,
 ) = sys.argv[1:]
 # The mask the adapter's caller had; this process keeps 0o077 for its own
@@ -767,7 +759,7 @@ def install_stop_handlers():
 def interruptible(call):
     """Run one blocking wait on the child with stop signals deliverable.
 
-    State transitions, the spawn, and journal writes run with stop signals
+    State transitions and the spawn run with stop signals
     deferred, so an interrupt can never lose the child handle or tear a
     record; the deferred signal is raised at the next wait.
     """
@@ -990,68 +982,7 @@ def recover_stale(workspace_root, records, last_child):
         "fresh dispatch, or name the exact session with --resume-unmanaged <session id>",
         file=sys.stderr,
     )
-    print(
-        "journal: a loop run that recorded this dispatch still shows it open; "
-        f"`loop-journal recover --acknowledge {stale_id}` closes it",
-        file=sys.stderr,
-    )
     raise SystemExit(0)
-
-
-def journal_helper_ok():
-    return bool(journal_helper) and os.path.isfile(journal_helper) and os.access(
-        journal_helper, os.X_OK
-    )
-
-
-def journal_mode():
-    return "read-only" if sandbox_mode == "read-only" else "implement"
-
-
-def journal_append(event, fields):
-    if not journal_helper_ok():
-        return 0
-    command = [
-        journal_helper,
-        "append",
-        "--workspace",
-        workspace,
-        "--event",
-        event,
-    ]
-    for key, value in fields:
-        command.extend(["--field", f"{key}={value}"])
-    completed = subprocess.run(command, check=False)
-    return completed.returncode
-
-
-def journal_dispatch_start(dispatch_id):
-    status = journal_append(
-        "dispatch.start",
-        (
-            ("dispatch_id", dispatch_id),
-            ("backend", "codex"),
-            ("mode", journal_mode()),
-        ),
-    )
-    if status != 0:
-        raise StateError(f"loop-journal dispatch.start failed (exit {status})")
-
-
-_JOURNAL_END_WRITTEN = False
-
-
-def journal_dispatch_end(dispatch_id, exit_code, session=""):
-    global _JOURNAL_END_WRITTEN
-    if _JOURNAL_END_WRITTEN:
-        return
-    _JOURNAL_END_WRITTEN = True
-    fields = [("dispatch_id", dispatch_id), ("exit", str(exit_code))]
-    if session:
-        fields.append(("session", session))
-    status = journal_append("dispatch.end", fields)
-    if status != 0:
-        print("warning: loop-journal dispatch.end failed", file=sys.stderr)
 
 
 try:
@@ -1157,7 +1088,6 @@ try:
         session_id,
         last_message,
     )
-    journal_dispatch_start(dispatch_id)
 
     end_exit = 5
     child = None
@@ -1366,8 +1296,6 @@ try:
         stop_child(child)
         fail_generation(workspace_root, record)
         raise
-    finally:
-        journal_dispatch_end(dispatch_id, end_exit, session_id)
 except StateError as error:
     if record is not None and record.get("state") in {"initializing", "running"}:
         try:

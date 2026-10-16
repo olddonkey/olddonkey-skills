@@ -95,7 +95,7 @@ Verify once:
 
 ```bash
 bash ~/.cursor/plugins/local/cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh
-# expect: selftest: PASS (207 checks)
+# expect: a final `selftest: PASS (N checks)` line and exit 0
 ```
 
 To reproduce the default install manually, copy bare files — both steps are required:
@@ -122,8 +122,6 @@ Codex prerequisites: `engineering-mode` → `implementation-loop` → authentica
 ## implementation-loop
 
 **One model writes the code, a model from another vendor reviews it, and the session owns the gate and the publish.**
-
-The new [loop coordinator](./skills/implementation-loop/references/coordinator.md) can draft a unit spec with a judge agent, record the engineer's approval, and review an existing working tree diff. In this unit it does not run an implementer, gate, commit, or publish.
 
 The implementer implements and runs focused tests. The session reviews the real diff, runs the full gate, and ships only what it would sign its name to.
 

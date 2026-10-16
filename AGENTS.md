@@ -18,17 +18,18 @@ Components:
   `backends/{claude,codex}/`, each with `dispatch.sh`, `runtime.md`,
   `selftest.sh`, and `fixture-driver.sh`. `backends/backends.tsv` registers
   their capabilities. The grok and cursor-agent backends were removed in
-  2026-10 and stay in main's history; the journal, index, and console still
-  read their old state and records. Shared suites and the opt-in real-backend
+  2026-10 and stay in main's history. Shared suites and the opt-in real-backend
   gate live under `tests/`; the frozen Codex matrix is `tests/codex-cases.tsv`.
   `scripts/run-gate.sh` remains the backend-neutral gate, while
   `scripts/codex-dispatch.sh` and `scripts/selftest.sh` are one-release
   forwarding shims removed in 0.5.0. The shared observable interface
   is recorded in `references/dispatch-contract.md` and enforced by the contract
-  suites. `scripts/loop-coordinator` is the foreground, headless coordinator:
-  it drafts specs through a judge, records engineer approval, and performs a
-  diagnostic diff review. Its operator guide is `references/coordinator.md`;
-  `tests/coordinator-selftest.sh` uses temporary repositories and CLI stubs.
+  suites. The headless `loop-coordinator` (collab-canvas) was removed in
+  2026-10 because `SKILL.md` never called it; it stays in main's history and on
+  the `canvas-u3-run` branch. The journal, index, console, calibration store,
+  evidence card, and `loop-run` were removed at the same time; dial records
+  live in user-level private memory (authorizations) and the repo's CLAUDE.md
+  (repo facts), as `SKILL.md` describes.
 - `skills/engineering-mode/` — goal-first wrapper over the loop. Shared
   playbooks in `references/playbooks/`, plus `scripts/tree-oid.sh` and its
   selftest.
@@ -77,31 +78,18 @@ no failed checks; check counts move with every change and are not pinned here.
    real stub processes to cover stop signals and `--recover-stale`; it needs no
    network and no codex CLI.
 5. `bash skills/implementation-loop/backends/claude/selftest.sh`.
-6. `bash skills/implementation-loop/tests/journal-selftest.sh`,
-   `bash skills/implementation-loop/tests/index-selftest.sh`,
-   `bash skills/implementation-loop/tests/console-selftest.sh`, and
-   `bash skills/implementation-loop/tests/calibration-selftest.sh`. The
-   journal, console, and calibration suites each run
-   `tests/link-count-cases.py`, which loads that script's Python body and
-   calls its `validate_regular` directly.
-7. `bash skills/implementation-loop/tests/contract-core.sh`,
+6. `bash skills/implementation-loop/tests/contract-core.sh`,
    `bash skills/implementation-loop/tests/contract-negative.sh`, and
    `bash skills/implementation-loop/tests/shim-selftest.sh`. Contract-core runs
    every registered backend; contract-negative must report every broken
    adapter rejected.
-8. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
-   `scripts/loop-evidence` record card).
-9. `bash skills/implementation-loop/tests/coordinator-selftest.sh`. It uses
-   only local temporary repositories and backend CLI stubs, and never calls a
-   real agent. `COORD_SELFTEST_JOBS` defaults to 4; set it to 1 for
-   declaration-order serial execution.
-10. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`.
-11. `bash install-cursor-selftest.sh`.
-12. Packaging checks: both marketplace JSON manifests must parse; every
+7. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`.
+8. `bash install-cursor-selftest.sh`.
+9. Packaging checks: both marketplace JSON manifests must parse; every
    `SKILL.md` (under `skills/` and `cursor-implementation-loop/skills/`) must
    have non-empty `name:` and `description:` frontmatter; engineering-mode and
    implementation-loop Markdown must have no dangling relative links.
-13. `tree-oid` job (runs on ubuntu **and** macos):
+10. `tree-oid` job (runs on ubuntu **and** macos):
    `bash skills/engineering-mode/scripts/tree-oid-selftest.sh` and the
    Cursor copy. Keep these scripts portable across GNU and BSD userlands.
 

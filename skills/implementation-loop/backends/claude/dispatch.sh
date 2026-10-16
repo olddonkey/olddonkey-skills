@@ -19,13 +19,6 @@ set -euo pipefail
 CALLER_UMASK="$(umask)"
 umask 077
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
-if [[ -n "${LOOP_JOURNAL:-}" ]]; then
-  JOURNAL_HELPER="$LOOP_JOURNAL"
-else
-  JOURNAL_HELPER="$SCRIPT_DIR/../../scripts/loop-journal"
-fi
-
 MODEL="${CLAUDE_LOOP_MODEL:-}"
 MODEL_SOURCE="${MODEL:+CLAUDE_LOOP_MODEL}"
 EFFORT="${CLAUDE_LOOP_EFFORT:-}"
@@ -293,46 +286,6 @@ CONTROL_ARGS+=(--restricted --tools "${TOOLS[@]}"
   --setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'
   --settings "$SETTINGS" --disallowedTools WebFetch WebSearch Task Agent
   --no-session-persistence --output-format stream-json --verbose)
-
-LOOP_JOURNAL_END_DONE=0
-journal_helper_ok() {
-  [[ -n "${JOURNAL_HELPER:-}" && -f "$JOURNAL_HELPER" && -x "$JOURNAL_HELPER" ]]
-}
-
-journal_dispatch_start() {
-  journal_helper_ok || return 0
-  local loop_home mode
-  # mkdir -p of claude-work can create this directory at 0755; loop-journal
-  # requires 0700 and treats a mismatch as a failed dispatch.start.
-  loop_home="${HOME:?}/.config/olddonkey-loop"
-  mkdir -p "$loop_home" || return $?
-  chmod 700 "$loop_home" || return $?
-  mode="$([[ $READ_ONLY -eq 1 ]] && echo read-only || echo implement)"
-  "$JOURNAL_HELPER" append --workspace "$WORKSPACE" --event dispatch.start \
-    --field "dispatch_id=$DISPATCH_ID" --field backend=claude --field "mode=$mode"
-}
-
-journal_dispatch_end() { # $1=exit [ $2=session ]
-  local exit_code="$1" session="${2:-}"
-  [[ "$LOOP_JOURNAL_END_DONE" -eq 0 ]] || return 0
-  LOOP_JOURNAL_END_DONE=1
-  journal_helper_ok || return 0
-  local -a args
-  args=(append --workspace "$WORKSPACE" --event dispatch.end
-    --field "dispatch_id=$DISPATCH_ID" --field "exit=$exit_code")
-  [[ -z "$session" ]] || args+=(--field "session=$session")
-  if ! "$JOURNAL_HELPER" "${args[@]}"; then
-    echo "warning: loop-journal dispatch.end failed" >&2
-  fi
-  return 0
-}
-
-journal_dispatch_start || {
-  start_rc=$?
-  echo "error: loop-journal dispatch.start failed; refusing to launch" >&2
-  exit "$start_rc"
-}
-trap 'journal_dispatch_end "$?" "${SESSION_ID:-}"' EXIT
 
 set +e
 (

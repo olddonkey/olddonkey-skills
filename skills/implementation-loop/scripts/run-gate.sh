@@ -10,9 +10,7 @@
 # captures the true status, and prints a summary plus any failure headers.
 #
 # Usage:
-#   run-gate.sh [--strict] [--log PATH] [--baseline PATH]
-#               [--purpose unit-final|baseline-generation|focused|unspecified]
-#               -- <test command...>
+#   run-gate.sh [--strict] [--log PATH] [--baseline PATH] -- <test command...>
 #
 # Modes (--strict and --baseline are mutually exclusive):
 #   (default)   pass-through — works with ANY runner. The suite's exit code is
@@ -34,33 +32,16 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
-if [[ -n "${LOOP_JOURNAL:-}" ]]; then
-  JOURNAL_HELPER="$LOOP_JOURNAL"
-else
-  JOURNAL_HELPER="$SCRIPT_DIR/loop-journal"
-fi
 
 LOG=""
 BASELINE=""
 STRICT=0
-PURPOSE="unspecified"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --log)      LOG="${2:?--log needs a path}"; shift 2 ;;
     --baseline) BASELINE="${2:?--baseline needs a path}"; shift 2 ;;
     --strict)   STRICT=1; shift ;;
-    --purpose)
-      PURPOSE="${2:?--purpose needs a value}"
-      case "$PURPOSE" in
-        unit-final|baseline-generation|focused|unspecified) ;;
-        *)
-          echo "error: --purpose must be unit-final, baseline-generation, focused, or unspecified" >&2
-          exit 2
-          ;;
-      esac
-      shift 2
-      ;;
     -h|--help)  awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"; exit 0 ;;
     --)         shift; break ;;
     *)          echo "unknown argument: $1" >&2; exit 2 ;;
@@ -185,16 +166,12 @@ set +o noclobber
 
 echo "gate: $*" >&2
 echo "log:  $LOG" >&2
-echo "purpose: $PURPOSE" >&2
 if [[ $STRICT -eq 1 ]]; then
   echo "mode: strict" >&2
-  GATE_POLICY="strict"
 elif [[ -n "$BASELINE" ]]; then
   echo "mode: baseline" >&2
-  GATE_POLICY="baseline"
 else
   echo "mode: pass-through (exit code only — weakest; use --strict for unittest/pytest)" >&2
-  GATE_POLICY="passthrough"
 fi
 
 resolve_tree_oid() {
@@ -284,40 +261,6 @@ classify_binding() {
   fi
 }
 
-journal_helper_ok() {
-  [[ -n "${JOURNAL_HELPER:-}" && -f "$JOURNAL_HELPER" && -x "$JOURNAL_HELPER" ]]
-}
-
-# The verdict is the gate's own exit code; totals keeps the suite's raw exit
-# for legacy readers. The two differ whenever a policy overrides the suite
-# (exit-zero runs judged red, baseline-matched failures judged green).
-journal_gate_result() { # $1=gate exit $2=suite exit
-  journal_helper_ok || return 0
-  local gate_exit="$1" suite_exit="$2" verdict="red" workspace=""
-  if [[ "$gate_exit" -eq 0 ]]; then
-    verdict="green"
-  fi
-  workspace="$(pwd -P 2>/dev/null || pwd)"
-  local -a args
-  args=(append --workspace "$workspace" --event gate.result
-    --field "policy=$GATE_POLICY" --field "purpose=$PURPOSE"
-    --field "binding=$BINDING" --field "totals=exit=${suite_exit}"
-    --field "verdict=$verdict" --field "gate_exit=$gate_exit")
-  if [[ "$PRE_CAPTURE_OK" == "ok" ]]; then
-    args+=(--field "pre_head=$PRE_HEAD" --field "pre_tree=$PRE_TREE")
-  fi
-  if [[ "$POST_CAPTURE_OK" == "ok" ]]; then
-    args+=(--field "post_head=$POST_HEAD" --field "post_tree=$POST_TREE")
-  fi
-  if [[ "$BINDING" == "unavailable" && -n "${BINDING_REASON:-}" ]]; then
-    args+=(--field "reason=$BINDING_REASON")
-  fi
-  if ! "$JOURNAL_HELPER" "${args[@]}"; then
-    echo "warning: loop-journal gate.result failed" >&2
-  fi
-  return 0
-}
-
 emit_result() { # $1=exit code $2=RESULT line
   local code="$1" line="$2"
   classify_binding
@@ -326,7 +269,6 @@ emit_result() { # $1=exit code $2=RESULT line
     printf 'binding reason: %s\n' "$BINDING_REASON"
   fi
   printf '%s\n' "$line"
-  journal_gate_result "$code" "$STATUS"
   exit "$code"
 }
 
