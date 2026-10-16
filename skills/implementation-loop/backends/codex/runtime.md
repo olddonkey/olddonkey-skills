@@ -157,9 +157,10 @@ state—the common failure, such as deciding to run `git commit`. It does not an
 never did stop deliberate circumvention. P5 host-side channels (MCP, Apps,
 hooks, plugins, and `notify`) are outside the child sandbox as described below.
 If a future user needs defense against a deliberately misbehaving implementer,
-a post-dispatch `.git` integrity check in the shape of Grok's
-[`verify-worktree.sh`](../grok/verify-worktree.sh) is the known mitigation. It
-is deliberately not built into this adapter.
+a post-dispatch `.git` integrity check is the known mitigation; the archived
+grok backend's `backends/grok/verify-worktree.sh` (in main's history before
+the 2026-10 removal) is one shape for it. It is deliberately not built into
+this adapter.
 
 The adapter scans only the initial delimited human banner block for
 `approval:`, `sandbox:`, and the session id while teeing the full stream to

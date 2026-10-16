@@ -1,10 +1,11 @@
 # Loop backend state schema
 
-Normative inventory of production state written by the four adapters, plus
-the journal store the index reads. Derived from write sites in this tree, not
-from earlier plan summaries. Lifecycle cells in every artifact table are
-exactly `present` or `absent`. Conditional artifacts are called out in the
-format column and by those cells.
+Normative inventory of production state written by the claude and codex
+adapters, plus the journal store the index reads. The archived grok and
+cursor-agent state the index still reads is described in §2. Derived from
+write sites in this tree, not from earlier plan summaries. Lifecycle cells in every artifact
+table are exactly `present` or `absent`. Conditional artifacts are called out
+in the format column and by those cells.
 
 **Citations.** Source is cited by name, never by line number, so an edit
 above a cited site cannot leave a citation pointing at the wrong code. A
@@ -301,74 +302,15 @@ checks that follow `:child_status`), not a JSON parser.
 | transcript.log | `backends/codex/dispatch.sh:create_regular` | present | present | present | present | present | bytes; created empty, appended live through `:transcript_path` |
 | last-message.txt | `backends/codex/dispatch.sh:create_regular` | present | present | present | present | present | CLI last-message file; empty until success |
 
-### Grok
+### Archived grok and cursor backends
 
-State root pattern (`backends/grok/dispatch.sh:STATE_ROOT`, `:STATE_DIR`):
-
-`<git-common-dir>/olddonkey-loop/grok/<dispatch-id>/`
-
-`<dispatch-id>` is `YYYYMMDDTHHMMSSZ-` plus 6 hex digits (`:DISPATCH_ID`).
-`git-common-dir` is `rev-parse --git-common-dir` resolved against the
-workspace (`:COMMON_DIR`). The dispatch directory (`:STATE_DIR`) is created
-after pre-state refusals. The `:journal_dispatch_start` call is after
-`state.json` and the first `transition.jsonl` append (`:journal`, event
-`prepared`) and before the child (`:GROK_STATUS`). `baseline.json` is
-implement-only (`:write_baseline` into `:BASELINE`). `session.json` is
-written only near completion, just before the `authoritative-recorded`
-transition, after parse (`:PARSED_OUTPUT`) and the implement transition;
-exits before that write (an empty `:PGID_FILE`, an existing `:SNAPSHOT`)
-leave it absent. `output.json` / `pgid` are created at child launch
-(`:OUTPUT_JSON`, `:PGID_FILE`). Snapshot artifacts are implement-only after a
-successful copy (`:SNAPSHOT_BASELINE`, `:write_baseline`, `:AUTHORITATIVE`).
-Workspace-root `writable-ledger.tsv` (`:LEDGER`, `:ledger`) is not a
-per-dispatch artifact.
-
-| artifact | writer | early failure | parse failure | read-only | implement | successful terminal | format |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| state.json | `backends/grok/dispatch.sh` | present | present | present | present | present | JSON schema=1 dispatch record |
-| transition.jsonl | `backends/grok/dispatch.sh:journal` | present | present | present | present | present | JSONL {at,event} append-only |
-| baseline.json | `backends/grok/dispatch.sh:BASELINE` | present | present | absent | present | present | JSON marker inventory; implement-only |
-| output.json | `backends/grok/dispatch.sh:OUTPUT_JSON` | absent | present | present | present | present | child stdout JSON object |
-| pgid | `backends/grok/dispatch.sh:PGID_FILE` | absent | present | present | present | present | ASCII process-group id plus newline |
-| snapshot-baseline.json | `backends/grok/dispatch.sh:SNAPSHOT_BASELINE` | absent | absent | absent | present | present | JSON; implement-only after snapshot copy |
-| authoritative-baseline.json | `backends/grok/dispatch.sh:write_baseline` | absent | absent | absent | present | present | JSON; implement-only after worktree repair |
-| authoritative-path | `backends/grok/dispatch.sh` | absent | absent | absent | present | present | one pathname line; implement-only |
-| session.json | `backends/grok/dispatch.sh` | absent | absent | present | absent | present | JSON; only near successful completion |
-
-### Cursor
-
-State root pattern (`backends/cursor/dispatch.sh:STATE_ROOT`, `:STATE_DIR`):
-
-`<git-common-dir>/olddonkey-loop/cursor/<dispatch-id>/`
-
-`<dispatch-id>` is `YYYYMMDDTHHMMSSZ-` plus 6 hex digits (`:DISPATCH_ID`).
-`git-common-dir` is `rev-parse --git-common-dir` resolved against the
-workspace (`:COMMON_DIR`). The dispatch directory (`:STATE_DIR`) is created
-together with `:COPY_ROOT`. `project-files.zlist` (`:MANIFEST`) and
-`prompt.txt` (`:PROMPT_RECORD`) are written before the
-`:journal_dispatch_start` call and the child (`:CURSOR_STATUS`). Parse
-failure (`:PARSE_OK`) writes neither `parsed.json` nor `result.txt`.
-On a successful result, new paths the real repository ignores are deleted
-from the work copy before the diff (`:IGNORED_DROPPED`). `changes.patch`
-(`:PATCH_PATH`) is implement-only after a successful post-copy walk
-(`:POST_COPY_OK`); it is the raw pristine-vs-work diff, applied with
-`git apply -p2` and never rewritten. `apply-check.log` / `apply.log` are
-written only on the successful nonempty apply path, which follows
-`:FILES_CHANGED`. Disposable copies under
-`$HOME/.config/olddonkey-loop/cursor-work/<dispatch-id>/` (`:WORK_ROOT`,
-`:COPY_ROOT`) are not protected run state.
-
-| artifact | writer | early failure | parse failure | read-only | implement | successful terminal | format |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| project-files.zlist | `backends/cursor/dispatch.sh:MANIFEST` | present | present | present | present | present | NUL-separated git ls-files paths |
-| prompt.txt | `backends/cursor/dispatch.sh:PROMPT_RECORD` | present | present | present | present | present | UTF-8 preamble plus prompt |
-| output.json | `backends/cursor/dispatch.sh:OUTPUT_JSON` | absent | present | present | present | present | child stdout; created at child launch |
-| stderr.log | `backends/cursor/dispatch.sh:STDERR_LOG` | absent | present | present | present | present | child stderr; created at child launch |
-| parsed.json | `backends/cursor/dispatch.sh` | absent | absent | present | present | present | JSON {is_error,session_id}; absent on parse failure |
-| result.txt | `backends/cursor/dispatch.sh:RESULT_FILE` | absent | absent | present | present | present | result string; absent on parse failure |
-| changes.patch | `backends/cursor/dispatch.sh:PATCH_PATH` | absent | present | absent | present | present | raw pristine-vs-work patch; implement-only |
-| apply-check.log | `backends/cursor/dispatch.sh` | absent | absent | absent | absent | present | git apply --check output; successful nonempty apply |
-| apply.log | `backends/cursor/dispatch.sh` | absent | absent | absent | absent | present | git apply output; successful nonempty apply |
+The grok and cursor-agent adapters were removed from main in 2026-10. The
+index still reads their state directories,
+`<git-common-dir>/olddonkey-loop/grok/<dispatch-id>/` and
+`<git-common-dir>/olddonkey-loop/cursor/<dispatch-id>/`, so journals written
+before the removal stay readable. Their artifact tables are in main's history
+before that removal; the fixture inventories in `tests/index-selftest.sh`
+keep the same lists.
 
 ### Claude
 
@@ -412,9 +354,8 @@ for a nonempty patch on the apply path.
 Journal `dispatch_id` correlates to a state-directory basename by **exact
 match only**. The adapters use the same id as the directory name
 (`backends/codex/dispatch.sh:dispatch_id` and `:dispatch_directory`;
-`backends/grok/dispatch.sh:DISPATCH_ID` and `:STATE_DIR`;
-`backends/cursor/dispatch.sh:DISPATCH_ID` and `:STATE_DIR`;
-`backends/claude/dispatch.sh:DISPATCH_ID` and `:STATE_DIR`). Timestamp-proximity
+`backends/claude/dispatch.sh:DISPATCH_ID` and `:STATE_DIR`; the archived
+grok and cursor adapters followed the same rule). Timestamp-proximity
 correlation is forbidden (v2 non-goal). A state directory whose basename
 matches no journal `dispatch.start` is **unattributed state** and is
 displayed as such. A journal dispatch whose directory is absent is
@@ -438,8 +379,7 @@ No other liveness word is a v1 state.
 | --- | --- | --- |
 | claude | named artifact mtimes in the dispatch dir | `backends/claude/dispatch.sh:STATE_DIR` |
 | codex | `transcript.log` growth (size/mtime) | `backends/codex/dispatch.sh:transcript_path` |
-| grok | named artifact mtimes in the dispatch dir | `backends/grok/dispatch.sh:STATE_DIR` |
-| cursor | named artifact mtimes in the dispatch dir | `backends/cursor/dispatch.sh:STATE_DIR` |
+| grok, cursor (archived) | named artifact mtimes in the dispatch dir | historical state directories (§2) |
 
 Computation (index, evidence only): for an open dispatch whose `state_dir`
 exists, take the newest mtime of that backend's activity artifacts. Age

@@ -46,17 +46,6 @@ fi
 TMP_ROOT_RAW="$(mktemp -d "$SCRIPT_DIR/.contract-core.XXXXXX")" || exit 1
 TMP_ROOT="$(CDPATH= cd -- "$TMP_ROOT_RAW" && pwd -P)"
 cleanup() {
-  local marker runtime_root
-  for marker in "$TMP_ROOT"/*/*.runtime-root; do
-    [[ -f "$marker" ]] || continue
-    IFS= read -r runtime_root < "$marker"
-    case "$runtime_root" in
-      /tmp/implementation-loop-contract-grok.*|/private/tmp/implementation-loop-contract-grok.*)
-        [[ ! -d "$runtime_root" ]] || rm -rf -- "$runtime_root"
-        ;;
-      *) echo "warning: refusing unexpected contract runtime cleanup path: $runtime_root" >&2 ;;
-    esac
-  done
   rm -rf -- "$TMP_ROOT"
 }
 trap cleanup EXIT HUP INT TERM
@@ -100,7 +89,7 @@ for row in rows:
         errors.append(f"invalid environment namespace for {name}: {namespace!r}")
     if resume not in {"exact-id", "refuses"}:
         errors.append(f"invalid resume capability for {name}: {resume!r}")
-    if effort not in {"flag", "embedded-in-model"}:
+    if effort != "flag":
         errors.append(f"invalid effort capability for {name}: {effort!r}")
     if output_schema not in {"json", "text"}:
         errors.append(f"invalid output schema for {name}: {output_schema!r}")
@@ -529,18 +518,11 @@ run_backend() {
 
   if rule_enabled repeated-flags; then
     CURRENT_RULE="repeated-flags"
-    if [[ "$EFFORT_CAPABILITY" == "embedded-in-model" ]]; then
-      run_case repeated-flags --prompt first --prompt last \
-        --model first-model --model cursor-contract-high --effort low --effort high
-    else
-      run_case repeated-flags --prompt first --prompt last \
-        --model first-model --model last-model --effort low --effort high
-    fi
+    run_case repeated-flags --prompt first --prompt last \
+      --model first-model --model last-model --effort low --effort high
     expect_status 0 "repeated value flags are accepted"
     expect_observed repeated-flags prompt last "the last repeated prompt wins"
-    local last_model="last-model"
-    [[ "$EFFORT_CAPABILITY" != "embedded-in-model" ]] || last_model="cursor-contract-high"
-    expect_observed repeated-flags model "$last_model" "the last repeated model wins"
+    expect_observed repeated-flags model last-model "the last repeated model wins"
     expect_pattern '^effort: high ' "the last repeated effort wins"
   fi
 
@@ -585,9 +567,7 @@ run_backend() {
     CURRENT_RULE="env-namespace"
     run_case env-own --prompt env
     expect_status 0 "the declared namespace override is accepted"
-    local own_model="contract-own-model"
-    [[ "$BACKEND" != "cursor" ]] || own_model="cursor-contract-xhigh"
-    expect_observed env-own model "$own_model" "the declared namespace reaches its adapter"
+    expect_observed env-own model contract-own-model "the declared namespace reaches its adapter"
     run_case env-foreign --prompt env
     expect_status 0 "foreign namespace overrides do not control this adapter"
     expect_observed_not env-foreign model foreign-poison-model "the adapter does not read another backend's namespace"
@@ -595,11 +575,7 @@ run_backend() {
 
   if rule_enabled summary-fields; then
     CURRENT_RULE="summary-fields"
-    if [[ "$EFFORT_CAPABILITY" == "embedded-in-model" ]]; then
-      run_case summary-fields --prompt summary --model cursor-contract-xhigh --effort xhigh
-    else
-      run_case summary-fields --prompt summary --model contract-model --effort high
-    fi
+    run_case summary-fields --prompt summary --model contract-model --effort high
     expect_status 0 "a summary-producing dispatch succeeds"
     expect_pattern '^workspace: .+' "summary contains workspace"
     expect_pattern "^${CLI_NAME} version: .+" "summary contains ${CLI_NAME} version"
@@ -649,26 +625,18 @@ run_backend() {
     expect_status 0 "missing context does not change dispatch exit"
     expect_unattributed journal-unattributed "context missing" \
       "unattributed events record attribution_failure=context missing"
-    if [[ "$BACKEND" == "cursor" ]]; then
-      run_case journal-stale --prompt journal
-      expect_status 0 "stale context does not change dispatch exit"
-      expect_unattributed journal-stale "context stale" \
-        "stale context records attribution_failure=context stale"
-      run_case journal-malformed --prompt journal
-      expect_status 0 "malformed context does not change dispatch exit"
-      expect_unattributed journal-malformed "context malformed" \
-        "malformed context records attribution_failure=context malformed"
-      run_case journal-wrong-workspace --prompt journal
-      expect_status 0 "wrong-workspace context does not change dispatch exit"
-      expect_unattributed journal-wrong-workspace "wrong-workspace" \
-        "wrong-workspace context records attribution_failure=wrong-workspace"
-    fi
-    if [[ "$BACKEND" == "grok" ]]; then
-      run_case journal-post-disarm-abort --prompt journal
-      expect_status 86 "post-disarm journal abort still exits 86"
-      expect_dispatch_pair journal-post-disarm-abort grok implement 86 \
-        "post-disarm abort records dispatch.end exit=86"
-    fi
+    run_case journal-stale --prompt journal
+    expect_status 0 "stale context does not change dispatch exit"
+    expect_unattributed journal-stale "context stale" \
+      "stale context records attribution_failure=context stale"
+    run_case journal-malformed --prompt journal
+    expect_status 0 "malformed context does not change dispatch exit"
+    expect_unattributed journal-malformed "context malformed" \
+      "malformed context records attribution_failure=context malformed"
+    run_case journal-wrong-workspace --prompt journal
+    expect_status 0 "wrong-workspace context does not change dispatch exit"
+    expect_unattributed journal-wrong-workspace "wrong-workspace" \
+      "wrong-workspace context records attribution_failure=wrong-workspace"
   fi
 
   if rule_enabled journal-readonly-mode; then
@@ -701,10 +669,6 @@ run_backend() {
     expect_status 0 "an implement dispatch under caller umask 027 succeeds"
     local delivered
     delivered="$(case_workspace worktree-umask)"
-    if [[ "$BACKEND" == "grok" ]]; then
-      # grok delivers its authoritative snapshot, not the workspace it ran in.
-      delivered="$(env LC_ALL=C sed -n 's/^authoritative path: //p' "$CASE_OUTPUT" | tail -1)"
-    fi
     expect_path_mode "$delivered/implementer-file.txt" 640 \
       "a file the implementer created reaches the delivered worktree as 0640 under caller umask 027"
     expect_path_mode "$delivered/implementer-dir" 750 \

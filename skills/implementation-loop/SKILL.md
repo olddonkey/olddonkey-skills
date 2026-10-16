@@ -1,17 +1,17 @@
 ---
 name: implementation-loop
-description: 'Delegate implementation to Codex, grok, or cursor-agent, then review the diff, send it back to iterate, gate on the full test suite, and ship it as a PR. Use this whenever the user wants Codex, the grok 后端, or cursor-agent to write code, mentions handing off / delegating implementation to one of those backends, asks to work through a plan or spec unit-by-unit with an implementation backend doing the coding, or wants a review-and-merge loop wrapped around delegated output — and also when resuming such a loop ("keep going", "next unit", "继续下一个"). It encodes constraints that are expensive to rediscover: the implementer runs in the real environment behind backend-specific git and publication boundaries, must not be pointed at a full test suite by default, and its self-report is a claim rather than evidence. This loop expects an approved plan or an equivalently precise spec; settle an unsolved high-level goal into a plan first, using the engineering-mode skill when it is installed.'
+description: 'Delegate implementation to Codex or to a sandboxed Claude Code (`claude -p`), have a model from the other vendor review the diff, send it back to iterate, gate on the full test suite, and ship it as a PR. Use this whenever the user wants Codex or a sandboxed Claude to write code, mentions handing off / delegating implementation to one of those backends, asks for a cross-vendor review of delegated code, asks to work through a plan or spec unit-by-unit with an implementation backend doing the coding, or wants a review-and-merge loop wrapped around delegated output — and also when resuming such a loop ("keep going", "next unit", "继续下一个"). It encodes constraints that are expensive to rediscover: the implementer runs in the real environment behind backend-specific git and publication boundaries, must not be pointed at a full test suite by default, and its self-report is a claim rather than evidence. This loop expects an approved plan or an equivalently precise spec; settle an unsolved high-level goal into a plan first, using the engineering-mode skill when it is installed.'
 ---
 
 # Implementation loop
 
-**The implementer writes the code; you own the judgment.** The implementer is fast at implementation but it self-reports success, cannot commit, and will hang a machine if pointed at a long test suite. You give it a precise spec, then be the thing that actually verifies and ships. **This includes bug fixes**: a bug found at review, at the gate, or later is a unit like any other — you diagnose and spec, the implementer implements. Editing code directly "because it's faster" silently inverts the division of labor and costs review its independence.
+**One model writes the code, a model from another vendor reviews it, and you own the judgment.** The implementer (Codex, or Claude Code in a sandboxed copy) is fast at implementation but it self-reports success, cannot commit, and will hang a machine if pointed at a long test suite. You give it a precise spec, make sure the review comes from a different vendor than the code, then be the thing that actually verifies and ships: you read the diff, run the gate, and publish. Both directions work: Codex implements and you review, or the claude backend implements and Codex cross-reviews. What matters is that the writer and the reviewer are different models. **This includes bug fixes**: a bug found at review, at the gate, or later is a unit like any other — you diagnose and spec, the implementer implements. Editing code directly "because it's faster" silently inverts the division of labor and costs review its independence.
 
-The loop: **decompose → dispatch → review → iterate → gate → publish → next**.
+The loop: **decompose → dispatch → review (yours, plus a cross-review when the writer is your own vendor) → iterate → gate → publish → next**.
 
 ## Non-negotiables
 
-1. **Review is mandatory and independent.** Codex's summary is a claim; the diff is the evidence. Never skip review because it says it's done.
+1. **Review is mandatory and independent.** The implementer's summary is a claim; the diff is the evidence. Never skip review because it says it's done. **The writer's own model never gives the only review**: when the implementer comes from your own vendor (the claude backend under a Claude session), every round also gets a read-only cross-review from the other backend (§3).
 2. **An assumed default never leaves the machine.** With no explicit user choice, stop at the working tree — even a local commit can fire hooks/signing. Commit, push, PR, and merge each need the user to have said yes once for this repo, **asked at kickoff, not discovered at publish time**. **Once is once**: that authorization is per-repo, persists across sessions until revoked or the work changes character — never re-ask per unit.
 3. **Never push straight to the default branch.**
 4. **The full-suite gate is yours**, run by you, with the real exit code. A fix means the code satisfies the test — a weakened assertion, deleted case, or widened tolerance to turn red green is a stop, not a pass.
@@ -21,20 +21,20 @@ The loop: **decompose → dispatch → review → iterate → gate → publish �
 
 | Dial | Options | Recommended default |
 | --- | --- | --- |
-| **Backend** | `codex` / `grok` / `cursor-agent` | `codex`; changes are resurfaced (see dials.md) |
+| **Backend** | `codex` / `claude` | `codex`; `claude` adds a cross-review each round when you are Claude (§3); changes are resurfaced (see dials.md) |
 | **Stop point** | `worktree` / `commit` / `pr` / `merge` | recommend `pr`; assumed default stops at `worktree` |
 | **Dispatch mode** | `implement` / `read-only` | `implement` |
 | **Gate policy** | `baseline` / `strict` / `skip` | `baseline` |
 | **On gate red** | `stop` / `iterate` | `stop` |
 | **Review depth** | `light` / `standard` / `deep` | `standard` |
 | **Cadence** | `confirm` / `continuous` | `confirm`; `continuous` fits stop=`merge` |
-| **Fix lane** | `codex` / `claude-trivial-ok` | `codex` |
+| **Fix lane** | `codex` / `claude-trivial-ok` | `codex`, meaning the implementer backend (the name predates `claude`) |
 
 Full rationale: [references/dials.md](references/dials.md). Compressed non-obvious parts:
 
 - `continuous` fits stop=`merge` because **dependent** units otherwise stack on unit 1's unmerged changes and review attribution breaks. Independent units don't stack, so `pr` + `continuous` is a real option — the safer one for unattended runs.
-- **Fix lane drifts silently** — hand-fixing feels faster every time. `claude-trivial-ok` is a user-granted carve-out for mechanical one-liners only; logic always goes to Codex; the gate runs either way.
-- `deep` review = an independent subagent given the diff and repo but *not* your spec — for changes touching security, concurrency, migrations, auth, or money.
+- **Fix lane drifts silently** — hand-fixing feels faster every time. `claude-trivial-ok` is a user-granted carve-out for mechanical one-liners only; logic always goes to the implementer; the gate runs either way.
+- `deep` review = an independent subagent given the diff and repo but *not* your spec — for changes touching security, concurrency, migrations, auth, or money. When the writer is already another vendor, `deep` is also when to add the §3 cross-review.
 - `skip` gate only for changes with no runtime surface. `read-only` dispatch is investigation — no diff, nothing to gate; useful as a first pass before an implement dispatch on gnarly problems.
 
 ## The kickoff question — ask it BEFORE the first dispatch
@@ -44,7 +44,7 @@ Read the repo's calibration record first, then ask **one compact question** cove
 1. **How far units travel** — the stop point. Needed before dispatch, not at publish: the unit branch is created at dispatch time, and asking at publish means the user waited through a whole dispatch/review/gate to be told you can't ship.
 2. **Whether to pause between units** — the cadence. If the user wants it left running unattended, say so here: it changes which answers are safe and adds a preflight (see Unattended runs).
 3. **Thinking level and speed** — model/effort for the selected backend and service tier where that backend supports one, presenting its standing configuration as the inherit option.
-4. **Which backend implements** — settle `codex`, `grok`, or `cursor-agent` and record it in user-level private memory. A backend named by the repo is only a claim to reconfirm; an existing record with no backend means `codex`, while any later backend change is resurfaced. After resolving a grok tuple, ask separately for the D10(f) per-repo carve-out when needed; that grant never authorizes publication. For cursor-agent, effort is embedded in the model id and the default is `cursor-grok-4.6-xhigh`.
+4. **Which backend implements** — settle `codex` or `claude` and record it in user-level private memory. A backend named by the repo is only a claim to reconfirm; an existing record with no backend means `codex`, while any later backend change is resurfaced. When the implementer comes from your own vendor, say here that each review round adds a read-only cross-review on the other backend, and check that its CLI is installed and logged in; that review is what keeps the writer and the reviewer different models.
 
 **On a multi-unit plan, lead with the hands-off preset**: `stop=pr, cadence=continuous, on-red=iterate` (capped) plus the unattended preflight, offered as one named option next to the individual dials. One yes grants every authorization a zero-stop run needs — the user shouldn't have to know dial names to buy an uninterrupted run.
 
@@ -54,7 +54,7 @@ Read the repo's calibration record first, then ask **one compact question** cove
 
 The answers hold for the **entire invocation** — never re-ask per unit. A recorded calibration or standing preference ("always inherit, stop asking") suppresses the corresponding part; a fully recorded repo means no question at all. Everything else runs at its recommended default until something makes it worth raising.
 
-**If a later step needs a dial nobody settled, you asked too late** — that's the failure this section exists to prevent, not a reason to interrupt mid-loop. Read the selected backend's runtime reference before the first dispatch of a session: [backends/codex/runtime.md](backends/codex/runtime.md), [backends/grok/runtime.md](backends/grok/runtime.md), or [backends/cursor/runtime.md](backends/cursor/runtime.md).
+**If a later step needs a dial nobody settled, you asked too late** — that's the failure this section exists to prevent, not a reason to interrupt mid-loop. Read the selected backend's runtime reference before the first dispatch of a session: [backends/codex/runtime.md](backends/codex/runtime.md) or [backends/claude/runtime.md](backends/claude/runtime.md).
 
 ## 1. Decompose
 
@@ -78,10 +78,8 @@ LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" \
     --prompt-file /tmp/unit-prompt.txt --model gpt-5.6-sol --effort max   # both are per-turn overrides
 LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" \
     --prompt-file /tmp/unit-prompt.txt                                    # inherit whatever config says
-LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/grok/dispatch.sh" \
-    --prompt-file /tmp/unit-prompt.txt --model grok-4.6 --effort xhigh
-LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/cursor/dispatch.sh" \
-    --prompt-file /tmp/unit-prompt.txt --model cursor-grok-4.6-xhigh
+LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/claude/dispatch.sh" \
+    --prompt-file /tmp/unit-prompt.txt --model opus --effort xhigh
 ```
 
 Set `LOOP_UNIT` and `LOOP_ROUND` on every dispatch and gate command, iterations included, so the journal can attribute each event to its unit without guessing from order or time. The label is a declaration by whoever ran the command, not proof of which unit ran.
@@ -89,30 +87,30 @@ Set `LOOP_UNIT` and `LOOP_ROUND` on every dispatch and gate command, iterations 
 For absolute-path invocation from Cursor, a plain shell, or CI, see
 [references/running-anywhere.md](references/running-anywhere.md).
 
-**Dispatch through this script, never by calling `codex exec` yourself.** The wrapper pins sandbox, approval, nested writable roots, network, and permissions on both fresh and resumed paths; redirects stdin from `/dev/null`; verifies the human policy banner; binds resume to loop-owned exact ids; protects state outside the child sandbox; captures the transcript/final message; and discloses host-side external tools. Hand-rolling only the visible model/prompt flags silently drops those boundaries.
+**Dispatch through these scripts, never by calling `codex exec` or `claude -p` yourself.** The Codex wrapper pins sandbox, approval, nested writable roots, network, and permissions on both fresh and resumed paths; verifies the human policy banner; binds resume to loop-owned exact ids; and discloses host-side external tools. The Claude wrapper runs the CLI in a git-less copy with a closed tool list, its OS sandbox, no setting sources and no MCP servers, then applies only a checked patch. Both redirect stdin from `/dev/null`, protect state outside the child's reach, and capture the transcript/final message. Hand-rolling only the visible model/prompt flags silently drops those boundaries.
 
 **Name model and effort on every dispatch rather than inheriting silently.** Kickoff settles the intent once; each dispatch then states it, so config drift — or the CLI being repointed at another vendor's model, which is not hypothetical — cannot change what implements your units without saying so. The summary the script prints is the confirmation that the intent actually landed.
 
-How each knob and policy pin reaches the two calibrated argv shapes is codex-specific mechanics: see the flag-semantics section of [backends/codex/runtime.md](backends/codex/runtime.md).
+How each knob and policy pin reaches the CLI is backend-specific mechanics: see the flag-semantics section of [backends/codex/runtime.md](backends/codex/runtime.md) and the dispatch section of [backends/claude/runtime.md](backends/claude/runtime.md).
 
 Hygiene — each failure mode here is silent:
 
-- **Run from the target repo root**; fresh dispatch pins that canonical directory with `-C`, while resume must change directory before launch. Read the `workspace:` line.
-- **Start from a clean tree** (`git status --short`), or Codex's changes are unattributable.
-- **One unit in flight** — the Codex workspace lock refuses overlap, and resume binds only the highest ready loop-owned exact id; cursor-agent iteration is always a fresh dispatch carrying review feedback in its prompt.
+- **Run from the target repo root**; a fresh Codex dispatch pins that canonical directory with `-C`, Codex resume must change directory before launch, and the claude adapter snapshots the worktree it was started in. Read the `workspace:` line.
+- **Start from a clean tree** (`git status --short`), or the implementer's changes are unattributable.
+- **One unit in flight** — the Codex workspace lock refuses overlap, and resume binds only the highest ready loop-owned exact id; claude iteration is always a fresh dispatch carrying review feedback in its prompt.
 - **Prompt in a file, outside the target repo** (`/tmp`) — shell-escaping corrupts long prompts, and in-repo files pollute the diff.
 - **Create the unit branch before dispatching** when the stop point involves one.
-- **Background at the harness level**; `backends/codex/dispatch.sh --background` is a hard error, so the foreground adapter's exit stays authoritative.
+- **Background at the harness level**; `--background` is a hard error on both adapters, so the foreground adapter's exit stays authoritative.
 
 The prompt is the whole spec: **why** (evidence, file:line), **exactly what to change**, **tests expected** (including which existing tests will break and how they update — never deleted), **what not to touch**, and the environment constraints. Copy-ready skeleton: [references/dispatch-prompt.md](references/dispatch-prompt.md).
 
 Environment constraints to include verbatim-ish in every dispatch:
 
 - The selected implementer executes on the same host and shares your CPU/RAM/disk. Use its runtime reference's exact sandbox and external-tool posture; never add a permission-bypass flag to make a stalled backend proceed.
-- Git ownership stays with you. Codex blocks ordinary accidental Git-state writes but has calibrated hard-link and in-workspace submodule-marker holes documented in [backends/codex/runtime.md](backends/codex/runtime.md); grok uses its protected worktree transition, and cursor-agent sees no Git at all: its dispatcher applies only the captured git-less-copy patch to the real worktree. You commit and publish.
+- Git ownership stays with you. Codex blocks ordinary accidental Git-state writes but has calibrated hard-link and in-workspace submodule-marker holes documented in [backends/codex/runtime.md](backends/codex/runtime.md); claude sees no Git at all: its dispatcher applies only the captured git-less-copy patch to the real worktree. You commit and publish.
 - No full test suite by default — focused subset or nothing; you own the gate. Ask it to report files changed, tests added, subset run.
 
-The dispatch script prints a `warn` line naming MCP servers, app connectors, plugins, and `notify` hooks found in the Codex config, because the sandbox does not bound host-side tool calls. **That warning is disclosure, not a stop — do not ask the user how to proceed.** Note it in the unit report and continue. Whether to refuse instead (`CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1`) is a calibration setting, settled once per repo like any other dial, not a per-dispatch question. The scan is a tripwire, not a boundary — server-side-enabled Apps and other injected tools can remain invisible, and full isolation means disabling the tools in Codex itself.
+The Codex dispatch script prints a `warn` line naming MCP servers, app connectors, plugins, and `notify` hooks found in the Codex config, because the sandbox does not bound host-side tool calls (the claude adapter runs with no MCP servers, so it has nothing to warn about). **That warning is disclosure, not a stop — do not ask the user how to proceed.** Note it in the unit report and continue. Whether to refuse instead (`CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1`) is a calibration setting, settled once per repo like any other dial, not a per-dispatch question. The scan is a tripwire, not a boundary — server-side-enabled Apps and other injected tools can remain invisible, and full isolation means disabling the tools in Codex itself.
 
 Stuck foreground runs (no new transcript output for 15–20 min): interrupt the harness-owned adapter, inspect its retained run state, fix the prompt or split the unit, and kill orphaned test processes. SIGTERM or SIGINT to the Codex adapter stops its CLI and records the generation failed; an adapter that was killed outright instead leaves a `running` record, and the next dispatch refuses until `backends/codex/dispatch.sh --recover-stale` is run from the workspace root. State and lifecycle details are in [backends/codex/runtime.md](backends/codex/runtime.md).
 
@@ -134,13 +132,22 @@ Read the actual diff; the summary only says where to look. Check the whole tree 
 
 **Delegate the breadth, keep the judgment.** Call-path tracing (#1) is review's heavy reading; on a diff touching widely-used surfaces, send it to read-only subagents that report which callers depended on the old behavior, with file:line evidence. The diff itself never delegates: you read every hunk — non-negotiable #1 — and the subagents shrink the context *around* that reading, not the reading.
 
+**Cross-review when the writer is your own vendor.** When you and the implementer are the same model family (a Claude session driving the claude backend), your reading shares its blind spots, so every round also goes to the other backend as a read-only dispatch. Write a prompt file with the spec, the full diff against the unit's base (new files included, for example `git add -A && git diff --cached <base>`), and the checklist above, and ask for `SHIP` or `ITERATE` with findings at file:line:
+
+```bash
+LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" \
+    --read-only --prompt-file /tmp/unit-3-review.txt
+```
+
+Its verdict is a claim, like the implementer's summary: check each finding against the code before you send it back, and drop the ones that do not hold. It adds to your review and replaces none of it; you still read every hunk, and the gate still decides. When the writer is already another vendor (Codex implementing under a Claude session), your own review is the cross-vendor one; add this dispatch only at `deep` depth.
+
 ## 4. Iterate
 
 Send findings back through the selected backend with specifics — what's wrong, why it matters, what you expect:
 
 ```bash
 "${CLAUDE_SKILL_DIR}/backends/codex/dispatch.sh" --resume --prompt-file /tmp/review-findings.txt
-"${CLAUDE_SKILL_DIR}/backends/cursor/dispatch.sh" --prompt-file /tmp/review-findings.txt  # fresh session; no --resume
+"${CLAUDE_SKILL_DIR}/backends/claude/dispatch.sh" --prompt-file /tmp/review-findings.txt  # fresh session; no --resume
 ```
 
 Codex resume is release-enabled for the calibrated 2026-08-17 tuple. The first
@@ -148,8 +155,8 @@ command selects only the highest ready loop-owned exact id and never an
 unrelated newest session; a different tuple is uncalibrated until its required
 real-backend matrix is recorded.
 
-For cursor-agent, the already-applied worktree carries file state and the new
-prompt carries review context. `backends/cursor/dispatch.sh --resume` deliberately
+For claude, the already-applied worktree carries file state and the new
+prompt carries review context. `backends/claude/dispatch.sh --resume` deliberately
 errors instead of implying thread continuity.
 
 Repeat until the diff is something you'd sign. A bug that surfaces **outside** an active thread is a new unit, not a hand-edit: diagnose, dispatch on a fresh thread with repro + root cause + expected fix + the regression test you expect — a fix without a test that would have caught the bug is incomplete.
@@ -169,7 +176,7 @@ LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /t
 LOOP_UNIT=unit-3 LOOP_ROUND=1 "${CLAUDE_SKILL_DIR}/scripts/run-gate.sh" --log /tmp/gate.log -- <test command>
 ```
 
-`baseline` policy = no new non-flake failures vs the base branch, decided mechanically (pytest identifiers include the exception class; skipped-only, empty, or unparseable runs fail closed). It proves *no new failure identifiers and that tests executed* — not that the full calibrated suite ran; check the reported count when it matters. **A check you forbade Codex from running is a check you own, and it runs before you judge the diff — not after the cheap ones.** Dispatches routinely prohibit the slow, environment-heavy suites (browser e2e, anything needing a database or two servers) while the spec still requires them to pass. That combination is a blind spot you built: Codex cannot discover the breakage, so nothing does until you run it. And it is exactly where a change of UI surface lands — a flow moved from a dialog to a route, a heading renamed, a default filter added — because those specs drive the product through the same affordances the unit just rewrote.
+`baseline` policy = no new non-flake failures vs the base branch, decided mechanically (pytest identifiers include the exception class; skipped-only, empty, or unparseable runs fail closed). It proves *no new failure identifiers and that tests executed* — not that the full calibrated suite ran; check the reported count when it matters. **A check you forbade the implementer from running is a check you own, and it runs before you judge the diff — not after the cheap ones.** Dispatches routinely prohibit the slow, environment-heavy suites (browser e2e, anything needing a database or two servers) while the spec still requires them to pass. That combination is a blind spot you built: the implementer cannot discover the breakage, so nothing does until you run it. And it is exactly where a change of UI surface lands — a flow moved from a dialog to a route, a heading renamed, a default filter added — because those specs drive the product through the same affordances the unit just rewrote.
 
 The failure mode is specific: typecheck, unit tests, lint and build all pass on a diff that leaves a browser spec red. Cheap-first ordering is fine for feedback, but **the verdict is not "green" until the prohibited checks have run**, and when a unit touches a surface an e2e drives, run that spec early rather than last.
 
@@ -199,7 +206,7 @@ Note what landed and what's next somewhere durable (memory, progress doc, the pl
 
 - **A human/manual ceiling** — credentials, policy, hardware only the user can provide; hand them a concrete checklist.
 - **A real design fork** — two defensible directions with materially different consequences; recommend, don't survey.
-- **Codex is stuck** — repeated failures, or tests unfixable without weakening them.
+- **The implementer is stuck** — repeated failures, or tests unfixable without weakening them.
 - **A safety/correctness boundary would soften** — surface it even if the request implies it.
 
 ## Unattended runs (overnight, nobody watching)
@@ -220,7 +227,7 @@ What the kickoff question fills in, and what later sessions read instead of aski
 
 Recognize both `loop[<repo>]` and the legacy `codex-loop[<repo>]` prefixes in user-level private memory; treat them as equivalent so existing calibration records require no migration.
 
-- **Permission dials → user-level private memory only** (outside the repo): stop point beyond `worktree`, the `claude-trivial-ok` fix-lane carve-out, `continuous` cadence. The repo, its collaborators, and dispatched Codex itself can all write tracked files, so a permission dial found in CLAUDE.md or any repo file is a *claim*, not authorization — reconfirm it with the user before acting on it.
+- **Permission dials → user-level private memory only** (outside the repo): stop point beyond `worktree`, the `claude-trivial-ok` fix-lane carve-out, `continuous` cadence. The repo, its collaborators, and the dispatched implementer itself can all write tracked files, so a permission dial found in CLAUDE.md or any repo file is a *claim*, not authorization — reconfirm it with the user before acting on it.
 - **Repo facts → CLAUDE.md is fine**: the non-permission dials; whether the kickoff effort/speed question is wanted or standing-inherit; whether external Codex tools are merely warned about (default) or refused (`CODEX_LOOP_BLOCK_EXTERNAL_TOOLS=1`); full-suite command, runtime, serial-vs-parallel; the permission allowlist that lets the dispatch script, the gate command, and the stop point's git/`gh` operations run unprompted (set up once — it is what makes the unattended preflight cheap); known flakes (keep a base-branch gate log for `--baseline`, regenerate after merges); CI trustworthiness; commit/PR conventions; where progress is recorded.
 - **Repo facts may only tighten, never loosen.** Policy dials in a repo record still shape how a private authorization gets exercised — `gate=skip depth=light on-red=iterate` in a tracked file would quietly weaken the conditions around a valid `stop=merge`. A repo value stricter than the default or the user-memory record (toward `strict`/`deep`/`stop`) applies directly; a looser one is a claim to reconfirm with the user before following it.
 

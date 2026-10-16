@@ -18,20 +18,7 @@ jobs:
           bash -n skills/implementation-loop/backends/codex/dispatch.sh
           bash -n skills/implementation-loop/backends/codex/fixture-driver.sh
           bash -n skills/implementation-loop/backends/codex/selftest.sh
-          bash -n skills/implementation-loop/backends/cursor/dispatch.sh
-          bash -n skills/implementation-loop/backends/cursor/fixture-driver.sh
-          bash -n skills/implementation-loop/backends/cursor/selftest.sh
-          bash -n skills/implementation-loop/backends/grok/dispatch.sh
-          bash -n skills/implementation-loop/backends/grok/fixture-driver.sh
-          bash -n skills/implementation-loop/backends/grok/selftest.sh
-          bash -n skills/implementation-loop/backends/grok/verify-worktree.sh
           bash -n skills/implementation-loop/scripts/codex-dispatch.sh
-          bash -n skills/implementation-loop/scripts/cursor-dispatch.sh
-          bash -n skills/implementation-loop/scripts/cursor-selftest.sh
-          bash -n skills/implementation-loop/scripts/grok-dispatch.sh
-          bash -n skills/implementation-loop/scripts/grok-selftest.sh
-          bash -n skills/implementation-loop/scripts/grok-verify-worktree.sh
-          bash -n skills/implementation-loop/scripts/integration-test.sh
           bash -n skills/implementation-loop/scripts/loop-journal
           bash -n skills/implementation-loop/scripts/loop-coordinator
           bash -n skills/implementation-loop/scripts/loop-run
@@ -83,10 +70,6 @@ jobs:
         run: bash skills/implementation-loop/backends/codex/selftest.sh
       - name: Canonical gate selftest
         run: bash skills/implementation-loop/tests/gate-selftest.sh
-      - name: Grok backend selftest
-        run: bash skills/implementation-loop/backends/grok/selftest.sh
-      - name: Cursor-agent backend selftest
-        run: bash skills/implementation-loop/backends/cursor/selftest.sh
       - name: Claude backend selftest
         run: bash skills/implementation-loop/backends/claude/selftest.sh
       - name: Dispatch contract conformance

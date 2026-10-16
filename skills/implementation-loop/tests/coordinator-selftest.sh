@@ -42,21 +42,14 @@ def wait_group_gone(pgid, seconds=45):
     return group_gone(pgid)
 
 class Case:
-    def __init__(self, judge='claude', implementer=None, grok=False, name='case'):
-        self.root = pathlib.Path(tempfile.mkdtemp(prefix='.coordinator-selftest.', dir=None if grok else TESTS)).resolve()
+    def __init__(self, judge='claude', implementer=None, name='case'):
+        self.root = pathlib.Path(tempfile.mkdtemp(prefix='.coordinator-selftest.', dir=TESTS)).resolve()
         self.tree = self.root / 'tree' / 'implementation-loop'
         self.tree.parent.mkdir()
         shutil.copytree(SOURCE, self.tree, ignore=lambda directory, names: {'tests'} if pathlib.Path(directory) == SOURCE else set())
         eng = self.tree.parent / 'engineering-mode' / 'scripts'
         eng.mkdir(parents=True)
         shutil.copy2(SOURCE.parent / 'engineering-mode' / 'scripts' / 'tree-oid.sh', eng / 'tree-oid.sh')
-        if grok:
-            dispatch = self.tree / 'backends' / 'grok' / 'dispatch.sh'
-            text = dispatch.read_text()
-            text = text.replace('roots = {os.path.realpath(tempfile.gettempdir())}', 'roots = {"/__implementation_loop_contract_temp__"}')
-            text = text.replace('for value in (os.environ.get("TMPDIR"), "/tmp", "/private/tmp", "/var/tmp"):', 'for value in ():')
-            dispatch.write_text(text)
-            dispatch.chmod(0o755)
         self.ws = self.root / 'workspace'
         self.home = self.root / 'home'; self.home.mkdir()
         self.bin = self.root / 'bin'; self.bin.mkdir()
@@ -69,27 +62,17 @@ class Case:
         self.env = dict(os.environ, HOME=str(self.home), PATH=str(self.bin)+os.pathsep+os.environ['PATH'],
                         GIT_CEILING_DIRECTORIES=str(self.root), COORD_RESPONSE=str(self.response),
                         COORD_COUNTER=str(self.counter), COORD_OBSERVED=str(self.observed))
-        if grok:
-            main=self.root/'main'
-            self.git('init','-q','--template=','--separate-git-dir='+str(self.root/'gitadmin'),str(main),cwd=self.root)
-            self.git('config','user.name','coordinator test',cwd=main)
-            self.git('config','user.email','test@example.invalid',cwd=main)
-            (main/'tracked.txt').write_text('before\n')
-            self.git('add','tracked.txt',cwd=main); self.git('commit','-qm','base',cwd=main)
-            self.git('worktree','add','-q','-b','fixture',str(self.ws),cwd=main)
-        else:
-            self.git('init', '-q', '--template=', '--separate-git-dir='+str(self.root/'gitadmin'), str(self.ws), cwd=self.root)
-            self.git('config','user.name','coordinator test')
-            self.git('config','user.email','test@example.invalid')
-            (self.ws / 'tracked.txt').write_text('before\n')
-            self.git('add','tracked.txt'); self.git('commit','-qm','base')
+        self.git('init', '-q', '--template=', '--separate-git-dir='+str(self.root/'gitadmin'), str(self.ws), cwd=self.root)
+        self.git('config','user.name','coordinator test')
+        self.git('config','user.email','test@example.invalid')
+        (self.ws / 'tracked.txt').write_text('before\n')
+        self.git('add','tracked.txt'); self.git('commit','-qm','base')
         self.base = self.git('rev-parse','HEAD').stdout.decode().strip()
         self.base_branch = self.git('branch','--show-current').stdout.decode().strip()
         self.make_stub()
-        if grok: self.grok_setup()
         self.cmd('init')
         self.cfg = {'schema':1,'base_branch':self.base_branch,'remote':'origin',
-                    'agents':{'judge':{'backend':judge,'model':('model-high' if judge=='cursor' else 'model')},
+                    'agents':{'judge':{'backend':judge,'model':'model'},
                               'implementer':{'backend':self.implementer,'model':'model'}},
                     'caps':{'rounds':3,'prompt_bytes':120000,'ignored_files':5000}}
         self.write_config()
@@ -169,13 +152,6 @@ cp "$source_file" "$COORD_OBSERVED/message-$n.txt"
 env > "$COORD_OBSERVED/env-$n.txt"
 printf '%s\0' "$@" > "$COORD_OBSERVED/argv-$n.bin"
 last="${!#}"
-if [[ "$name" == grok ]]; then
-  previous=""
-  for arg in "$@"; do
-    [[ "$previous" != --prompt-file ]] || last="$(cat "$arg")"
-    previous="$arg"
-  done
-fi
 printf '%s' "$last" > "$COORD_OBSERVED/prompt-$n.txt"
 if [[ -n "${COORD_TAMPER_PROMPT:-}" ]]; then
   find "$HOME/.config/olddonkey-loop/coordinator" -name '*.prompt' -type f -exec sh -c 'printf x >> "$1"' sh '{}' \;
@@ -208,23 +184,9 @@ P
     cp "$source_file" "$output"
     echo '--------'; echo 'approval: never'; echo 'sandbox: read-only [workdir, /tmp, TMPDIR]'; echo 'session id: 019c0000-0000-7000-8000-000000000123'; echo '--------'
     ;;
-  cursor-agent)
-    python3 - "$source_file" <<'P'
-import json,sys
-message=open(sys.argv[1],encoding='utf-8').read()
-print(json.dumps({'type':'result','subtype':'success','is_error':False,'duration_ms':1,'duration_api_ms':1,'result':message,'session_id':'session-test-123','request_id':'request-test-123','usage':{}}))
-P
-    ;;
-  grok)
-    python3 - "$source_file" <<'P'
-import json,sys
-message=open(sys.argv[1],encoding='utf-8').read()
-print(json.dumps({'text':message,'stopReason':'end','sessionId':'session-test-123','requestId':'request-test-123','thought':'','usage':{}}))
-P
-    ;;
 esac
 '''
-        for name in ('claude','codex','cursor-agent','grok'):
+        for name in ('claude','codex'):
             path=self.bin/name; path.write_text(stub); path.chmod(0o755)
     def wrap_journal(self, mode):
         path=self.tree/'scripts'/'loop-journal'; real=path.with_suffix('.real')
@@ -406,57 +368,6 @@ sys.exit(result.returncode)
     def launch_killable(self,*args,env=None):
         return subprocess.Popen(['bash','-c','export COORD_KILL_PID=$$; exec "$@"','bash',str(self.coordinator),*args],
                                 cwd=self.ws,env=env or self.env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-    def grok_setup(self):
-        profile='''[profiles.olddonkey-loop-implement]
-extends = "workspace"
-restrict_network = true
-
-[profiles.olddonkey-loop-readonly]
-extends = "read-only"
-restrict_network = true
-'''
-        policy='''[shell_environment_policy]
-inherit = "core"
-ignore_default_excludes = false
-
-[compat.cursor]
-skills = false
-rules = false
-agents = false
-mcps = false
-hooks = false
-sessions = false
-
-[compat.claude]
-skills = false
-rules = false
-agents = false
-mcps = false
-hooks = false
-sessions = false
-
-[compat.codex]
-sessions = false
-'''
-        prof=self.root/'profile.txt'; pol=self.root/'policy.txt'; prof.write_text(profile); pol.write_text(policy)
-        ph=hashlib.sha256(prof.read_bytes()).hexdigest(); qh=hashlib.sha256(pol.read_bytes()).hexdigest()
-        allow=self.home/'.config'/'olddonkey-loop'/'grok-backend.toml'; allow.parent.mkdir(parents=True,exist_ok=True)
-        allow.write_text(f'''[[carve_out]]
-os = "darwin"
-arch = "arm64"
-grok_version = "1.0.4"
-kernel = "25.6.0"
-adapter_version = "1"
-smoke_schema = "1"
-profile_hash = "{ph}"
-policy_hash = "{qh}"
-repo = "{self.ws}"
-granted = "2026-08-17"
-'''); allow.chmod(0o600)
-        for name,text in {'uname':'#!/bin/sh\ncase "$1" in -s) echo Darwin;; -m) echo arm64;; -r) echo 25.6.0;; *) echo "Darwin 25.6.0 arm64";; esac\n',
-                          'sw_vers':'#!/bin/sh\necho 15.6\n',
-                          'pgrep':'#!/bin/sh\nexit 1\n'}.items():
-            path=self.bin/name; path.write_text(text); path.chmod(0o755)
 
 def with_case(fn,**kwargs):
     if FILTER and FILTER not in kwargs.get('name',''):
@@ -499,8 +410,8 @@ def basic_spec(c):
     dispatched=(c.observed/'env-1.txt').read_text()
     check('LOOP_UNIT=unit-one' in dispatched and 'LOOP_ROUND=' not in dispatched,f'{c.judge}: spec dispatch has unit and no round')
 
-for backend in ('claude','codex','cursor','grok'):
-    with_case(basic_spec,judge=backend,grok=(backend=='grok'),name='spec-'+backend)
+for backend in ('claude','codex'):
+    with_case(basic_spec,judge=backend,name='spec-'+backend)
 
 
 def basic_check(c):
@@ -529,8 +440,8 @@ def basic_check(c):
     check('LOOP_UNIT=unit-one' in dispatched and 'LOOP_ROUND=1' in dispatched,f'{c.judge}: review dispatch has exact unit and round')
     check('Ignored files were not compared.' in result.stdout,f'{c.judge}: diagnostic ignored-file notice')
 
-for backend in ('claude','codex','cursor','grok'):
-    with_case(basic_check,judge=backend,grok=(backend=='grok'),name='check-'+backend)
+for backend in ('claude','codex'):
+    with_case(basic_check,judge=backend,name='check-'+backend)
 
 def config_and_usage(c):
     cfg_path=c.cdir/'config.json'
@@ -546,7 +457,7 @@ def config_and_usage(c):
                ('prompt cap',lambda x:x.setdefault('caps',{}).update(prompt_bytes=200000)),
                ('dispatch duration low',lambda x:x.setdefault('caps',{}).update(dispatch_seconds=0)),
                ('dispatch duration high',lambda x:x.setdefault('caps',{}).update(dispatch_seconds=14401)),
-               ('cursor effort',lambda x:x['agents']['judge'].update(backend='cursor',model='model',effort='high')),
+               ('unregistered backend',lambda x:x['agents']['judge'].update(backend='grok')),
                ('claude effort',lambda x:x['agents']['judge'].update(backend='claude',effort='ultra')),
                ('surrogate model',lambda x:x['agents']['judge'].update(model='\ud800'))]
     for name,mutate in mutations:
@@ -596,9 +507,7 @@ def preconditions(c):
     c.git('branch','-D','canvas/unit-one')
     c.cfg['agents']['judge']['backend']='codex'; c.write_config()
     c.run(['spec','--unit-file',str(c.unit_path)],3,'precondition: same backend')
-    c.cfg['agents']['judge']['backend']='claude'; c.cfg['agents']['implementer']['backend']='grok'; c.write_config()
-    c.run(['spec','--unit-file',str(c.unit_path)],3,'precondition: grok implementer')
-    c.cfg['agents']['implementer']['backend']='codex'; c.write_config()
+    c.cfg['agents']['judge']['backend']='claude'; c.write_config()
     c.make_unit(judge='missing')
     c.run(['spec','--unit-file',str(c.unit_path)],3,'precondition: unknown agent')
     c.make_unit()
@@ -2052,7 +1961,7 @@ for records,_duration in results:
     for condition,name,detail in records:
         check(condition,name,detail)
 
-PINNED_CHECKS = 735
+PINNED_CHECKS = 688
 if not FILTER and CHECKS != PINNED_CHECKS:
     FAILURES += 1
     print(f'not ok - pinned check count: expected {PINNED_CHECKS}, observed {CHECKS}',file=sys.stderr)
