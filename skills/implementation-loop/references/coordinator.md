@@ -35,19 +35,16 @@ engineer creates `config.json` as an owned, regular 0600 file in that real
 
 `base_branch` and `remote` are nonempty names. `agents` is nonempty; names
 match `[a-z][a-z0-9-]{0,31}` and each agent has only `backend`, `model`, and
-optional `effort`. Backend is a registered `claude`, `codex`, `cursor`, or
-`grok`; model and effort are nonempty tokens without whitespace or a leading
-hyphen. Claude effort is `low`, `medium`, `high`, `xhigh`, or `max`. Cursor
-effort is `low`, `medium`, `high`, or `xhigh` and its model ends with
-`-<effort>` or `-<effort>-fast`. Codex and grok forward any valid effort
-token. The judge and implementer must use different backends; grok cannot be
-the implementer.
+optional `effort`. Backend is a registered `claude` or `codex`; model and
+effort are nonempty tokens without whitespace or a leading hyphen. Claude
+effort is `low`, `medium`, `high`, `xhigh`, or `max`. Codex forwards any valid
+effort token. The judge and implementer must use different backends.
 
 `caps` and each of its keys are optional. Defaults are shown above. `rounds`
 is 1–10, `prompt_bytes` is 1000–120000, `ignored_files` is 0–100000,
 and `dispatch_seconds` is 1–14400.
 The prompt ceiling stays below Linux's 131072 byte limit for one CLI argument:
-three adapters pass the entire prompt as one argument. A prompt over the cap
+both adapters pass the entire prompt as one argument. A prompt over the cap
 is never sent. `gate` is optional here and validated for shape only: `argv`
 is a nonempty list of nonempty strings, `mode` is `strict` or `passthrough`,
 and `runner_unsupported` is a boolean. No command in this unit reads its

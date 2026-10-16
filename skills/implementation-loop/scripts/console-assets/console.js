@@ -19,7 +19,7 @@
     "fix-lane",
   ];
   var DIAL_OPTIONS = {
-    backend: ["codex", "grok", "cursor-agent"],
+    backend: ["codex", "claude"],
     stop: ["worktree", "commit", "pr", "merge"],
     cadence: ["confirm", "continuous"],
     "dispatch-mode": ["implement", "read-only"],

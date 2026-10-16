@@ -4,13 +4,13 @@
     "name": "olddonkey"
   },
   "metadata": {
-    "description": "Agent skills distilled from real-world usage: implementation-loop — delegate implementation to Codex while keeping review, test-gating, and shipping judgment in Claude's hands; web-slides — click-driven 16:9 HTML slide decks with a presenter view for live presenting. engineering-mode — goal-first investigation, design, planning, and verified implementation.",
+    "description": "Agent skills distilled from real-world usage: implementation-loop — one model implements (Codex or a sandboxed Claude Code), a model from another vendor reviews, and Claude keeps test-gating and shipping judgment; web-slides — click-driven 16:9 HTML slide decks with a presenter view for live presenting. engineering-mode — goal-first investigation, design, planning, and verified implementation.",
     "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "implementation-loop",
-      "description": "A review-gated implementation loop: dispatch coding units to Codex through pinned plain codex exec, review the diff, iterate with loop-owned state, gate on the full test suite, then ship as a PR. Encodes hard-won environment constraints (read-only git, no full-suite runs, stuck-job handling) and seven user-configurable dials.",
+      "description": "A cross-vendor, review-gated implementation loop: dispatch coding units to Codex (pinned plain codex exec) or a sandboxed Claude Code (claude -p in a git-less copy), have the other vendor's model review the diff, iterate, gate on the full test suite, then ship as a PR. Encodes hard-won environment constraints (read-only git, no full-suite runs, stuck-job handling) and eight user-configurable dials.",
       "source": "./skills/implementation-loop",
       "strict": false,
       "skills": [

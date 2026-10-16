@@ -85,43 +85,6 @@ test_regular_shim() { # $1=old basename $2=target relative path
 }
 
 test_regular_shim codex-dispatch.sh backends/codex/dispatch.sh
-test_regular_shim grok-dispatch.sh backends/grok/dispatch.sh
-test_regular_shim cursor-dispatch.sh backends/cursor/dispatch.sh
-test_regular_shim grok-verify-worktree.sh backends/grok/verify-worktree.sh
-test_regular_shim grok-selftest.sh backends/grok/selftest.sh
-test_regular_shim cursor-selftest.sh backends/cursor/selftest.sh
-
-# The integration shim has the only intentional argv translation.
-INTEGRATION_ROOT="$TMP_ROOT/integration"
-mkdir -p "$INTEGRATION_ROOT/scripts"
-cp "$LEGACY_SCRIPTS/integration-test.sh" "$INTEGRATION_ROOT/scripts/integration-test.sh"
-chmod 755 "$INTEGRATION_ROOT/scripts/integration-test.sh"
-write_target "$INTEGRATION_ROOT/tests/integration-test.sh"
-INTEGRATION_LOG="$INTEGRATION_ROOT/target.log"
-INTEGRATION_STDERR="$INTEGRATION_ROOT/stderr"
-
-SHIM_TARGET_LOG="$INTEGRATION_LOG" "$INTEGRATION_ROOT/scripts/integration-test.sh" --backend grok --require codex 2> "$INTEGRATION_STDERR"
-expect_args "$INTEGRATION_LOG" "integration shim preserves non-all selectors" --backend grok --require codex
-expect_deprecation_lines "$INTEGRATION_STDERR" 1 "integration shim emits one deprecation without translation"
-
-SHIM_TARGET_LOG="$INTEGRATION_LOG" "$INTEGRATION_ROOT/scripts/integration-test.sh" 2> "$INTEGRATION_STDERR"
-expect_args "$INTEGRATION_LOG" "bare legacy integration call selects only grok and cursor" --backend grok --backend cursor
-if [[ "$(env LC_ALL=C grep -c '^compatibility: translated ' "$INTEGRATION_STDERR" || true)" == 1 ]]; then pass "bare integration translation emits one compatibility line"; else fail "bare integration translation emits one compatibility line"; fi
-
-SHIM_TARGET_LOG="$INTEGRATION_LOG" "$INTEGRATION_ROOT/scripts/integration-test.sh" --backend all --require codex 2> "$INTEGRATION_STDERR"
-expect_args "$INTEGRATION_LOG" "explicit legacy all expands to two repeatable selectors" --backend grok --backend cursor --require codex
-if [[ "$(env LC_ALL=C grep -c '^compatibility: translated ' "$INTEGRATION_STDERR" || true)" == 1 ]]; then pass "explicit all translation emits one compatibility line"; else fail "explicit all translation emits one compatibility line"; fi
-
-set +e
-SHIM_TARGET_ACTION=exit SHIM_TARGET_LOG="$INTEGRATION_LOG" "$INTEGRATION_ROOT/scripts/integration-test.sh" --backend grok 2> "$INTEGRATION_STDERR"
-STATUS=$?
-set -e
-if [[ $STATUS -eq 23 ]]; then pass "integration shim preserves target exit status"; else fail "integration shim preserves target exit status (got $STATUS)"; fi
-set +e
-SHIM_TARGET_ACTION=signal SHIM_TARGET_LOG="$INTEGRATION_LOG" "$INTEGRATION_ROOT/scripts/integration-test.sh" --backend grok 2> "$INTEGRATION_STDERR"
-STATUS=$?
-set -e
-if [[ $STATUS -eq 143 ]]; then pass "integration shim preserves target signal status"; else fail "integration shim preserves target signal status (got $STATUS)"; fi
 
 # The legacy aggregate must execute both split suites and stop on either red.
 COMPOSITE_ROOT="$TMP_ROOT/composite"

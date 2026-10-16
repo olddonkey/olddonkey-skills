@@ -306,7 +306,7 @@ def config() -> dict:
             fail(5, f'invalid backend/model for {name}')
         if 'effort' in agent:
             effort = agent['effort']
-            if not token(effort) or (backend == 'claude' and effort not in {'low','medium','high','xhigh','max'}) or (backend == 'cursor' and (effort not in {'low','medium','high','xhigh'} or not (model.endswith('-'+effort) or model.endswith('-'+effort+'-fast')))):
+            if not token(effort) or (backend == 'claude' and effort not in {'low','medium','high','xhigh','max'}):
                 fail(5, f'invalid effort for {name}')
     caps = obj.get('caps', {})
     if not isinstance(caps, dict) or set(caps) - set(DEFAULT_CAPS):
@@ -653,8 +653,6 @@ def can_agents(unit: dict, cfg: dict):
     judge, implementer = agents[unit['judge']], agents[unit['implementer']]
     if judge['backend'] == implementer['backend']:
         fail(3, 'judge and implementer backends must differ')
-    if implementer['backend'] == 'grok':
-        fail(3, 'grok cannot be the implementer')
     return judge, implementer
 
 

@@ -37,6 +37,9 @@ CASE_STATUS=0
 CASE_STDOUT=""
 CASE_STDERR=""
 
+# The grok and cursor adapters were removed in 2026-10, but the index still
+# reads their state directories, so their inventories stay here for the
+# fixtures. Only claude and codex still have writer tables in the schema.
 INVENTORY_PY='
 INVENTORY = {
     "claude": {
@@ -246,7 +249,7 @@ PY
 python3 - "$SCHEMA" "$TMP_ROOT/doc-inventory.json" <<'PY'
 import json, re, sys
 text = open(sys.argv[1], encoding="utf-8").read()
-backends = ("claude", "codex", "grok", "cursor")
+backends = ("claude", "codex")
 classes = (
     "early failure",
     "parse failure",
@@ -261,7 +264,7 @@ for raw_line in text.splitlines():
     if heading:
         current = heading.group(1).lower()
         continue
-    if current is None or not raw_line.startswith("|"):
+    if current not in backends or not raw_line.startswith("|"):
         continue
     cells = [cell.strip() for cell in raw_line.strip().strip("|").split("|")]
     if len(cells) < 8:
@@ -294,6 +297,8 @@ import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
 expected = json.load(open(sys.argv[2], encoding="utf-8"))
 for backend, classes in expected.items():
+    if backend not in doc:
+        continue
     for klass, names in classes.items():
         got = doc.get(backend, {}).get(klass, [])
         if got != names:

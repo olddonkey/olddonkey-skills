@@ -3968,7 +3968,7 @@ def dials_post_unauth():
     status, raw, headers = capture(
         "POST",
         "/api/dials",
-        body=json.dumps({"key": "backend", "value": "grok"}),
+        body=json.dumps({"key": "backend", "value": "claude"}),
         headers={
             "Host": host_ok,
             "Origin": origin_ok,
@@ -3987,7 +3987,7 @@ def dials_post_missing_csrf():
     status, raw, headers = capture(
         "POST",
         "/api/dials",
-        body=json.dumps({"key": "backend", "value": "grok"}),
+        body=json.dumps({"key": "backend", "value": "claude"}),
         headers=auth_headers(
             extra={"Origin": origin_ok, "Content-Type": "application/json"},
             with_csrf=False,
@@ -4004,7 +4004,7 @@ def dials_post_foreign_origin():
     status, raw, headers = capture(
         "POST",
         "/api/dials",
-        body=json.dumps({"key": "backend", "value": "grok"}),
+        body=json.dumps({"key": "backend", "value": "claude"}),
         headers=auth_headers(
             extra={
                 "Origin": "http://127.0.0.1:%d" % (port + 1),
@@ -4024,7 +4024,7 @@ def dials_post_ok():
         "POST",
         "/api/dials",
         body=json.dumps(
-            {"key": "backend", "value": "grok", "provenance": "console-selftest"}
+            {"key": "backend", "value": "claude", "provenance": "console-selftest"}
         ),
         headers=auth_headers(
             extra={"Origin": origin_ok, "Content-Type": "application/json"}
@@ -4035,12 +4035,12 @@ def dials_post_ok():
     require_security(headers, "post dials ok")
     payload = json.loads(raw.decode("utf-8"))
     row = (payload.get("dials") or {}).get("backend") or {}
-    if row.get("value") != "grok" or row.get("source") != "store":
+    if row.get("value") != "claude" or row.get("source") != "store":
         raise RuntimeError("post dials body %r" % row)
     if not os.path.isfile(cal_path):
         raise RuntimeError("calibration file was not written")
     text = open(cal_path, encoding="utf-8").read()
-    if "backend\tgrok\tpolicy\tconsole\t" not in text:
+    if "backend\tclaude\tpolicy\tconsole\t" not in text:
         raise RuntimeError("store file missing console-written backend row: %r" % text)
     if "\timport-confirmed\t" in text:
         raise RuntimeError("store file has import-confirmed: %r" % text)
@@ -4080,7 +4080,7 @@ def dials_lock_busy():
     if not cookie or not csrf:
         raise RuntimeError("no session")
     before = store_bytes()
-    if b"backend\tgrok\t" not in before:
+    if b"backend\tclaude\t" not in before:
         raise RuntimeError("expected a stored backend row, got %r" % before)
     descriptor = os.open(meta_lock_path, os.O_RDWR)
     try:
@@ -4102,7 +4102,7 @@ def dials_lock_busy():
         if status != 200:
             raise RuntimeError("GET under a held lock: status %s body %r" % (status, raw))
         row = (json.loads(raw.decode("utf-8")).get("dials") or {}).get("backend") or {}
-        if row.get("value") != "grok" or row.get("source") != "store":
+        if row.get("value") != "claude" or row.get("source") != "store":
             raise RuntimeError("GET under a held lock: backend %r" % row)
     finally:
         os.close(descriptor)
@@ -4115,7 +4115,7 @@ def dials_lock_released():
     if status != 200:
         raise RuntimeError("post after release: status %s body %r" % (status, raw))
     dials = json.loads(raw.decode("utf-8")).get("dials") or {}
-    for key, value in (("gate", "strict"), ("backend", "grok")):
+    for key, value in (("gate", "strict"), ("backend", "claude")):
         row = dials.get(key) or {}
         if row.get("value") != value or row.get("source") != "store":
             raise RuntimeError("after release %s is %r" % (key, row))

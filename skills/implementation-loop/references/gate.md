@@ -6,7 +6,7 @@ Companion to SKILL.md §5.
 
 Interpret results according to the **gate policy** dial. Under `baseline` — the usual case — the bar is no new non-flake failures relative to the base branch. Environment-specific flakes that also fail on the base branch aren't regressions, but say so explicitly rather than waving them off, and don't let "it's probably flaky" absorb a real failure. `run-gate.sh --baseline <log>` does that comparison mechanically, which beats eyeballing two lists.
 
-When the gate is red, follow the **on-red** dial: `stop` hands it to the user; `iterate` sends the failures back to Codex for a bounded number of attempts. Either way the standard is the same — the code satisfies the test. If a proposed fix relaxes an assertion, deletes a case, or widens a tolerance to make red turn green, stop and raise it, because that converts a caught bug into a shipped one.
+When the gate is red, follow the **on-red** dial: `stop` hands it to the user; `iterate` sends the failures back to the implementer for a bounded number of attempts. Either way the standard is the same — the code satisfies the test. If a proposed fix relaxes an assertion, deletes a case, or widens a tolerance to make red turn green, stop and raise it, because that converts a caught bug into a shipped one.
 
 If the repo's CI is unreliable for reasons unrelated to code (billing, broken infra), the local gate is the real signal — note that plainly in the PR so a red CI badge isn't mistaken for a broken change.
 

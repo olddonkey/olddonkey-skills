@@ -12,14 +12,18 @@ update script has nothing to install.
 
 Components:
 
-- `skills/implementation-loop/` — the backend-neutral implementation loop skill.
-  Uniform backend modules live under `backends/{claude,codex,grok,cursor}/`, each with
-  `dispatch.sh`, `runtime.md`, `selftest.sh`, and `fixture-driver.sh`; grok also
-  has `verify-worktree.sh`. `backends/backends.tsv` registers their capabilities.
-  Shared suites and the opt-in real-backend gate live under `tests/`; the frozen
-  Codex matrix is `tests/codex-cases.tsv`. `scripts/run-gate.sh` remains the
-  backend-neutral gate, while the other eight `scripts/*.sh` executables are
-  one-release forwarding shims removed in 0.5.0. The shared observable interface
+- `skills/implementation-loop/` — the implementation loop skill: one model
+  implements, a model from another vendor reviews, and the session owns the
+  gate and publication. The two backend modules live under
+  `backends/{claude,codex}/`, each with `dispatch.sh`, `runtime.md`,
+  `selftest.sh`, and `fixture-driver.sh`. `backends/backends.tsv` registers
+  their capabilities. The grok and cursor-agent backends were removed in
+  2026-10 and stay in main's history; the journal, index, and console still
+  read their old state and records. Shared suites and the opt-in real-backend
+  gate live under `tests/`; the frozen Codex matrix is `tests/codex-cases.tsv`.
+  `scripts/run-gate.sh` remains the backend-neutral gate, while
+  `scripts/codex-dispatch.sh` and `scripts/selftest.sh` are one-release
+  forwarding shims removed in 0.5.0. The shared observable interface
   is recorded in `references/dispatch-contract.md` and enforced by the contract
   suites. `scripts/loop-coordinator` is the foreground, headless coordinator:
   it drafts specs through a judge, records engineer approval, and performs a
@@ -50,7 +54,8 @@ Components:
 `.github/workflows/selftest.yml` runs two jobs. Reproduce locally from the repo
 root in this order — all suites are self-contained, need no network, and the
 backend CLIs are **not** required (they are only needed to dispatch a live
-run):
+run). A suite passes when it exits 0 and prints its `PASS` summary line with
+no failed checks; check counts move with every change and are not pinned here.
 
 1. `bash -n` syntax checks on every shipped shell script: the builder and its
    selftest, backend modules and fixture drivers, shared tests, the gate, all
@@ -58,59 +63,63 @@ run):
    scripts.
 2. **Generated Cursor package checks:** `bash build.sh --check`, two builds into
    separate temporary destinations with byte-identical external inventories,
-   then `bash tests/build-selftest.sh` (expect `selftest: PASS (21 checks)`).
+   then `bash tests/build-selftest.sh`.
    The inventory records path, type, mode, and SHA-256 independently of the
    embedded manifest. Edit `skills/` or `hosts/cursor/`, run `bash build.sh`,
    and record the version decision in `hosts/cursor/version-decision.tsv`.
 3. Playbooks must stay platform-neutral: no `read-only` / `investigate` words
    and no `codex-dispatch` references anywhere under either
    `references/playbooks/` tree.
-4. `bash skills/implementation-loop/backends/codex/selftest.sh` — expect
-   `selftest: PASS (267 checks)`, then
-   `bash skills/implementation-loop/tests/gate-selftest.sh` — expect
-   `selftest: PASS (207 checks)`. Their split total is 474. The Codex cases
+4. `bash skills/implementation-loop/backends/codex/selftest.sh`, then
+   `bash skills/implementation-loop/tests/gate-selftest.sh`. The Codex cases
    use python3 for secure state, argv, and fixture validation; python3 3.11+ is
    part of the repo toolchain. The Codex suite also starts, signals, and kills
    real stub processes to cover stop signals and `--recover-stale`; it needs no
    network and no codex CLI.
-5. `bash skills/implementation-loop/backends/grok/selftest.sh` — expect
-   `selftest: PASS (276 checks)`.
-6. `bash skills/implementation-loop/backends/cursor/selftest.sh` — expect
-   `selftest: PASS (142 checks)`.
-   `bash skills/implementation-loop/backends/claude/selftest.sh` — expect
-   `selftest: PASS (307 checks)`.
-7. `bash skills/implementation-loop/tests/journal-selftest.sh` — expect
-   `selftest: PASS (268 checks)`; `bash skills/implementation-loop/tests/index-selftest.sh`
-   — expect `selftest: PASS (106 checks)`;
-   `bash skills/implementation-loop/tests/console-selftest.sh` — expect
-   `selftest: PASS (165 checks)`; and
-   `bash skills/implementation-loop/tests/calibration-selftest.sh` — expect
-   `selftest: PASS (121 checks)`. The journal, console, and calibration suites
-   each run `tests/link-count-cases.py`, which loads that script's Python body
-   and calls its `validate_regular` directly.
-8. `bash skills/implementation-loop/tests/contract-core.sh`,
+5. `bash skills/implementation-loop/backends/claude/selftest.sh`.
+6. `bash skills/implementation-loop/tests/journal-selftest.sh`,
+   `bash skills/implementation-loop/tests/index-selftest.sh`,
+   `bash skills/implementation-loop/tests/console-selftest.sh`, and
+   `bash skills/implementation-loop/tests/calibration-selftest.sh`. The
+   journal, console, and calibration suites each run
+   `tests/link-count-cases.py`, which loads that script's Python body and
+   calls its `validate_regular` directly.
+7. `bash skills/implementation-loop/tests/contract-core.sh`,
    `bash skills/implementation-loop/tests/contract-negative.sh`, and
-   `bash skills/implementation-loop/tests/shim-selftest.sh` — expect all green.
-   The contract-core per-backend counts are claude 64, codex 66, cursor 70,
-   and grok 66. Contract-negative expects
-   `contract-negative: PASS (44 checks; 22 broken adapters rejected)`.
-9. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
-   `scripts/loop-evidence` record card) — expect `selftest: PASS (157 checks)`.
-10. `bash skills/implementation-loop/tests/coordinator-selftest.sh` — expect
-    `selftest: PASS (735 checks)`. It uses only local temporary repositories
-    and backend CLI stubs, and never calls a real agent. `COORD_SELFTEST_JOBS`
-    defaults to 4; set it to 1 for declaration-order serial execution.
-11. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`
-   — expect `selftest: PASS (207 checks)`.
-12. `bash install-cursor-selftest.sh` — expect `selftest: PASS (64 checks)`.
-13. Packaging checks: both marketplace JSON manifests must parse; every
+   `bash skills/implementation-loop/tests/shim-selftest.sh`. Contract-core runs
+   every registered backend; contract-negative must report every broken
+   adapter rejected.
+8. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
+   `scripts/loop-evidence` record card).
+9. `bash skills/implementation-loop/tests/coordinator-selftest.sh`. It uses
+   only local temporary repositories and backend CLI stubs, and never calls a
+   real agent. `COORD_SELFTEST_JOBS` defaults to 4; set it to 1 for
+   declaration-order serial execution.
+10. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`.
+11. `bash install-cursor-selftest.sh`.
+12. Packaging checks: both marketplace JSON manifests must parse; every
    `SKILL.md` (under `skills/` and `cursor-implementation-loop/skills/`) must
    have non-empty `name:` and `description:` frontmatter; engineering-mode and
-   Codex-loop Markdown must have no dangling relative links.
-14. `tree-oid` job (runs on ubuntu **and** macos):
+   implementation-loop Markdown must have no dangling relative links.
+13. `tree-oid` job (runs on ubuntu **and** macos):
    `bash skills/engineering-mode/scripts/tree-oid-selftest.sh` and the
-   Cursor copy — expect `selftest: PASS (202 checks)` each. Keep these scripts
-   portable across GNU and BSD userlands.
+   Cursor copy. Keep these scripts portable across GNU and BSD userlands.
+
+## Process rules (keep the skill small)
+
+These come from the 2026-10 review that found the loop had grown to ~71k lines
+around machinery nothing called.
+
+- **Plan review stops at 3 rounds.** Every plan-review prompt must answer
+  "Does this part have a caller now? What happens if we don't build it?" for
+  each part of the plan. Adversarial review only finds holes and never says "don't
+  build this", so an unbounded review keeps adding mechanism.
+- **No caller, no main.** A new subsystem reaches main only when `SKILL.md`
+  has a step that uses it. Code nothing calls stays on its branch or in
+  `plans/`.
+- **No pinned check counts.** This file and CI check that a suite passes, not
+  how many checks it has, so a change never needs a commit just to update
+  numbers.
 
 ## Shell gotcha: locale prefixes in forked shells
 
@@ -125,9 +134,9 @@ commands only, not shell functions or builtins.
 ## Manual backend integration gate
 
 `skills/implementation-loop/tests/integration-test.sh` is the manual,
-opt-in pre-release gate for backend changes. It exercises the real claude, codex, grok,
-and cursor-agent sandboxes, needs authenticated CLIs, and makes real API calls.
-`--backend claude|grok|cursor|codex|all` is repeatable and deduplicated; `--require
+opt-in pre-release gate for backend changes. It exercises the real claude and
+codex sandboxes, needs authenticated CLIs, and makes real API calls.
+`--backend claude|codex|all` is repeatable and deduplicated; `--require
 codex` implies codex and fails unless every frozen non-managed Codex case runs
 exactly once with no skip/failure and complete provenance. Unavailable or
 logged-out backends otherwise remain skips. `--require claude` implies claude and

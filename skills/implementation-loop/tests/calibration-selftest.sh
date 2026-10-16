@@ -310,7 +310,7 @@ fi
 # ---------------------------------------------------------------------------
 WS_RT="$(workspace roundtrip)"
 run_cmd set-policy-import "$CAL" set --workspace "$WS_RT" \
-  --key backend --value grok --set-by import-confirmed --provenance "from-memory"
+  --key backend --value claude --set-by import-confirmed --provenance "from-memory"
 expect_status 0 "roundtrip: policy set_by=import-confirmed is accepted"
 run_cmd show-policy-import "$CAL" show --workspace "$WS_RT" --json
 expect_status 0 "roundtrip: show after policy import"
@@ -320,7 +320,7 @@ doc = json.loads(open(sys.argv[1], encoding="utf-8").read())
 row = doc["dials"]["backend"]
 if doc.get("store") != "present":
     raise SystemExit("store")
-if row["value"] != "grok" or row["source"] != "store":
+if row["value"] != "claude" or row["source"] != "store":
     raise SystemExit("value/source")
 if row["set_by"] != "import-confirmed" or row["scope"] != "policy":
     raise SystemExit("set_by/scope")
@@ -437,7 +437,7 @@ reject_case schema "$WS_SCHEMA" "schema" \
 
 WS_A="$(workspace cross-a)"
 WS_B="$(workspace cross-b)"
-run_cmd set-a "$CAL" set --workspace "$WS_A" --key backend --value grok --set-by console
+run_cmd set-a "$CAL" set --workspace "$WS_A" --key backend --value claude --set-by console
 expect_status 0 "reject workspace-mismatch: seed workspace A"
 STORE_A="$(store_file "$WS_A")"
 STORE_B="$(store_file "$WS_B")"
@@ -459,7 +459,7 @@ reject_case key-mismatch "$WS_KEYMIS" "workspace_key" true
 
 WS_DUP="$(workspace dup)"
 write_store "$WS_DUP" \
-  $'backend\tcodex\tpolicy\tconsole\t2026-08-18T00:00:00Z\tx\nbackend\tgrok\tpolicy\tconsole\t2026-08-18T00:00:01Z\ty'
+  $'backend\tcodex\tpolicy\tconsole\t2026-08-18T00:00:00Z\tx\nbackend\tclaude\tpolicy\tconsole\t2026-08-18T00:00:01Z\ty'
 reject_case duplicate "$WS_DUP" "duplicate" true
 
 WS_UNKKEY="$(workspace unkkey)"
@@ -471,6 +471,11 @@ WS_UNKVAL="$(workspace unkval)"
 write_store "$WS_UNKVAL" \
   $'backend\tnope\tpolicy\tconsole\t2026-08-18T00:00:00Z\tx'
 reject_case unknown-value "$WS_UNKVAL" "unknown value" true
+
+WS_ARCHIVED="$(workspace archived)"
+write_store "$WS_ARCHIVED" \
+  $'backend\tcursor-agent\tpolicy\tconsole\t2026-08-18T00:00:00Z\tx'
+reject_case archived-backend "$WS_ARCHIVED" "unknown value" true
 
 WS_UNKSCOPE="$(workspace unkscope)"
 write_store "$WS_UNKSCOPE" \
@@ -530,7 +535,7 @@ fi
 STORE_CLOSED="$(store_file "$WS_CLOSED")"
 cp "$STORE_CLOSED" "$TMP_ROOT/closed-before.tsv"
 run_cmd closed-set "$CAL" set --workspace "$WS_CLOSED" \
-  --key backend --value grok --set-by console
+  --key backend --value claude --set-by console
 expect_status 6 "rejected-set: exits 6"
 if cmp -s "$STORE_CLOSED" "$TMP_ROOT/closed-before.tsv"; then
   pass "rejected-set: store file is byte-identical"
@@ -570,7 +575,7 @@ fi
 # ---------------------------------------------------------------------------
 WS_D4A="$(workspace d4a)"
 run_cmd d4a-seed "$CAL" set --workspace "$WS_D4A" \
-  --key backend --value grok --set-by console
+  --key backend --value claude --set-by console
 expect_status 0 "d4a: seed a valid store"
 STORE_D4A="$(store_file "$WS_D4A")"
 CAL_DIR="$(dirname "$STORE_D4A")"
@@ -674,14 +679,14 @@ for round in $(seq 1 "$CONC_ROUNDS"); do
   WS_CONC="$(workspace "concurrent-$round")"
   printf '== round %s ==\n' "$round" >>"$CONC_LOG"
   parallel_writes "$WS_CONC" "$CONC_LOG" \
-    set:backend:grok set:stop:pr set:cadence:continuous \
+    set:backend:claude set:stop:pr set:cadence:continuous \
     set:dispatch-mode:read-only set:gate:strict set:on-red:iterate set:depth:deep
   if [[ $PARALLEL_FAILED -ne 0 ]]; then
     conc_exit_bad=$((conc_exit_bad + 1))
     printf 'round %s: %s writer(s) exited nonzero\n' "$round" "$PARALLEL_FAILED" >>"$CONC_LOG"
   fi
   if ! stored_rows_are "$WS_CONC" "$CONC_LOG" \
-    backend=grok stop=pr cadence=continuous dispatch-mode=read-only \
+    backend=claude stop=pr cadence=continuous dispatch-mode=read-only \
     gate=strict on-red=iterate depth=deep; then
     conc_rows_bad=$((conc_rows_bad + 1))
   fi
@@ -720,7 +725,7 @@ for round in $(seq 1 "$MIX_ROUNDS"); do
   if ! "$JOURNAL" begin-run --workspace "$WS_MIX" >>"$MIX_LOG" 2>&1; then
     mix_seed_bad=$((mix_seed_bad + 1))
   fi
-  for seed in backend:grok stop:pr cadence:continuous; do
+  for seed in backend:claude stop:pr cadence:continuous; do
     if ! "$CAL" set --workspace "$WS_MIX" --key "${seed%%:*}" --value "${seed#*:}" \
       --set-by console >>"$MIX_LOG" 2>&1; then
       mix_seed_bad=$((mix_seed_bad + 1))
@@ -772,7 +777,7 @@ CASE_STDERR=""
 # ---------------------------------------------------------------------------
 WS_LOCK="$(workspace lock)"
 run_cmd lock-seed "$CAL" set --workspace "$WS_LOCK" \
-  --key backend --value grok --set-by console
+  --key backend --value claude --set-by console
 expect_status 0 "lock: seed a store"
 STORE_LOCK="$(store_file "$WS_LOCK")"
 META_LOCK="$(journal_dir "$WS_LOCK")/meta.lock"
@@ -817,7 +822,7 @@ fi
 
 run_cmd lock-show "$CAL" show --workspace "$WS_LOCK" --json
 expect_status 0 "lock: show does not wait for the lock"
-expect_output stdout '"backend":{"value":"grok"' "lock: show still reads the stored row"
+expect_output stdout '"backend":{"value":"claude"' "lock: show still reads the stored row"
 
 # A writer that starts while the lock is held waits, then lands on release.
 env LOOP_JOURNAL_LOCK_TIMEOUT_SEC=60 "$CAL" set --workspace "$WS_LOCK" \
@@ -846,7 +851,7 @@ expect_status 0 "lock: the refused set succeeds after release"
 CASE_STDOUT=""
 CASE_STDERR="$TMP_ROOT/lock-rows.log"
 : >"$CASE_STDERR"
-if stored_rows_are "$WS_LOCK" "$CASE_STDERR" backend=grok depth=deep gate=strict; then
+if stored_rows_are "$WS_LOCK" "$CASE_STDERR" backend=claude depth=deep gate=strict; then
   pass "lock: after release the store holds the old row and both new rows"
 else
   fail "lock: after release the store holds the old row and both new rows"
@@ -879,7 +884,7 @@ else
 fi
 
 run_cmd noj-set "$CAL" set --workspace "$WS_NOJ" \
-  --key backend --value grok --set-by console
+  --key backend --value claude --set-by console
 expect_status 0 "no-journal: first set exits 0"
 if python3 - "$JDIR_NOJ" >"$TMP_ROOT/noj-skeleton.stdout" 2>"$TMP_ROOT/noj-skeleton.stderr" <<'PY'
 import os, stat, sys
@@ -929,7 +934,7 @@ expect_status 0 "no-journal: set still works once the journal owns the store"
 CASE_STDOUT=""
 CASE_STDERR="$TMP_ROOT/noj-rows.log"
 : >"$CASE_STDERR"
-if stored_rows_are "$WS_NOJ" "$CASE_STDERR" backend=grok gate=strict; then
+if stored_rows_are "$WS_NOJ" "$CASE_STDERR" backend=claude gate=strict; then
   pass "no-journal: both rows are stored"
 else
   fail "no-journal: both rows are stored"
@@ -940,7 +945,7 @@ fi
 # ---------------------------------------------------------------------------
 WS_LD4A="$(workspace lockd4a)"
 run_cmd ld4a-seed "$CAL" set --workspace "$WS_LD4A" \
-  --key backend --value grok --set-by console
+  --key backend --value claude --set-by console
 expect_status 0 "lock d4a: seed a store"
 STORE_LD4A="$(store_file "$WS_LD4A")"
 JDIR_LD4A="$(journal_dir "$WS_LD4A")"

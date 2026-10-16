@@ -15,7 +15,7 @@
 
 Three Claude Code skills so far, plus a Cursor Plugin that ships two engineering skills:
 
-- [`implementation-loop`](#implementation-loop) — delegate implementation to **Codex, grok, or cursor-agent** without delegating judgment: Claude reviews the real diff, runs the full test gate, and ships only what it would sign its name to. Those three are the agent-driven `backend` dial; Claude Code is also shipped as a fourth backend module for coordinator use.
+- [`implementation-loop`](#implementation-loop) — one model writes the code, a model from another vendor reviews it: delegate implementation to **Codex or a sandboxed Claude Code** without delegating judgment. The session reviews the real diff (with a Codex cross-review when Claude also wrote it), runs the full test gate, and ships only what it would sign its name to.
 - `engineering-mode` — goal-first engineering ownership: investigate, design, and plan, then drive `implementation-loop` unit by unit.
 - [`cursor-implementation-loop`](#cursor-implementation-loop) — Cursor Plugin with the plan-first implementation loop and the goal-first `cursor-engineering-mode` wrapper; the parent agent reviews, gates, and publishes while an implementer subagent writes code.
 - [`web-slides`](#web-slides) — turn material or outlines into click-driven 16:9 HTML slide decks for live presenting, with 24 built-in themes and a presenter view that keeps speaker notes off the shared screen.
@@ -34,7 +34,7 @@ Inside Claude Code, add the marketplace once, then install the skills you want:
 /reload-plugins
 ```
 
-These plugins were renamed by dropping the `codex-` prefix when the loop gained Codex, grok, and cursor-agent backends. A Claude Code coordinator backend module is also available. If the former Codex-prefixed plugin IDs are installed, uninstall them and install `implementation-loop` and `engineering-mode` instead.
+These plugins were renamed by dropping the `codex-` prefix when the loop gained more than one backend. If the former Codex-prefixed plugin IDs are installed, uninstall them and install `implementation-loop` and `engineering-mode` instead. The grok and cursor-agent backends were removed in 2026-10 and remain in the git history before that change; the Cursor plugin below is separate and unaffected.
 
 The implementation-loop adapter scripts moved from `scripts/` into
 `backends/<name>/` for the 0.4.x release. The old executable paths forward for
@@ -121,20 +121,18 @@ Codex prerequisites: `engineering-mode` → `implementation-loop` → authentica
 
 ## implementation-loop
 
-**The agent-driven loop delegates to Codex, grok, or cursor-agent. A coordinator can also use the Claude Code backend module.**
+**One model writes the code, a model from another vendor reviews it, and the session owns the gate and the publish.**
 
 The new [loop coordinator](./skills/implementation-loop/references/coordinator.md) can draft a unit spec with a judge agent, record the engineer's approval, and review an existing working tree diff. In this unit it does not run an implementer, gate, commit, or publish.
 
-The implementer implements and runs focused tests. Claude reviews the real diff, runs the full gate, and ships only what it would sign its name to.
+The implementer implements and runs focused tests. The session reviews the real diff, runs the full gate, and ships only what it would sign its name to.
 
-**The agent-driven backend dial offers Codex, grok, and cursor-agent.** The default is Codex (setup below); the same loop and the same review-and-gate discipline apply whichever backend implements. Each backend's git and publication boundary works differently and is documented in its own runtime reference — read the selected backend's before its first dispatch:
+**The backend dial offers Codex and Claude Code.** The default is Codex (setup below). Both directions work: Codex implements and Claude reviews, or the Claude Code backend implements and Codex cross-reviews each round as a read-only dispatch. The writer and the reviewer are always different models. Each backend's git and publication boundary works differently and is documented in its own runtime reference — read the selected backend's before its first dispatch:
 
-- **Claude Code (coordinator module)** — git-less copies, a fixed tool list, the CLI OS sandbox, and a checked patch. It is not a choice of the agent-driven loop’s `backend` dial. [`backends/claude/runtime.md`](./skills/implementation-loop/backends/claude/runtime.md).
 - **Codex** — pinned `codex exec` policy, loop-owned exact-id state, and policy-banner verification. [`backends/codex/runtime.md`](./skills/implementation-loop/backends/codex/runtime.md).
-- **grok** — a fail-closed custom sandbox, linked-worktree placement, and a per-machine tuple allowlist. [`backends/grok/runtime.md`](./skills/implementation-loop/backends/grok/runtime.md).
-- **cursor-agent** — a git-less-copy architecture: the implementer edits a `.git`-free copy inside a network-denied sandbox, and the orchestrator applies the captured patch to the real repo (it never runs with `--force`/`--yolo`, which would bypass the sandbox). [`backends/cursor/runtime.md`](./skills/implementation-loop/backends/cursor/runtime.md).
+- **Claude Code** — `claude -p` in git-less copies, a fixed tool list, the CLI OS sandbox, and a checked patch. [`backends/claude/runtime.md`](./skills/implementation-loop/backends/claude/runtime.md).
 
-grok and cursor-agent both default to Grok 4.6 at `xhigh` as the implementer model; Claude Code has no adapter model or effort default. `--model` is a passthrough on every backend — cursor-agent in particular reaches its whole account catalog (Claude, GPT-5.x, Gemini, Composer, Grok tiers), where the effort level is part of the model id.
+Neither adapter sets a default model or effort; `--model` and `--effort` pass through to the CLI.
 
 ### Setup
 
@@ -152,6 +150,8 @@ You can sign in with a ChatGPT account, including Free, or an OpenAI API key. Al
 codex update
 ```
 
+The Claude Code backend needs only the `claude` CLI you already run, logged in (`claude auth status`).
+
 ### Start your first loop
 
 Open the target repository in Claude Code and ask naturally:
@@ -165,17 +165,17 @@ Natural-language invocation works with both marketplace and manual installations
 **decompose → dispatch → review → iterate → gate → publish → next**
 
 1. Claude turns a plan, spec, or TODO into one coherent, reviewable unit.
-2. Codex implements it in the working tree and runs only the focused tests named in the dispatch.
-3. Claude reads the actual diff, checks the whole working tree, and dispatches concrete findings again; it uses the same exact Codex session only after resume has passed the required real-backend matrix, and otherwise carries context in a fresh prompt.
+2. The implementer (Codex in the working tree, or Claude Code in a git-less copy whose patch is applied back) implements it and runs only the focused tests named in the dispatch.
+3. Claude reads the actual diff and checks the whole working tree. When the Claude Code backend wrote it, Codex also cross-reviews it read-only. Claude dispatches the findings that hold up again; it uses the same exact Codex session only after resume has passed the required real-backend matrix, and otherwise carries context in a fresh prompt.
 4. Claude runs the full test suite itself and interprets it under the chosen gate policy.
 5. Claude stops at the configured boundary: working tree, commit, PR, or an explicitly authorized merge.
 
-Codex's summary is a map of where to look, not proof that the change is correct. The diff and the gate are the evidence.
+The implementer's summary is a map of where to look, not proof that the change is correct. The diff and the gate are the evidence.
 
 ### Why use it
 
 - **Evidence-first review.** The checklist targets delegated-change failures that generic review often misses: weakened tests, silent default regressions, gitignored files, new dependencies, and softened enforcement points.
-- **Bounded autonomy.** Seven controls settle how far the loop may act, how deeply it reviews, who implements fixes, and what happens when the gate is red. They are chosen once per repository instead of re-litigated on every unit.
+- **Bounded autonomy.** Eight controls settle which backend implements, how far the loop may act, how deeply it reviews, who implements fixes, and what happens when the gate is red. They are chosen once per repository instead of re-litigated on every unit.
 - **Expensive lessons encoded once.** The workflow distinguishes focused tests from the full gate, detects stuck foreground runs from retained transcripts, and covers bounded interruption plus orphaned-process cleanup.
 - **Uniform backend modules.** Each backend ships `dispatch.sh`, `runtime.md`, `selftest.sh`, and a contract fixture driver under [`backends/`](./skills/implementation-loop/backends/); [`run-gate.sh`](./skills/implementation-loop/scripts/run-gate.sh) remains the shared backend-neutral gate.
 
@@ -187,20 +187,21 @@ The skill has conservative first-run choices. Specify only the values you want t
 
 | Control | Typical first run | Purpose |
 | --- | --- | --- |
+| Backend | `codex` | Choose Codex or Claude Code as the implementer; Claude Code adds a Codex cross-review each round |
 | Stop point | `pr` | Leave changes in the working tree, commit them, open a PR, or merge when explicitly authorized |
 | Dispatch mode | `implement` | Choose an implementation run or a read-only investigation |
 | Gate policy | `baseline` | Require no new non-flake failures, zero failures, or explicitly skip the gate for non-runtime changes |
 | On gate red | `stop` | Stop for the user or send failures back for a bounded number of iterations |
 | Review depth | `standard` | Choose light, standard, or independent deep review |
 | Cadence | `confirm` | Confirm between units or continue automatically when the publish strategy makes that safe |
-| Fix lane | `codex` | Route bug fixes through Codex as fresh units; optionally allow trivial mechanical one-liners to be fixed directly |
+| Fix lane | `codex` | Route bug fixes through the implementer as fresh units; optionally allow trivial mechanical one-liners to be fixed directly |
 
-Model and effort inherit the user's Codex configuration unless explicitly overridden for a task.
+Model and effort inherit the selected CLI's configuration unless explicitly overridden for a task.
 
 ### Compatibility and limits
 
-- The instructions use the open `SKILL.md` format. The Claude marketplace hosts the skill, while the Codex backend calls an authenticated `codex` CLI directly through plain `codex exec`.
-- Other agents can reuse the workflow through the shipped Claude Code, grok, and cursor-agent adapters or an adapter implementing the same dispatch contract.
+- The instructions use the open `SKILL.md` format. The Claude marketplace hosts the skill, while the backends call an authenticated `codex` CLI through plain `codex exec` or the `claude` CLI through `claude -p`.
+- Other agents can reuse the workflow through the shipped Codex and Claude Code adapters or an adapter implementing the same dispatch contract.
 - The scripts require Bash, Python 3.11+, the selected backend CLI, and common Unix command-line tools. They were developed on macOS.
 - Codex runs on the same checkout and machine-local environment as Claude Code. Its usage counts toward your ChatGPT or API limits; see [Codex pricing](https://developers.openai.com/codex/pricing).
 
