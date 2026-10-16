@@ -2,8 +2,7 @@
 
 **Status: shipped.** This backend implements the shared
 [dispatch contract](../../references/dispatch-contract.md). It is one of the
-two options on the loop's `backend` dial, and the coordinator can use it as a
-judge or an implementer. A Claude session choosing Claude as its implementer is
+two options on the loop's `backend` dial. A Claude session choosing Claude as its implementer is
 the same-vendor case: each review round adds a read-only Codex cross-review, as
 [dials.md](../../references/dials.md) and SKILL.md §3 describe.
 
@@ -95,8 +94,7 @@ The tool restriction and Bash sandbox are enforced by the Claude CLI. The
 adapter checks the CLI-reported granted tool list **after** the run; that
 check is detection, not containment. The adapter does not itself sandbox the
 child. The real worktree is outside the child CWD, and the dispatcher applies
-only a captured, validated patch. The orchestrator, the loop's session or the
-coordinator, still owns diff review, gates, commit, and publication. A stub selftest validates the adapter's
+only a captured, validated patch. The loop's session still owns diff review, gates, commit, and publication. A stub selftest validates the adapter's
 protocol; real CLI containment requires the opt-in
 [integration gate](../../tests/integration-test.sh).
 

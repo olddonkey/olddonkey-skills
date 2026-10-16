@@ -25,10 +25,9 @@ Components:
   `scripts/codex-dispatch.sh` and `scripts/selftest.sh` are one-release
   forwarding shims removed in 0.5.0. The shared observable interface
   is recorded in `references/dispatch-contract.md` and enforced by the contract
-  suites. `scripts/loop-coordinator` is the foreground, headless coordinator:
-  it drafts specs through a judge, records engineer approval, and performs a
-  diagnostic diff review. Its operator guide is `references/coordinator.md`;
-  `tests/coordinator-selftest.sh` uses temporary repositories and CLI stubs.
+  suites. The headless `loop-coordinator` (collab-canvas) was removed in
+  2026-10 because `SKILL.md` never called it; it stays in main's history and on
+  the `canvas-u3-run` branch.
 - `skills/engineering-mode/` — goal-first wrapper over the loop. Shared
   playbooks in `references/playbooks/`, plus `scripts/tree-oid.sh` and its
   selftest.
@@ -91,17 +90,13 @@ no failed checks; check counts move with every change and are not pinned here.
    adapter rejected.
 8. `bash skills/implementation-loop/tests/evidence-selftest.sh` (the
    `scripts/loop-evidence` record card).
-9. `bash skills/implementation-loop/tests/coordinator-selftest.sh`. It uses
-   only local temporary repositories and backend CLI stubs, and never calls a
-   real agent. `COORD_SELFTEST_JOBS` defaults to 4; set it to 1 for
-   declaration-order serial execution.
-10. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`.
-11. `bash install-cursor-selftest.sh`.
-12. Packaging checks: both marketplace JSON manifests must parse; every
+9. `bash cursor-implementation-loop/skills/cursor-implementation-loop/scripts/gate-selftest.sh`.
+10. `bash install-cursor-selftest.sh`.
+11. Packaging checks: both marketplace JSON manifests must parse; every
    `SKILL.md` (under `skills/` and `cursor-implementation-loop/skills/`) must
    have non-empty `name:` and `description:` frontmatter; engineering-mode and
    implementation-loop Markdown must have no dangling relative links.
-13. `tree-oid` job (runs on ubuntu **and** macos):
+12. `tree-oid` job (runs on ubuntu **and** macos):
    `bash skills/engineering-mode/scripts/tree-oid-selftest.sh` and the
    Cursor copy. Keep these scripts portable across GNU and BSD userlands.
 

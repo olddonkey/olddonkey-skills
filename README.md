@@ -123,8 +123,6 @@ Codex prerequisites: `engineering-mode` → `implementation-loop` → authentica
 
 **One model writes the code, a model from another vendor reviews it, and the session owns the gate and the publish.**
 
-The new [loop coordinator](./skills/implementation-loop/references/coordinator.md) can draft a unit spec with a judge agent, record the engineer's approval, and review an existing working tree diff. In this unit it does not run an implementer, gate, commit, or publish.
-
 The implementer implements and runs focused tests. The session reviews the real diff, runs the full gate, and ships only what it would sign its name to.
 
 **The backend dial offers Codex and Claude Code.** The default is Codex (setup below). Both directions work: Codex implements and Claude reviews, or the Claude Code backend implements and Codex cross-reviews each round as a read-only dispatch. The writer and the reviewer are always different models. Each backend's git and publication boundary works differently and is documented in its own runtime reference — read the selected backend's before its first dispatch:
